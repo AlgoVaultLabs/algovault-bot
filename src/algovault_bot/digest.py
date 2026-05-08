@@ -35,11 +35,6 @@ def render_digest(db: Database) -> str:
         cur.execute("SELECT COUNT(*) FROM subscribers WHERE last_seen_at >= ?", (day_ago,))
         active_24h = int(cur.fetchone()[0])
 
-        cur.execute("SELECT COALESCE(SUM(alerts_24h_regime_count), 0) FROM subscribers")
-        regime_24h = int(cur.fetchone()[0])
-        cur.execute("SELECT COALESCE(SUM(alerts_24h_calls_count), 0) FROM subscribers")
-        calls_24h = int(cur.fetchone()[0])
-
         cur.execute("SELECT COALESCE(SUM(total_regime_alerts), 0) FROM subscribers")
         regime_total = int(cur.fetchone()[0])
         cur.execute("SELECT COALESCE(SUM(total_call_alerts), 0) FROM subscribers")
@@ -48,23 +43,12 @@ def render_digest(db: Database) -> str:
         cur.execute("SELECT COUNT(*) FROM watchlists")
         watch_total = int(cur.fetchone()[0])
 
-        cur.execute(
-            "SELECT COUNT(*) FROM subscribers WHERE calls_burn_suppressed_until IS NOT NULL "
-            "AND calls_burn_suppressed_until > ?", (now.isoformat(),),
-        )
-        suppressed = int(cur.fetchone()[0])
-
     return (
         "🤖 algovault-bot — daily digest "
         f"({now.strftime('%Y-%m-%d %H:%M UTC')})\n"
         f"\n"
         f"👥 Subscribers: {total_subs} (active 24h: {active_24h})\n"
         f"📝 Watchlist entries: {watch_total}\n"
-        f"\n"
-        f"24h alerts:\n"
-        f"  📊 Regime: {regime_24h}\n"
-        f"  📈 Calls: {calls_24h}\n"
-        f"  🔇 Burn-suppressed users: {suppressed}\n"
         f"\n"
         f"All-time alerts:\n"
         f"  📊 Regime: {regime_total}\n"

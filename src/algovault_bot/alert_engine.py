@@ -40,16 +40,7 @@ from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
 from .messages import signup_url
 from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState, consume_quota, get_quota_state
-from .rate_limit import (
-    CALLS_24H_CAP,
-    QUOTA_BURN_24H_CAP,
-    REGIME_24H_CAP,
-    TELEGRAM_GLOBAL_SEMAPHORE,
-    get_rate_limit_state,
-    increment_calls_count,
-    increment_regime_count,
-    trip_burn_suppression,
-)
+from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
 
 
@@ -173,12 +164,6 @@ async def _push(bot: Bot, chat_id: int, text: str) -> bool:
             return False
 
 
-_BURN_SUPPRESSION_NOTICE = (
-    "⚠️ You're consuming quota faster than expected — alerts paused for 24h "
-    "to avoid burning through your free tier in one day. Upgrade to remove the cap."
-)
-
-
 def _maybe_int(v: Any, default: int = 0) -> int:
     try:
         return int(v)
@@ -224,41 +209,30 @@ async def process_one_row(
 
                 # Flap suppression: only fire when streak >= 2 AND it differs from last_seen.
                 if new_streak >= 2 and current_regime != row.regime_last_seen:
-                    # C5 — per-user 24h regime cap (20).
-                    rl = get_rate_limit_state(db, row.chat_id)
-                    if rl.regime_capped():
-                        log.info(
-                            json.dumps(
-                                {"event": "rate_limit_regime", "chat_id": row.chat_id,
-                                 "count": rl.regime_count, "cap": REGIME_24H_CAP}
-                            )
+                    # C4 frequency-driven soft CTA on alerts #1, 3, 7, 15, then every 10.
+                    # No 24h cap — Telegram doesn't impose one, neither do we.
+                    next_count = db.increment_total_regime_alerts(row.chat_id)
+                    cta = regime_cta_text() if regime_alert_should_show_cta(next_count) else None
+                    text = format_regime_alert(
+                        row, row.regime_last_seen, current_regime, confidence, cta=cta,
+                    )
+                    if await _push(bot, row.chat_id, text):
+                        regime_seen = current_regime
+                        fetched["regime"] = "fired"
+                        if cta:
+                            db.increment_total_ctas_shown(row.chat_id)
+                        log_alert_event(
+                            "regime_alert_fired",
+                            chat_id=row.chat_id,
+                            coin=row.coin,
+                            timeframe=row.timeframe,
+                            exchange=row.exchange,
+                            from_regime=row.regime_last_seen,
+                            to_regime=current_regime,
+                            confidence=confidence,
+                            total_regime_alerts=next_count,
+                            cta_shown=bool(cta),
                         )
-                        fetched["regime"] = "rate_limited"
-                    else:
-                        # C4 frequency-driven soft CTA on alerts #1, 3, 7, 15, then every 10.
-                        next_count = db.increment_total_regime_alerts(row.chat_id)
-                        cta = regime_cta_text() if regime_alert_should_show_cta(next_count) else None
-                        text = format_regime_alert(
-                            row, row.regime_last_seen, current_regime, confidence, cta=cta,
-                        )
-                        if await _push(bot, row.chat_id, text):
-                            increment_regime_count(db, row.chat_id)
-                            regime_seen = current_regime
-                            fetched["regime"] = "fired"
-                            if cta:
-                                db.increment_total_ctas_shown(row.chat_id)
-                            log_alert_event(
-                                "regime_alert_fired",
-                                chat_id=row.chat_id,
-                                coin=row.coin,
-                                timeframe=row.timeframe,
-                                exchange=row.exchange,
-                                from_regime=row.regime_last_seen,
-                                to_regime=current_regime,
-                                confidence=confidence,
-                                total_regime_alerts=next_count,
-                                cta_shown=bool(cta),
-                            )
         except McpError as e:
             log.warning(
                 json.dumps({"event": "mcp_get_market_regime_failed", "err": str(e)[:200]})
@@ -279,74 +253,45 @@ async def process_one_row(
             fetched["trade_call"] = "ok"
 
             if call in ("BUY", "SELL"):
-                # C5 — per-user 24h gates (in order: quota-burn-suppression → calls cap).
-                rl = get_rate_limit_state(db, row.chat_id)
-                if rl.burn_suppression_active():
-                    log.info(
-                        json.dumps(
-                            {"event": "rate_limit_calls_burn_suppressed",
-                             "chat_id": row.chat_id, "until": rl.burn_suppressed_until.isoformat()}
-                        )
-                    )
-                    fetched["trade_call"] = "burn_suppressed"
-                elif rl.calls_capped():
-                    log.info(
-                        json.dumps(
-                            {"event": "rate_limit_calls", "chat_id": row.chat_id,
-                             "count": rl.calls_count, "cap": CALLS_24H_CAP}
-                        )
-                    )
-                    fetched["trade_call"] = "rate_limited"
+                # No 24h cap — only the 100/mo quota gate applies.
+                state = get_quota_state(db, row.chat_id)
+                if state.exhausted:
+                    # C4: send the exhausted-quota notice + quota_100 CTA + x402 fallback.
+                    cta = trade_call_cta_text(state)
+                    text = format_quota_exhausted_alert(row, call, cta)
+                    if await _push(bot, row.chat_id, text):
+                        fetched["trade_call"] = "exhausted_alert_sent"
+                        db.increment_total_ctas_shown(row.chat_id)
                 else:
-                    state = get_quota_state(db, row.chat_id)
-                    if state.exhausted:
-                        # C4: send the exhausted-quota notice + quota_100 CTA + x402 fallback.
-                        cta = trade_call_cta_text(state)
-                        text = format_quota_exhausted_alert(row, call, cta)
-                        if await _push(bot, row.chat_id, text):
-                            fetched["trade_call"] = "exhausted_alert_sent"
+                    cta = trade_call_cta_text(state)
+                    text = format_trade_call_alert(
+                        row,
+                        call,
+                        _maybe_int(tc_result.get("confidence")),
+                        _maybe_float(tc_result.get("price_at_signal") or tc_result.get("price")),
+                        tc_result.get("regime", "?"),
+                        tc_result.get("funding_state") or tc_result.get("funding", "?"),
+                        tc_result.get("reasoning"),
+                        state,
+                        cta=cta or None,
+                    )
+                    if await _push(bot, row.chat_id, text):
+                        consume_quota(db, row.chat_id)
+                        db.increment_total_call_alerts(row.chat_id)
+                        if cta:
                             db.increment_total_ctas_shown(row.chat_id)
-                    else:
-                        cta = trade_call_cta_text(state)
-                        text = format_trade_call_alert(
-                            row,
-                            call,
-                            _maybe_int(tc_result.get("confidence")),
-                            _maybe_float(tc_result.get("price_at_signal") or tc_result.get("price")),
-                            tc_result.get("regime", "?"),
-                            tc_result.get("funding_state") or tc_result.get("funding", "?"),
-                            tc_result.get("reasoning"),
-                            state,
-                            cta=cta or None,
+                        fetched["trade_call"] = "fired"
+                        log_alert_event(
+                            "trade_call_alert_fired",
+                            chat_id=row.chat_id,
+                            coin=row.coin,
+                            timeframe=row.timeframe,
+                            exchange=row.exchange,
+                            call=call,
+                            quota_used=state.used + 1,
+                            quota_total=state.total,
+                            cta_shown=bool(cta),
                         )
-                        if await _push(bot, row.chat_id, text):
-                            consume_quota(db, row.chat_id)
-                            db.increment_total_call_alerts(row.chat_id)
-                            new_rl = increment_calls_count(db, row.chat_id)
-                            if cta:
-                                db.increment_total_ctas_shown(row.chat_id)
-                            fetched["trade_call"] = "fired"
-                            log_alert_event(
-                                "trade_call_alert_fired",
-                                chat_id=row.chat_id,
-                                coin=row.coin,
-                                timeframe=row.timeframe,
-                                exchange=row.exchange,
-                                call=call,
-                                quota_used=state.used + 1,
-                                quota_total=state.total,
-                                cta_shown=bool(cta),
-                            )
-                            # Quota-burn protection: 50/24h → trip suppression
-                            # and send the one-time explanatory message.
-                            if new_rl.calls_count >= QUOTA_BURN_24H_CAP:
-                                trip_burn_suppression(db, row.chat_id)
-                                await _push(bot, row.chat_id, _BURN_SUPPRESSION_NOTICE)
-                                log_alert_event(
-                                    "quota_burn_suppression_tripped",
-                                    chat_id=row.chat_id,
-                                    calls_24h=new_rl.calls_count,
-                                )
             # HOLD verdicts are silently absorbed — no message, no quota tick (per spec).
         except McpError as e:
             log.warning(
