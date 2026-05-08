@@ -122,7 +122,11 @@ def format_trade_call_alert(
     ]
     if reasoning:
         parts.append(f"Reasoning: {reasoning[:280]}{'...' if len(reasoning) > 280 else ''}")
-    parts.append(f"📊 Quota: {quota.used}/{quota.total} free calls used this month")
+    # BOT-W2 C3: paid-tier-linked users see a tier badge instead of "47/100".
+    if quota.is_paid and quota.linked_tier:
+        parts.append(f"💎 {quota.linked_tier.capitalize()} plan — unlimited via bot")
+    else:
+        parts.append(f"📊 Quota: {quota.used}/{quota.total} free calls used this month")
     if cta:
         parts.append("")
         parts.append(cta)

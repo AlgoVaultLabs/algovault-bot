@@ -35,6 +35,12 @@ FREE_TIER_MONTHLY_QUOTA: Final = 100
 WINDOW_DAYS: Final = 30
 WINDOW = timedelta(days=WINDOW_DAYS)
 
+# BOT-W2 C3 — paid tiers bypass the bot-side 100/mo cap entirely. The user's
+# real Stripe-backed quota (3K/15K/100K) is enforced server-side by signal-MCP
+# on their direct API calls; bot-driven calls go through tier:'internal' which
+# doesn't tick any counter. Net: paid users get unlimited bot pushes.
+PAID_TIERS: Final[frozenset[str]] = frozenset({"starter", "pro", "enterprise", "x402"})
+
 
 @dataclass
 class QuotaState:
@@ -42,14 +48,26 @@ class QuotaState:
     total: int
     window_start: datetime | None
     pct_used: float
+    # BOT-W2 C3 — set when subscribers.linked_tier is in PAID_TIERS.
+    # Engine reads this to skip the quota gate + the quota line in the alert
+    # message + all 75/90/100% CTAs (the user is already paying).
+    linked_tier: str | None = None
 
     @property
     def remaining(self) -> int:
+        if self.linked_tier in PAID_TIERS:
+            return 10**9  # effectively unlimited; never hit ceiling
         return max(0, self.total - self.used)
 
     @property
     def exhausted(self) -> bool:
+        if self.linked_tier in PAID_TIERS:
+            return False
         return self.used >= self.total
+
+    @property
+    def is_paid(self) -> bool:
+        return self.linked_tier in PAID_TIERS
 
 
 def _now() -> datetime:
@@ -73,15 +91,22 @@ def _parse_ts(raw: str | None) -> datetime | None:
 
 
 def get_quota_state(db: Database, chat_id: int) -> QuotaState:
-    """Read the user's current quota state. Auto-rolls expired window."""
+    """Read the user's current quota state. Auto-rolls expired window.
+
+    BOT-W2 C3: when the subscriber is linked to a paid tier, the QuotaState's
+    ``linked_tier`` field is populated and the engine treats the user as
+    unlimited (skips the gate, omits the quota line, suppresses CTAs).
+    """
     row = db.get_subscriber(chat_id)
     if row is None:
-        return QuotaState(0, FREE_TIER_MONTHLY_QUOTA, None, 0.0)
+        return QuotaState(0, FREE_TIER_MONTHLY_QUOTA, None, 0.0, linked_tier=None)
 
     used = int(row["alert_count"] or 0)
     window_start = _parse_ts(row["alerts_window_start"])
+    linked_tier = row["linked_tier"]
 
-    # Window expired → reset counter.
+    # Window expired → reset counter (still applies to free-tier users; paid
+    # users don't tick the counter at all per ``consume_quota`` below).
     if window_start is not None and (_now() - window_start) > WINDOW:
         used = 0
         window_start = None
@@ -93,23 +118,25 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
             )
 
     pct = (used / FREE_TIER_MONTHLY_QUOTA) if FREE_TIER_MONTHLY_QUOTA else 0.0
-    return QuotaState(used, FREE_TIER_MONTHLY_QUOTA, window_start, pct)
+    return QuotaState(used, FREE_TIER_MONTHLY_QUOTA, window_start, pct, linked_tier=linked_tier)
 
 
 def consume_quota(db: Database, chat_id: int) -> QuotaState:
     """Increment the user's trade-call counter. Starts a new window if needed.
 
-    Called BEFORE actually pushing a trade-call alert. The bot must check
-    ``state.exhausted`` and route the user to the upgrade message if true,
-    instead of consuming + pushing.
+    BOT-W2 C3: paid-tier-linked users SKIP the increment entirely (no-op
+    return of current state). Their bot-pushed alerts don't count against
+    anything — not the bot's 100/mo, not signal-MCP's per-key quota (bot
+    calls go through tier:'internal' which bypasses the counter server-side).
 
-    Implementation note: when starting a new window we write the timestamp
-    via Python (canonical ISO 8601 with microseconds) rather than SQLite's
-    ``datetime('now')`` (second-precision, no tz). That way the next
-    ``get_quota_state`` call reads back the exact same value — no
-    microsecond drift across calls within the same window.
+    Free / unlinked users: same as W1 — increment + start a new 30-day window
+    if needed, write the timestamp via Python (canonical ISO 8601) so the
+    next ``get_quota_state`` reads back the exact same value (no microsecond
+    drift across calls within the same window).
     """
     state = get_quota_state(db, chat_id)
+    if state.is_paid:
+        return state  # no-op for paid tiers
     new_used = state.used + 1
     with db._cursor() as cur:
         if state.window_start is None:

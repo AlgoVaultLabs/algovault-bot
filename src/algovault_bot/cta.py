@@ -48,7 +48,12 @@ def trade_call_cta_text(state: QuotaState) -> str:
     """Returns the CTA snippet for a trade-call alert based on quota %, or ''.
 
     The caller decides whether to pre-pend a separator newline.
+
+    BOT-W2 C3: paid-tier-linked users get NO upgrade CTA — they're already
+    paying. Suppress at the source rather than relying on copywriting.
     """
+    if state.is_paid:
+        return ""
     if state.total <= 0:
         return ""
     pct = state.used / state.total
