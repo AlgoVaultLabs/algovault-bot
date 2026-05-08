@@ -29,23 +29,20 @@ from typing import Any
 from telegram import Bot
 from telegram.error import TelegramError
 
+from .cta import (
+    quota_exhausted_message,
+    regime_alert_should_show_cta,
+    regime_cta_text,
+    trade_call_cta_text,
+)
 from .db import Database, DEFAULT_DB_PATH
-from .mcp_client import McpClient, McpError, from_env as mcp_from_env
+from .mcp_client import McpClient, McpError
 from .messages import signup_url
 from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState, consume_quota, get_quota_state
 from .validators import TF_SECONDS
 
 
 log = logging.getLogger("algovault_bot.alert_engine")
-
-
-# C3 minimal CTA injection — full quota-threshold CTAs land in C4 (75/90/100%).
-def _trade_call_cta(state: QuotaState) -> str:
-    return ""  # populated in C4
-
-
-def _regime_alert_cta(_count: int) -> str:
-    return ""  # populated in C4
 
 
 # ── alert formatting ───────────────────────────────────────────
@@ -85,15 +82,23 @@ REGIME_GLYPH = {
 
 
 def format_regime_alert(
-    row: WatchRow, prev: str | None, current: str, confidence: int
+    row: WatchRow,
+    prev: str | None,
+    current: str,
+    confidence: int,
+    cta: str | None = None,
 ) -> str:
     prev_glyph = REGIME_GLYPH.get(prev or "", "")
     cur_glyph = REGIME_GLYPH.get(current, "")
-    return (
-        f"📊 Regime shift: {row.coin} {row.timeframe} on {row.exchange}\n"
-        f"{prev_glyph} {prev or 'UNKNOWN'} → {cur_glyph} {current}\n"
-        f"Confidence: {confidence}"
-    )
+    parts = [
+        f"📊 Regime shift: {row.coin} {row.timeframe} on {row.exchange}",
+        f"{prev_glyph} {prev or 'UNKNOWN'} → {cur_glyph} {current}",
+        f"Confidence: {confidence}",
+    ]
+    if cta:
+        parts.append("")
+        parts.append(cta)
+    return "\n".join(parts)
 
 
 def format_trade_call_alert(
@@ -105,6 +110,7 @@ def format_trade_call_alert(
     funding: str,
     reasoning: str | None,
     quota: QuotaState,
+    cta: str | None = None,
 ) -> str:
     glyph = "🟢" if call == "BUY" else "🔴"
     parts = [
@@ -115,7 +121,29 @@ def format_trade_call_alert(
     if reasoning:
         parts.append(f"Reasoning: {reasoning[:280]}{'...' if len(reasoning) > 280 else ''}")
     parts.append(f"📊 Quota: {quota.used}/{quota.total} free calls used this month")
+    if cta:
+        parts.append("")
+        parts.append(cta)
     return "\n".join(parts)
+
+
+def format_quota_exhausted_alert(row: WatchRow, call: str, cta: str) -> str:
+    """Sent in place of the trade-call alert when the user hit 100% quota.
+
+    Spec C4 lines 357-361: "bot relays signal-MCP's existing exhausted message
+    + adds quota_100 CTA + x402 fallback line". Under D1-C, signal-MCP doesn't
+    see this user's quota — the bot owns the gate, and we craft the same
+    message shape locally (mirrored from src/lib/license.ts:getQuotaExhaustedMessage).
+    """
+    glyph = "🟢" if call == "BUY" else "🔴"
+    return "\n".join(
+        [
+            f"{glyph} {call} signal blocked — {row.coin} {row.timeframe} on {row.exchange}",
+            quota_exhausted_message(),
+            "",
+            cta,
+        ]
+    )
 
 
 # ── one-shot cron tick ─────────────────────────────────────────
@@ -177,12 +205,17 @@ async def process_one_row(
 
                 # Flap suppression: only fire when streak >= 2 AND it differs from last_seen.
                 if new_streak >= 2 and current_regime != row.regime_last_seen:
+                    # C4 frequency-driven soft CTA on alerts #1, 3, 7, 15, then every 10.
+                    next_count = db.increment_total_regime_alerts(row.chat_id)
+                    cta = regime_cta_text() if regime_alert_should_show_cta(next_count) else None
                     text = format_regime_alert(
-                        row, row.regime_last_seen, current_regime, confidence
+                        row, row.regime_last_seen, current_regime, confidence, cta=cta,
                     )
                     if await _push(bot, row.chat_id, text):
                         regime_seen = current_regime
                         fetched["regime"] = "fired"
+                        if cta:
+                            db.increment_total_ctas_shown(row.chat_id)
         except McpError as e:
             log.warning(
                 json.dumps({"event": "mcp_get_market_regime_failed", "err": str(e)[:200]})
@@ -203,17 +236,16 @@ async def process_one_row(
             fetched["trade_call"] = "ok"
 
             if call in ("BUY", "SELL"):
-                # Bot-side quota gate: check before firing the alert.
                 state = get_quota_state(db, row.chat_id)
                 if state.exhausted:
-                    # C4 will inject the exhausted-quota CTA; for C3 we just log.
-                    log.info(
-                        json.dumps(
-                            {"event": "quota_exhausted", "chat_id": row.chat_id, "used": state.used}
-                        )
-                    )
-                    fetched["trade_call"] = "quota_exhausted"
+                    # C4: send the exhausted-quota notice + quota_100 CTA + x402 fallback.
+                    cta = trade_call_cta_text(state)  # fires the quota_100 + x402 block
+                    text = format_quota_exhausted_alert(row, call, cta)
+                    if await _push(bot, row.chat_id, text):
+                        fetched["trade_call"] = "exhausted_alert_sent"
+                        db.increment_total_ctas_shown(row.chat_id)
                 else:
+                    cta = trade_call_cta_text(state)  # '' for <75%, soft/urgent at 75/90%
                     text = format_trade_call_alert(
                         row,
                         call,
@@ -223,9 +255,13 @@ async def process_one_row(
                         tc_result.get("funding_state") or tc_result.get("funding", "?"),
                         tc_result.get("reasoning"),
                         state,
+                        cta=cta or None,
                     )
                     if await _push(bot, row.chat_id, text):
                         consume_quota(db, row.chat_id)
+                        db.increment_total_call_alerts(row.chat_id)
+                        if cta:
+                            db.increment_total_ctas_shown(row.chat_id)
                         fetched["trade_call"] = "fired"
             # HOLD verdicts are silently absorbed — no message, no quota tick (per spec).
         except McpError as e:

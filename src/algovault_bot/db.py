@@ -60,6 +60,17 @@ CREATE INDEX IF NOT EXISTS idx_watchlists_due
 CREATE INDEX IF NOT EXISTS idx_watchlists_chat ON watchlists(chat_id);
 """
 
+# C4 migrations — additive columns for the regime-alert counter (drives the
+# soft CTA on alert #1, 3, 7, 15, then every 10) and the admin /stats command.
+# C5 will add 24h rate-limit window columns; we leave space for those by NOT
+# putting them in the canonical SCHEMA_SQL (a wave's schema columns belong to
+# the wave that introduced them).
+C4_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN total_regime_alerts INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subscribers ADD COLUMN total_call_alerts INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subscribers ADD COLUMN total_ctas_shown INTEGER NOT NULL DEFAULT 0",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -85,6 +96,14 @@ class Database:
     def _init_schema(self) -> None:
         with self._cursor() as cur:
             cur.executescript(SCHEMA_SQL)
+            # C4 additive migrations — idempotent via try/except on
+            # "duplicate column name" (SQLite < 3.35 lacks ADD COLUMN IF NOT EXISTS).
+            for stmt in C4_MIGRATIONS:
+                try:
+                    cur.execute(stmt)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e):
+                        raise
 
     def _enforce_mode_660(self) -> None:
         # Spec C2 line 180: state.db mode 660 owner algovault-bot:algovault-bot.
@@ -232,6 +251,41 @@ class Database:
             except (ValueError, TypeError):
                 due.append(r)
         return due
+
+    # ── C4: per-subscriber counters for CTA logic + admin stats ─────
+
+    def increment_total_regime_alerts(self, chat_id: int) -> int:
+        """Increment + return the subscriber's lifetime regime-alert count."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET total_regime_alerts = total_regime_alerts + 1 "
+                "WHERE chat_id = ? RETURNING total_regime_alerts",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    def increment_total_call_alerts(self, chat_id: int) -> int:
+        """Increment + return the subscriber's lifetime trade-call-alert count."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET total_call_alerts = total_call_alerts + 1 "
+                "WHERE chat_id = ? RETURNING total_call_alerts",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    def increment_total_ctas_shown(self, chat_id: int) -> int:
+        """Increment + return the subscriber's lifetime CTA-shown count (admin /stats)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET total_ctas_shown = total_ctas_shown + 1 "
+                "WHERE chat_id = ? RETURNING total_ctas_shown",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
 
     def update_watch_after_fetch(
         self,

@@ -16,6 +16,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from . import messages
+from .admin import handle_stats as admin_handle_stats
 from .db import Database, PER_USER_WATCHLIST_CAP
 from .validators import (
     DEFAULT_ALERT_TYPE,
@@ -109,6 +110,11 @@ def handle_unwatch(
     return messages.watch_not_found_message(coin, timeframe, exchange)
 
 
+def handle_stats(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
+    db.upsert_subscriber(chat_id, username, lang_code)
+    return admin_handle_stats(db, chat_id)
+
+
 def handle_list(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
     db.upsert_subscriber(chat_id, username, lang_code)
     rows = db.list_watches(chat_id)
@@ -178,11 +184,19 @@ def register_handlers(app: Application, db: Database) -> None:
         reply = handle_list(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
+    async def _stats(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        reply = handle_stats(db, chat_id, username, lang)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("watch", _watch))
     app.add_handler(CommandHandler("unwatch", _unwatch))
     app.add_handler(CommandHandler("list", _list))
+    app.add_handler(CommandHandler("stats", _stats))
 
 
 # Re-export the constants kept (for now) so existing tests/import paths still work.
