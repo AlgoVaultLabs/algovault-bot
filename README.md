@@ -45,16 +45,16 @@ The bot is a thin client over the [`crypto-quant-signal-mcp`](https://github.com
 - `COIN` — uppercase 2-10 chars (`BTC`, `ETH`, `SOL`, `1000PEPE`, etc.)
 - `TF` — `1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d`
 - `EXCHANGE` — `HL BINANCE BYBIT OKX BITGET` (default: `BINANCE`)
-- `TYPE` — `regime`, `calls`, or `both` (default: `both`)
+- `TYPE` — `regime`, `calls`, or `both` (default: `calls`)
 
 **Per-user cap:** 50 watchlist entries.
 
 **Examples:**
 
 ```
-/watch BTC 4h                  — both alert types, default exchange
+/watch BTC 4h                  — trade calls only, default exchange
 /watch ETH 1h HL regime        — regime-only on Hyperliquid
-/watch SOL 15m BYBIT calls     — trade calls only on Bybit
+/watch SOL 15m BYBIT both      — regime + trade calls on Bybit
 /unwatch BTC 4h                — remove BTC 4h on BINANCE
 ```
 
