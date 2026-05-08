@@ -29,8 +29,11 @@ from typing import Any
 from telegram import Bot
 from telegram.error import TelegramError
 
+from datetime import datetime, timezone
+
 from .cta import (
     quota_exhausted_message,
+    quota_threshold,
     regime_alert_should_show_cta,
     regime_cta_text,
     trade_call_cta_text,
@@ -259,15 +262,17 @@ async def process_one_row(
             if call in ("BUY", "SELL"):
                 # No 24h cap — only the 100/mo quota gate applies.
                 state = get_quota_state(db, row.chat_id)
+                now = datetime.now(timezone.utc)
                 if state.exhausted:
                     # C4: send the exhausted-quota notice + quota_100 CTA + x402 fallback.
-                    cta = trade_call_cta_text(state)
+                    cta = trade_call_cta_text(state, now=now)
                     text = format_quota_exhausted_alert(row, call, cta)
                     if await _push(bot, row.chat_id, text):
                         fetched["trade_call"] = "exhausted_alert_sent"
                         db.increment_total_ctas_shown(row.chat_id)
                 else:
-                    cta = trade_call_cta_text(state)
+                    cta = trade_call_cta_text(state, now=now)
+                    threshold = quota_threshold(state)
                     text = format_trade_call_alert(
                         row,
                         call,
@@ -284,6 +289,12 @@ async def process_one_row(
                         db.increment_total_call_alerts(row.chat_id)
                         if cta:
                             db.increment_total_ctas_shown(row.chat_id)
+                            # 24h-per-threshold throttle for the soft/urgent
+                            # nudges; '100' is no-op (not throttled).
+                            if threshold in ("75", "90"):
+                                db.mark_quota_cta_fired(
+                                    row.chat_id, threshold, now.isoformat()
+                                )
                         fetched["trade_call"] = "fired"
                         log_alert_event(
                             "trade_call_alert_fired",

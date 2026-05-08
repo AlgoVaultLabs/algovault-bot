@@ -93,6 +93,16 @@ W2_LINKED_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN linked_at TIMESTAMP",
 )
 
+# BOT-ALERT-CLEANUP-W1 (2026-05-08) — per-threshold last-fired timestamps so
+# the soft 75% / urgent 90% trade-call CTAs can be throttled to once per 24h
+# per threshold per user. cta.py reads these + ``_now`` to decide whether
+# to render the CTA snippet; alert_engine writes via ``mark_quota_cta_fired``
+# after a successful Telegram push.
+ALERT_CLEANUP_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN quota_75_last_fired_at TIMESTAMP",
+    "ALTER TABLE subscribers ADD COLUMN quota_90_last_fired_at TIMESTAMP",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -120,7 +130,12 @@ class Database:
             cur.executescript(SCHEMA_SQL)
             # C4 additive migrations — idempotent via try/except on
             # "duplicate column name" (SQLite < 3.35 lacks ADD COLUMN IF NOT EXISTS).
-            for stmt in (*C4_MIGRATIONS, *C5_MIGRATIONS, *W2_LINKED_MIGRATIONS):
+            for stmt in (
+                *C4_MIGRATIONS,
+                *C5_MIGRATIONS,
+                *W2_LINKED_MIGRATIONS,
+                *ALERT_CLEANUP_MIGRATIONS,
+            ):
                 try:
                     cur.execute(stmt)
                 except sqlite3.OperationalError as e:
@@ -357,6 +372,36 @@ class Database:
             )
             row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    # ── BOT-ALERT-CLEANUP-W1: soft/urgent CTA per-threshold throttle ────
+
+    def get_quota_cta_fired_at(self, chat_id: int) -> tuple[str | None, str | None]:
+        """Returns ``(quota_75_last_fired_at, quota_90_last_fired_at)`` raw strings.
+
+        Either may be ``None`` if the threshold has never fired for the user.
+        Caller (``cta.py``) parses to ``datetime`` via ``quota._parse_ts``.
+        """
+        row = self.get_subscriber(chat_id)
+        if row is None:
+            return None, None
+        return row["quota_75_last_fired_at"], row["quota_90_last_fired_at"]
+
+    def mark_quota_cta_fired(self, chat_id: int, threshold: str, now_iso: str) -> None:
+        """Record that the {threshold}% trade-call CTA was just shown to the user.
+
+        ``threshold`` ∈ {'75', '90'}. Writes ``quota_<threshold>_last_fired_at``.
+        """
+        if threshold == "75":
+            col = "quota_75_last_fired_at"
+        elif threshold == "90":
+            col = "quota_90_last_fired_at"
+        else:
+            return  # '100' is not throttled — no-op
+        with self._cursor() as cur:
+            cur.execute(
+                f"UPDATE subscribers SET {col} = ? WHERE chat_id = ?",
+                (now_iso, chat_id),
+            )
 
     def update_watch_after_fetch(
         self,

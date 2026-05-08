@@ -117,10 +117,11 @@ def test_paid_tier_no_cta_at_any_quota(tier: str) -> None:
     assert trade_call_cta_text(s) == ""
 
 
-def test_free_tier_no_cta_at_75() -> None:
-    # Soft 75% nudge removed 2026-05-08 — only the 100%-exhausted notice remains.
+def test_free_tier_cta_at_75_first_fire() -> None:
+    # First-fire (no last_75 timestamp) — soft nudge appears.
     s = QuotaState(used=80, total=100, window_start=None, pct_used=0.8, linked_tier=None)
-    assert trade_call_cta_text(s) == ""
+    cta = trade_call_cta_text(s)
+    assert "utm_campaign=quota_75" in cta
 
 
 def test_free_tier_exhausted_cta_still_fires() -> None:

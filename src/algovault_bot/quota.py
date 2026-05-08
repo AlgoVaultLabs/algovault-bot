@@ -52,6 +52,12 @@ class QuotaState:
     # Engine reads this to skip the quota gate + the quota line in the alert
     # message + all 75/90/100% CTAs (the user is already paying).
     linked_tier: str | None = None
+    # BOT-ALERT-CLEANUP-W1 — last-fired timestamps for the soft 75% / urgent
+    # 90% trade-call CTAs. ``cta.trade_call_cta_text`` uses these to enforce a
+    # 24h-per-threshold throttle so users see at most one nudge per threshold
+    # per day. Both are ``None`` until the threshold first fires.
+    quota_75_last_fired_at: datetime | None = None
+    quota_90_last_fired_at: datetime | None = None
 
     @property
     def remaining(self) -> int:
@@ -104,6 +110,8 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     used = int(row["alert_count"] or 0)
     window_start = _parse_ts(row["alerts_window_start"])
     linked_tier = row["linked_tier"]
+    last_75 = _parse_ts(row["quota_75_last_fired_at"]) if "quota_75_last_fired_at" in row.keys() else None
+    last_90 = _parse_ts(row["quota_90_last_fired_at"]) if "quota_90_last_fired_at" in row.keys() else None
 
     # Window expired → reset counter (still applies to free-tier users; paid
     # users don't tick the counter at all per ``consume_quota`` below).
@@ -118,7 +126,15 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
             )
 
     pct = (used / FREE_TIER_MONTHLY_QUOTA) if FREE_TIER_MONTHLY_QUOTA else 0.0
-    return QuotaState(used, FREE_TIER_MONTHLY_QUOTA, window_start, pct, linked_tier=linked_tier)
+    return QuotaState(
+        used,
+        FREE_TIER_MONTHLY_QUOTA,
+        window_start,
+        pct,
+        linked_tier=linked_tier,
+        quota_75_last_fired_at=last_75,
+        quota_90_last_fired_at=last_90,
+    )
 
 
 def consume_quota(db: Database, chat_id: int) -> QuotaState:
