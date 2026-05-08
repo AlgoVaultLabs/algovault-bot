@@ -55,6 +55,22 @@ def render_stats(db: Database) -> str:
         cur.execute("SELECT COALESCE(SUM(total_ctas_shown), 0) FROM subscribers")
         ctas_total = int(cur.fetchone()[0])
 
+        # BOT-W2: conversion attribution — linked subscribers + tier breakdown
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers WHERE linked_api_key IS NOT NULL"
+        )
+        linked_total = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT COALESCE(linked_tier, '?') AS tier, COUNT(*) AS c
+            FROM subscribers
+            WHERE linked_api_key IS NOT NULL
+            GROUP BY linked_tier
+            ORDER BY c DESC, tier ASC
+            """
+        )
+        linked_by_tier = list(cur.fetchall())
+
         # Top 10 watched assets
         cur.execute(
             """
@@ -73,6 +89,12 @@ def render_stats(db: Database) -> str:
         cur.execute("SELECT COUNT(*) FROM subscribers WHERE last_seen_at >= ?", (week_ago,))
         active_7d = int(cur.fetchone()[0])
 
+    # BOT-W2 conversion attribution. Compute ratio CTAs-shown → signups-linked.
+    conversion_ratio = (
+        f"{(linked_total / ctas_total * 100):.1f}%"
+        if ctas_total > 0 else "n/a"
+    )
+
     lines = [
         "📊 algovault-bot — admin stats",
         f"Generated: {now.isoformat(timespec='seconds')}",
@@ -85,8 +107,16 @@ def render_stats(db: Database) -> str:
         f"  📈 Trade calls     : {call_alerts_total}",
         f"  🎯 CTAs shown      : {ctas_total}",
         "",
-        "Top 10 watched assets:",
+        "💎 Conversion attribution (BOT-W2):",
+        f"  Linked subscribers : {linked_total}",
     ]
+    for r in linked_by_tier:
+        lines.append(f"    {r['tier']:<10} : {r['c']}")
+    if not linked_by_tier:
+        lines.append("    (none yet)")
+    lines.append(f"  CTAs → linked    : {conversion_ratio}")
+    lines.append("")
+    lines.append("Top 10 watched assets:")
     for r in top_assets:
         lines.append(f"  {r['coin']:<8} {r['c']}")
     if not top_assets:
