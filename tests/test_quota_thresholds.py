@@ -39,27 +39,29 @@ def test_alert_at_47_no_cta() -> None:
     assert "utm_campaign=quota_100" not in msg
 
 
-# AC4.2
-def test_alert_at_80_quota_75_cta() -> None:
+# AC4.2 — soft 75% nudge removed 2026-05-08; alert still includes quota line.
+def test_alert_at_80_no_cta() -> None:
     quota = _state(80)
     cta = trade_call_cta_text(quota) or None
     msg = format_trade_call_alert(
         _row(), "BUY", 78, 84250.50, "TRENDING_UP", "NORMAL", None, quota, cta=cta,
     )
     assert "📊 Quota: 80/100 free calls used this month" in msg
-    assert "utm_campaign=quota_75" in msg
+    assert "utm_campaign=quota_75" not in msg
+    assert cta is None
 
 
-# AC4.3
-def test_alert_at_95_quota_90_cta() -> None:
+# AC4.3 — urgent 90% nudge removed 2026-05-08; alert still includes quota line.
+def test_alert_at_95_no_cta() -> None:
     quota = _state(95)
     cta = trade_call_cta_text(quota) or None
     msg = format_trade_call_alert(
         _row(), "SELL", 80, 84250.50, "TRENDING_DOWN", "ELEVATED", None, quota, cta=cta,
     )
     assert "📊 Quota: 95/100 free calls used this month" in msg
-    assert "Only 5 free calls left" in msg
-    assert "utm_campaign=quota_90" in msg
+    assert "utm_campaign=quota_90" not in msg
+    assert "Only 5 free calls left" not in msg
+    assert cta is None
 
 
 # AC4.4

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS watchlists (
   coin                 TEXT NOT NULL,
   timeframe            TEXT NOT NULL,
   exchange             TEXT NOT NULL,
-  alert_type           TEXT NOT NULL DEFAULT 'both'
+  alert_type           TEXT NOT NULL DEFAULT 'calls'
                          CHECK (alert_type IN ('regime', 'calls', 'both')),
   regime_last_seen     TEXT,
   regime_last_changed_at TIMESTAMP,

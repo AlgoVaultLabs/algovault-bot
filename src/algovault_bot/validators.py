@@ -40,7 +40,7 @@ EXCHANGES: Final[frozenset[str]] = frozenset({"HL", "BINANCE", "BYBIT", "OKX", "
 DEFAULT_EXCHANGE: Final = "BINANCE"
 
 ALERT_TYPES: Final[frozenset[str]] = frozenset({"regime", "calls", "both"})
-DEFAULT_ALERT_TYPE: Final = "both"
+DEFAULT_ALERT_TYPE: Final = "calls"
 
 
 class ValidationError(ValueError):

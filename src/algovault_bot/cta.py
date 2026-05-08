@@ -1,39 +1,29 @@
-"""CTA injection — quota-threshold for trade calls + frequency-driven for regime alerts.
+"""CTA injection — quota-exhausted notice for trade calls only.
 
-Spec C4 line 344-368 + D3-A canonical signup URL.
+Soft/urgent quota-warning CTAs (75% / 90%) and the regime-alert frequency CTA
+were removed 2026-05-08 (operator: too distracting in alert messages). The
+helpers and call sites are preserved so the feature can be re-enabled with a
+one-line change if conversion data later argues for it.
 
 Trade-call alert thresholds (quota usage %):
-- 0–74%      : no CTA
-- 75–89%     : soft nudge (utm_campaign=quota_75)
-- 90–99%     : urgent (utm_campaign=quota_90)
-- 100%       : exhausted (utm_campaign=quota_100) + x402 fallback line
-
-Regime alert frequency: append CTA on alert #1, 3, 7, 15, then every 10
-(utm_campaign=regime_alert).
+- 0–99%      : no CTA
+- 100%       : exhausted (utm_campaign=quota_100) + x402 fallback line — kept
+               because it's the user's "you've hit the cap, here's why no
+               more alerts" notice, not a marketing nudge.
 """
 
 from __future__ import annotations
-
-from typing import Final
 
 from .messages import signup_url
 from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState
 
 
-# Sequence: 1, 3, 7, 15, then every 10 starting at 25.
-# Membership check: n in {1, 3, 7, 15} OR n >= 25 AND n % 10 == 5 (matches 25, 35, 45, ...).
-_REGIME_CTA_FIXED: Final[frozenset[int]] = frozenset({1, 3, 7, 15})
-
-
 def regime_alert_should_show_cta(total_regime_alerts: int) -> bool:
-    """Returns True if the Nth regime alert should append the soft CTA.
+    """Regime-alert CTA disabled. Always returns False.
 
-    N is the count AFTER incrementing for the alert about to be sent.
+    Previously fired on alerts #1, 3, 7, 15, then every 10. Re-enable by
+    restoring the prior sequence logic if A/B data argues for it.
     """
-    if total_regime_alerts in _REGIME_CTA_FIXED:
-        return True
-    if total_regime_alerts >= 25 and (total_regime_alerts - 15) % 10 == 0:
-        return True
     return False
 
 
@@ -45,9 +35,11 @@ def regime_cta_text() -> str:
 
 
 def trade_call_cta_text(state: QuotaState) -> str:
-    """Returns the CTA snippet for a trade-call alert based on quota %, or ''.
+    """Returns the CTA snippet for a trade-call alert, or ''.
 
-    The caller decides whether to pre-pend a separator newline.
+    Only the 100%-exhausted branch returns text — that one is essential UX
+    (the user's "you've hit your free cap" heads-up). The 75% / 90% soft and
+    urgent nudges return '' (suppressed 2026-05-08).
 
     BOT-W2 C3: paid-tier-linked users get NO upgrade CTA — they're already
     paying. Suppress at the source rather than relying on copywriting.
@@ -56,25 +48,12 @@ def trade_call_cta_text(state: QuotaState) -> str:
         return ""
     if state.total <= 0:
         return ""
-    pct = state.used / state.total
     if state.used >= state.total:
-        # 100% exhausted (state.exhausted)
+        # 100% exhausted (state.exhausted) — kept as user-facing cap notice.
         return (
             f"→ {signup_url('quota_100')}\n"
             "\n"
             "Or pay per call via x402 (no signup) — see x402.org"
-        )
-    if pct >= 0.90:
-        remaining = max(0, state.total - state.used)
-        return (
-            f"🔥 Only {remaining} free calls left. Upgrade now to keep getting calls:\n"
-            f"→ {signup_url('quota_90')}"
-        )
-    if pct >= 0.75:
-        return (
-            "⏰ You've used 75% of your free calls. "
-            "Upgrade to Starter ($9.99 → 3,000 calls/mo):\n"
-            f"→ {signup_url('quota_75')}"
         )
     return ""
 

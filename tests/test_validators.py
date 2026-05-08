@@ -79,7 +79,7 @@ def test_default_exchange_is_binance() -> None:
 # alert_type
 
 @pytest.mark.parametrize("raw,expected", [
-    (None, "both"), ("", "both"), ("regime", "regime"), ("CALLS", "calls"), ("Both", "both")
+    (None, "calls"), ("", "calls"), ("regime", "regime"), ("CALLS", "calls"), ("Both", "both")
 ])
 def test_alert_type_valid(raw: str | None, expected: str) -> None:
     assert normalize_alert_type(raw) == expected
@@ -91,5 +91,5 @@ def test_alert_type_invalid(raw: str) -> None:
         normalize_alert_type(raw)
 
 
-def test_default_alert_type_is_both() -> None:
-    assert DEFAULT_ALERT_TYPE == "both"
+def test_default_alert_type_is_calls() -> None:
+    assert DEFAULT_ALERT_TYPE == "calls"

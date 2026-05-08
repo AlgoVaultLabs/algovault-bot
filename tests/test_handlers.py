@@ -27,9 +27,9 @@ def test_help_full_command_list(tmp_db: Database) -> None:
 
 
 def test_watch_default_exchange_and_type(tmp_db: Database) -> None:
-    # AC2.1 with D8 (BINANCE default in place of HL)
+    # AC2.1 with D8 (BINANCE default) + 2026-05-08 default TYPE=calls
     reply = handle_watch(tmp_db, 1, "u", "en", ["BTC", "4h"])
-    assert "✅ Watching BTC 4h on BINANCE (regime + calls)" in reply
+    assert "✅ Watching BTC 4h on BINANCE (trade calls only)" in reply
     assert tmp_db.count_watches(1) == 1
 
 

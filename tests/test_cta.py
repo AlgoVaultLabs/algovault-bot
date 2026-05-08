@@ -1,4 +1,9 @@
-"""C4 — quota-threshold CTA + regime-frequency CTA tests."""
+"""CTA injection tests.
+
+Soft 75% / urgent 90% trade-call CTAs and the regime-frequency CTA were
+removed 2026-05-08 (operator: too distracting). Only the 100%-exhausted
+trade-call notice remains — that's the user's "you've hit the cap" heads-up.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ def _state(used: int, total: int = 100) -> QuotaState:
     return QuotaState(used, total, datetime.now(timezone.utc), used / total if total else 0.0)
 
 
-# ── trade-call CTA — quota threshold branching ─────────────────
+# ── trade-call CTA — only the 100%-exhausted branch returns text ───────
 
 
 def test_trade_call_cta_no_cta_below_75() -> None:
@@ -24,94 +29,47 @@ def test_trade_call_cta_no_cta_below_75() -> None:
         assert trade_call_cta_text(_state(used)) == "", f"used={used}"
 
 
-def test_trade_call_cta_quota_75_at_75pct() -> None:
-    cta = trade_call_cta_text(_state(75))
-    assert "75%" in cta
-    assert "Starter ($9.99 → 3,000 calls/mo)" in cta
-    assert "utm_campaign=quota_75" in cta
-    assert "api.algovault.com/signup" in cta
+def test_trade_call_cta_no_cta_at_75pct() -> None:
+    # Soft nudge removed 2026-05-08.
+    assert trade_call_cta_text(_state(75)) == ""
 
 
-def test_trade_call_cta_quota_75_at_89pct() -> None:
-    cta = trade_call_cta_text(_state(89))
-    assert "utm_campaign=quota_75" in cta
-    assert "utm_campaign=quota_90" not in cta
+def test_trade_call_cta_no_cta_at_89pct() -> None:
+    assert trade_call_cta_text(_state(89)) == ""
 
 
-def test_trade_call_cta_quota_90_at_90pct() -> None:
-    cta = trade_call_cta_text(_state(90))
-    assert "Only 10 free calls left" in cta
-    assert "utm_campaign=quota_90" in cta
+def test_trade_call_cta_no_cta_at_90pct() -> None:
+    # Urgent nudge removed 2026-05-08.
+    assert trade_call_cta_text(_state(90)) == ""
 
 
-def test_trade_call_cta_quota_90_at_99pct() -> None:
-    cta = trade_call_cta_text(_state(99))
-    assert "Only 1 free calls left" in cta
-    assert "utm_campaign=quota_90" in cta
+def test_trade_call_cta_no_cta_at_99pct() -> None:
+    assert trade_call_cta_text(_state(99)) == ""
 
 
 def test_trade_call_cta_quota_100_at_exhausted() -> None:
+    # 100%-exhausted notice retained — essential UX, not a marketing nudge.
     cta = trade_call_cta_text(_state(100))
     assert "utm_campaign=quota_100" in cta
-    assert "x402" in cta  # x402 fallback line
+    assert "x402" in cta
 
 
 def test_trade_call_cta_quota_100_above_cap() -> None:
-    # If somehow the counter overshot, still treat as exhausted.
     cta = trade_call_cta_text(_state(105))
     assert "utm_campaign=quota_100" in cta
 
 
-# ── regime alert CTA — frequency-driven (#1, 3, 7, 15, then every 10) ────
+# ── regime alert CTA — disabled (always returns False) ─────────────────
 
 
-def test_regime_cta_fires_on_alert_1() -> None:
-    assert regime_alert_should_show_cta(1) is True
-
-
-def test_regime_cta_skips_2() -> None:
-    assert regime_alert_should_show_cta(2) is False
-
-
-def test_regime_cta_fires_on_3() -> None:
-    assert regime_alert_should_show_cta(3) is True
-
-
-def test_regime_cta_skips_4_5_6() -> None:
-    for n in (4, 5, 6):
+def test_regime_cta_never_fires() -> None:
+    # Regime CTA disabled 2026-05-08; previously fired on #1, 3, 7, 15, then every 10.
+    for n in (1, 2, 3, 5, 7, 10, 15, 20, 25, 35, 45, 55, 105, 1000):
         assert regime_alert_should_show_cta(n) is False, f"n={n}"
 
 
-def test_regime_cta_fires_on_7() -> None:
-    assert regime_alert_should_show_cta(7) is True
-
-
-def test_regime_cta_skips_8_through_14() -> None:
-    for n in range(8, 15):
-        assert regime_alert_should_show_cta(n) is False, f"n={n}"
-
-
-def test_regime_cta_fires_on_15() -> None:
-    assert regime_alert_should_show_cta(15) is True
-
-
-def test_regime_cta_skips_16_through_24() -> None:
-    for n in range(16, 25):
-        assert regime_alert_should_show_cta(n) is False, f"n={n}"
-
-
-def test_regime_cta_fires_on_25_35_45_etc() -> None:
-    # "then every 10" starting from 25
-    for n in (25, 35, 45, 55, 105):
-        assert regime_alert_should_show_cta(n) is True, f"n={n}"
-
-
-def test_regime_cta_skips_26_through_34() -> None:
-    for n in range(26, 35):
-        assert regime_alert_should_show_cta(n) is False, f"n={n}"
-
-
-def test_regime_cta_text_includes_signup_url_and_campaign() -> None:
+def test_regime_cta_text_still_renders_when_called() -> None:
+    # Helper preserved so the feature can be re-enabled with one line.
     msg = regime_cta_text()
     assert "api.algovault.com/signup" in msg
     assert "utm_campaign=regime_alert" in msg
