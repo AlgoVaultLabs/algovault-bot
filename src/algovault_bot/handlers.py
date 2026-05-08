@@ -18,6 +18,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from . import messages
 from .admin import handle_stats as admin_handle_stats
 from .db import Database, PER_USER_WATCHLIST_CAP
+from .link_validator import validate_api_key
 from .validators import (
     DEFAULT_ALERT_TYPE,
     DEFAULT_EXCHANGE,
@@ -31,6 +32,12 @@ from .validators import (
 log = logging.getLogger(__name__)
 
 
+# ── /start deep-link parameter (BOT-W2) ───────────────────────
+
+
+_AUTH_PREFIX = "auth_"
+
+
 # ── pure handlers ──────────────────────────────────────────────
 
 
@@ -39,6 +46,48 @@ def handle_start(
 ) -> str:
     db.upsert_subscriber(chat_id, username, lang_code)
     return messages.WELCOME_MESSAGE
+
+
+def handle_link(
+    db: Database,
+    chat_id: int,
+    username: str | None,
+    lang_code: str | None,
+    api_key: str,
+) -> str:
+    """Validate api_key against signal-MCP, then link this chat to it.
+
+    BOT-W2 / D1-C: api_key arrives via the `/start auth_<api_key>` deep-link
+    fired from the /welcome page. Bot validates the key via signal-MCP's
+    /api/bot/validate-key endpoint (loopback, internal-bypass-gated) and
+    stores the linked tier so the C3 quota gate can honor it.
+
+    NEVER log the api_key value at INFO. Only structured fields.
+    """
+    db.upsert_subscriber(chat_id, username, lang_code)
+    validated = validate_api_key(api_key)
+    if validated is None:
+        log.info(
+            '{"event": "link_failed", "chat_id": %d, "reason": "validation_returned_none"}',
+            chat_id,
+        )
+        return messages.link_invalid_key_message()
+
+    previous_tier, is_new_link = db.link_subscriber(chat_id, api_key, validated.tier)
+    log.info(
+        '{"event": "link_ok", "chat_id": %d, "tier": "%s", "is_new_link": %s, '
+        '"previous_tier": "%s"}',
+        chat_id,
+        validated.tier,
+        "true" if is_new_link else "false",
+        previous_tier or "null",
+    )
+
+    if is_new_link:
+        return messages.link_first_time_message(validated.tier)
+    if previous_tier != validated.tier:
+        return messages.link_tier_changed_message(previous_tier, validated.tier)
+    return messages.link_already_linked_message(validated.tier)
 
 
 def handle_help(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
@@ -147,11 +196,24 @@ def _user_meta(update: Update) -> tuple[int, str | None, str | None]:
 
 
 def register_handlers(app: Application, db: Database) -> None:
-    async def _start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
         chat_id, username, lang = _user_meta(update)
-        reply = handle_start(db, chat_id, username, lang)
+        # BOT-W2: detect deep-link param `/start auth_<api_key>`.
+        # NEVER log args[0] value at INFO — it may carry the api_key.
+        args = ctx.args or []
+        if args and isinstance(args[0], str) and args[0].startswith(_AUTH_PREFIX):
+            api_key = args[0][len(_AUTH_PREFIX):]
+            log.info(
+                '{"event": "start_auth_param_received", "chat_id": %d, '
+                '"has_param": true, "param_kind": "auth", "param_len": %d}',
+                chat_id,
+                len(api_key),
+            )
+            reply = handle_link(db, chat_id, username, lang, api_key)
+        else:
+            reply = handle_start(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
     async def _help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:

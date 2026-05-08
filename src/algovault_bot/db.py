@@ -74,11 +74,23 @@ C4_MIGRATIONS = (
 # C5 — anti-abuse 24h counters + quota-burn suppression timestamp.
 # These fields drive the per-user rate limit (20 regime + 30 calls per 24h)
 # and the 50-call/24h quota-burn protection (suppressed-until timestamp).
+# As of 2026-05-08 the 24h caps were removed (Telegram doesn't impose any),
+# but the columns stay for backward-compat — no code reads/writes them.
 C5_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN alerts_24h_regime_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subscribers ADD COLUMN alerts_24h_calls_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subscribers ADD COLUMN alerts_24h_window_start TIMESTAMP",
     "ALTER TABLE subscribers ADD COLUMN calls_burn_suppressed_until TIMESTAMP",
+)
+
+# BOT-W2 C2 — Telegram bot per-user attribution via /start auth_<api_key>
+# deep-link. The bot validates the api_key against signal-MCP's
+# /api/bot/validate-key (internal-bypass-gated) and stores the linked tier
+# here so the C3 quota gate can honor it.
+W2_LINKED_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN linked_api_key TEXT",
+    "ALTER TABLE subscribers ADD COLUMN linked_tier TEXT",
+    "ALTER TABLE subscribers ADD COLUMN linked_at TIMESTAMP",
 )
 
 
@@ -108,7 +120,7 @@ class Database:
             cur.executescript(SCHEMA_SQL)
             # C4 additive migrations — idempotent via try/except on
             # "duplicate column name" (SQLite < 3.35 lacks ADD COLUMN IF NOT EXISTS).
-            for stmt in (*C4_MIGRATIONS, *C5_MIGRATIONS):
+            for stmt in (*C4_MIGRATIONS, *C5_MIGRATIONS, *W2_LINKED_MIGRATIONS):
                 try:
                     cur.execute(stmt)
                 except sqlite3.OperationalError as e:
@@ -261,6 +273,55 @@ class Database:
             except (ValueError, TypeError):
                 due.append(r)
         return due
+
+    # ── BOT-W2: per-user signup attribution (linked_api_key / linked_tier) ──
+
+    def link_subscriber(
+        self, chat_id: int, api_key: str, tier: str
+    ) -> tuple[str | None, bool]:
+        """Bind chat_id to (api_key, tier).
+
+        Returns ``(previous_tier, is_new_link)``:
+        - ``previous_tier`` = the tier this chat was linked to before, or None
+          if this is the first link (or the previous record was 'free'/None).
+        - ``is_new_link`` = True iff this chat had no prior `linked_api_key`.
+          Used by the handler to decide whether to send a "Linked!" DM (new)
+          vs a "Tier updated" DM (re-link from upgrade) — C3 will use this.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT linked_api_key, linked_tier FROM subscribers WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            previous_tier = row["linked_tier"] if row else None
+            is_new_link = not (row and row["linked_api_key"])
+            cur.execute(
+                """
+                UPDATE subscribers
+                SET linked_api_key = ?,
+                    linked_tier    = ?,
+                    linked_at      = datetime('now')
+                WHERE chat_id = ?
+                """,
+                (api_key, tier, chat_id),
+            )
+        return previous_tier, is_new_link
+
+    def unlink_subscriber(self, chat_id: int) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET linked_api_key = NULL, linked_tier = NULL, "
+                "linked_at = NULL WHERE chat_id = ?",
+                (chat_id,),
+            )
+
+    def get_linked_state(self, chat_id: int) -> tuple[str | None, str | None]:
+        """Return ``(linked_api_key, linked_tier)`` for the chat, or (None, None)."""
+        row = self.get_subscriber(chat_id)
+        if row is None:
+            return None, None
+        return row["linked_api_key"], row["linked_tier"]
 
     # ── C4: per-subscriber counters for CTA logic + admin stats ─────
 

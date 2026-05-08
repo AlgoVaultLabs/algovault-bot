@@ -131,3 +131,44 @@ def usage_unwatch_message() -> str:
         "Usage: /unwatch <COIN> <TIMEFRAME> [EXCHANGE]\n"
         "Example: /unwatch BTC 4h"
     )
+
+
+# ── BOT-W2 link confirmation messages ──────────────────────────
+
+
+_TIER_QUOTA = {"starter": 3_000, "pro": 15_000, "enterprise": 100_000}
+
+
+def _quota_str(tier: str) -> str:
+    n = _TIER_QUOTA.get(tier)
+    return f"{n:,}" if n else "unlimited"
+
+
+def link_first_time_message(tier: str) -> str:
+    return (
+        f"✅ Linked! Your AlgoVault {tier} subscription is connected to this Telegram chat.\n"
+        f"Bot-side quota refreshed to {_quota_str(tier)} calls/mo — the 100/mo cap no longer applies here."
+    )
+
+
+def link_tier_changed_message(prev_tier: str | None, new_tier: str) -> str:
+    prev = prev_tier or "free"
+    return (
+        f"✅ Subscription updated: {prev} → {new_tier}.\n"
+        f"Bot-side quota refreshed to {_quota_str(new_tier)} calls/mo."
+    )
+
+
+def link_already_linked_message(tier: str) -> str:
+    return (
+        f"This Telegram chat is already linked to your {tier} subscription. "
+        f"Quota: {_quota_str(tier)} calls/mo."
+    )
+
+
+def link_invalid_key_message() -> str:
+    return (
+        "❌ That signup link wasn't recognized. The API key in the link is "
+        "either expired or doesn't match an active subscription.\n"
+        "Sign up or recover your key: https://api.algovault.com/signup?plan=starter"
+    )
