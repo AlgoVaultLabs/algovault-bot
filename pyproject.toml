@@ -13,6 +13,10 @@ dependencies = [
   "python-dotenv==1.2.2",
 ]
 
+[project.scripts]
+algovault-bot = "algovault_bot.bot:main"
+algovault-bot-cron = "algovault_bot.alert_engine:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest==8.4.2",
