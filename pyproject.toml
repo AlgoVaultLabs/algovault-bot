@@ -11,6 +11,10 @@ dependencies = [
   "httpx==0.28.1",
   "pydantic==2.13.4",
   "python-dotenv==1.2.2",
+  # BOT-ALERT-IMAGE-W1 (2026-05-08) — Pillow renders trade-call alerts as
+  # metric-card PNGs (via send_photo) instead of plain text. DejaVu fonts
+  # already present on Hetzner; no system-package install needed.
+  "Pillow==12.2.0",
 ]
 
 [project.scripts]

@@ -31,6 +31,7 @@ from telegram.error import TelegramError
 
 from datetime import datetime, timezone
 
+from .alert_image import SeeAlsoCell, TradeCallView, render_trade_call_card
 from .cta import (
     quota_exhausted_message,
     quota_threshold,
@@ -45,6 +46,16 @@ from .messages import signup_url
 from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState, consume_quota, get_quota_state
 from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
+
+
+# BOT-ALERT-IMAGE-W1 — primary call confidence below this triggers the
+# "See Also" surface (only when a same-TF + same-exchange + ≥80%-conf cell
+# exists in the upstream `also_see` payload). Matches the renderer's
+# "low" / "very low" confidence labels.
+LOW_CONFIDENCE_THRESHOLD: int = 50
+
+# Confidence floor for a See Also cell to be shown. Operator-set 2026-05-08.
+SEE_ALSO_MIN_CONFIDENCE: int = 80
 
 
 log = logging.getLogger("algovault_bot.alert_engine")
@@ -171,6 +182,132 @@ async def _push(bot: Bot, chat_id: int, text: str) -> bool:
             return False
 
 
+async def _push_photo(
+    bot: Bot, chat_id: int, photo_bytes: bytes, caption: str | None = None
+) -> bool:
+    """Send a photo (PNG bytes) under the global semaphore. Used for the
+    image-format trade-call alerts. Caption holds optional CTA text (URLs are
+    clickable in Telegram captions).
+    """
+    async with TELEGRAM_GLOBAL_SEMAPHORE:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_bytes,
+                caption=caption,
+            )
+            return True
+        except TelegramError as e:
+            log.warning(
+                json.dumps({"event": "telegram_send_photo_failed", "chat_id": chat_id, "err": str(e)})
+            )
+            return False
+
+
+def _pick_see_also(
+    also_see: list[dict[str, Any]] | None,
+    *,
+    primary_confidence: int,
+    same_tf: str,
+    same_exchange: str,
+) -> SeeAlsoCell | None:
+    """Apply the BOT-ALERT-IMAGE-W1 See Also filter:
+    - primary call must be low confidence (<50%)
+    - candidate must match same TF AND same exchange
+    - candidate must have confidence ≥ 80%
+    - return the highest-confidence match, or None.
+
+    The upstream cell SHOULD carry `exchange` post-2026-05-08 (signal-MCP
+    v1.10.8). For deploy-ordering safety, when `exchange` is missing on the
+    cell we fall back to assuming same-as-alert (Path B) so the wave still
+    surfaces something useful before signal-MCP rolls out.
+    """
+    if primary_confidence >= LOW_CONFIDENCE_THRESHOLD:
+        return None
+    if not also_see:
+        return None
+    candidates: list[SeeAlsoCell] = []
+    for cell in also_see:
+        if cell.get("timeframe") != same_tf:
+            continue
+        cell_exchange = cell.get("exchange") or same_exchange  # Path B fallback
+        if cell_exchange != same_exchange:
+            continue
+        cell_conf = cell.get("confidence", 0)
+        try:
+            conf_int = int(cell_conf)
+        except (TypeError, ValueError):
+            continue
+        if conf_int < SEE_ALSO_MIN_CONFIDENCE:
+            continue
+        coin = cell.get("coin")
+        if not coin:
+            continue
+        candidates.append(SeeAlsoCell(
+            coin=coin,
+            timeframe=same_tf,
+            confidence=conf_int,
+            exchange=cell_exchange,
+        ))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c.confidence)
+
+
+def _build_trade_call_view(
+    row: WatchRow,
+    tc_result: dict[str, Any],
+    state: QuotaState,
+    see_also: SeeAlsoCell | None,
+) -> TradeCallView:
+    """Pull the full metric set (call + indicators) out of the upstream
+    response and shape it for ``render_trade_call_card``. Indicator fields
+    that the upstream omits stay as None — the renderer drops those rows
+    rather than showing ``?`` or ``N/A``.
+    """
+    indicators = tc_result.get("indicators") or {}
+    tier_label: str | None = None
+    quota_used: int | None = None
+    quota_total: int | None = None
+    if state.is_paid and state.linked_tier:
+        tier_label = state.linked_tier.capitalize()
+    else:
+        quota_used = state.used
+        quota_total = state.total
+    return TradeCallView(
+        coin=row.coin,
+        timeframe=row.timeframe,
+        exchange=row.exchange,
+        call=(tc_result.get("call") or "").upper(),
+        confidence=_maybe_int(tc_result.get("confidence")),
+        price=_maybe_float(tc_result.get("price_at_signal") or tc_result.get("price")),
+        regime=tc_result.get("regime"),
+        funding_rate=_maybe_optional_float(indicators.get("funding_rate")),
+        funding_24h_avg=_maybe_optional_float(indicators.get("funding_24h_avg")),
+        funding_state=indicators.get("funding_state"),
+        oi_change_pct=_maybe_optional_float(indicators.get("oi_change_pct")),
+        volume_24h=_maybe_optional_float(indicators.get("volume_24h")),
+        trend_persistence=indicators.get("trend_persistence"),
+        breakout_pending=indicators.get("breakout_pending"),
+        reasoning=tc_result.get("reasoning"),
+        see_also=see_also,
+        tier_label=tier_label,
+        quota_used=quota_used,
+        quota_total=quota_total,
+    )
+
+
+def _maybe_optional_float(v: Any) -> float | None:
+    """Like ``_maybe_float`` but returns None on missing/invalid (so the
+    image renderer can omit the corresponding row rather than show 0.0)."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _maybe_int(v: Any, default: int = 0) -> int:
     try:
         return int(v)
@@ -273,18 +410,20 @@ async def process_one_row(
                 else:
                     cta = trade_call_cta_text(state, now=now)
                     threshold = quota_threshold(state)
-                    text = format_trade_call_alert(
-                        row,
-                        call,
-                        _maybe_int(tc_result.get("confidence")),
-                        _maybe_float(tc_result.get("price_at_signal") or tc_result.get("price")),
-                        tc_result.get("regime", "?"),
-                        tc_result.get("funding_state") or tc_result.get("funding", "?"),
-                        tc_result.get("reasoning"),
-                        state,
-                        cta=cta or None,
+                    primary_conf = _maybe_int(tc_result.get("confidence"))
+                    see_also = _pick_see_also(
+                        tc_result.get("also_see"),
+                        primary_confidence=primary_conf,
+                        same_tf=row.timeframe,
+                        same_exchange=row.exchange,
                     )
-                    if await _push(bot, row.chat_id, text):
+                    view = _build_trade_call_view(row, tc_result, state, see_also)
+                    photo_bytes = render_trade_call_card(view)
+                    # Caption holds the quota-CTA text (URLs clickable);
+                    # image carries the metric card itself. None caption is
+                    # fine for paid users + free users without an active CTA.
+                    caption = cta or None
+                    if await _push_photo(bot, row.chat_id, photo_bytes, caption):
                         consume_quota(db, row.chat_id)
                         db.increment_total_call_alerts(row.chat_id)
                         if cta:
@@ -306,6 +445,8 @@ async def process_one_row(
                             quota_used=state.used + 1,
                             quota_total=state.total,
                             cta_shown=bool(cta),
+                            see_also_shown=see_also is not None,
+                            primary_confidence=primary_conf,
                         )
             # HOLD verdicts are silently absorbed — no message, no quota tick (per spec).
         except McpError as e:
