@@ -71,6 +71,16 @@ C4_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN total_ctas_shown INTEGER NOT NULL DEFAULT 0",
 )
 
+# C5 — anti-abuse 24h counters + quota-burn suppression timestamp.
+# These fields drive the per-user rate limit (20 regime + 30 calls per 24h)
+# and the 50-call/24h quota-burn protection (suppressed-until timestamp).
+C5_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN alerts_24h_regime_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subscribers ADD COLUMN alerts_24h_calls_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subscribers ADD COLUMN alerts_24h_window_start TIMESTAMP",
+    "ALTER TABLE subscribers ADD COLUMN calls_burn_suppressed_until TIMESTAMP",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -98,7 +108,7 @@ class Database:
             cur.executescript(SCHEMA_SQL)
             # C4 additive migrations — idempotent via try/except on
             # "duplicate column name" (SQLite < 3.35 lacks ADD COLUMN IF NOT EXISTS).
-            for stmt in C4_MIGRATIONS:
+            for stmt in (*C4_MIGRATIONS, *C5_MIGRATIONS):
                 try:
                     cur.execute(stmt)
                 except sqlite3.OperationalError as e:
