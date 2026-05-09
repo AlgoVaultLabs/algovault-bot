@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
-from algovault_bot.admin import handle_stats, is_admin, render_stats
+from algovault_bot.admin import handle_stats, is_admin
 from algovault_bot.db import Database
 
 

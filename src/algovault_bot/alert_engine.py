@@ -42,8 +42,7 @@ from .cta import (
 from .db import Database, DEFAULT_DB_PATH
 from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
-from .messages import signup_url
-from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState, consume_quota, get_quota_state
+from .quota import QuotaState, consume_quota, get_quota_state
 from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
 

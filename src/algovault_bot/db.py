@@ -258,7 +258,6 @@ class Database:
         ``last_fetched_at IS NULL`` (never fetched).
         """
         with self._cursor() as cur:
-            params = [(tf, secs) for tf, secs in tf_seconds.items()]
             cur.execute(
                 """
                 SELECT chat_id, coin, timeframe, exchange, alert_type,
