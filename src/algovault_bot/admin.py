@@ -38,7 +38,6 @@ def render_stats(db: Database) -> str:
     """Return a formatted multi-line stats string for the requesting admin."""
     now = datetime.now(timezone.utc)
     day_ago = (now - timedelta(days=1)).isoformat()
-    week_ago = (now - timedelta(days=7)).isoformat()
 
     with db._cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM subscribers")
@@ -83,11 +82,11 @@ def render_stats(db: Database) -> str:
         )
         top_assets = list(cur.fetchall())
 
-        # Subscribers seen in 24h / 7d
-        cur.execute("SELECT COUNT(*) FROM subscribers WHERE last_seen_at >= ?", (day_ago,))
-        active_24h = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM subscribers WHERE last_seen_at >= ?", (week_ago,))
-        active_7d = int(cur.fetchone()[0])
+        # Operator format alignment 2026-05-10: replaced "active 24h / 7d"
+        # retention metrics with "new subscribers last 24h" acquisition
+        # metric to match the daily digest format.
+        cur.execute("SELECT COUNT(*) FROM subscribers WHERE created_at >= ?", (day_ago,))
+        new_subs_24h = int(cur.fetchone()[0])
 
     # BOT-W2 conversion attribution. Compute ratio CTAs-shown → signups-linked.
     conversion_ratio = (
@@ -96,10 +95,11 @@ def render_stats(db: Database) -> str:
     )
 
     lines = [
-        "📊 algovault-bot — admin stats",
+        "📊 Algovault-Telegram-bot — Admin Stats",
         f"Generated: {now.isoformat(timespec='seconds')}",
         "",
-        f"👥 Subscribers       : {total_subs} (active 24h={active_24h}, 7d={active_7d})",
+        f"👥 Total Subscribers: {total_subs}",
+        f"👥 New Subscribers last 24h: {new_subs_24h}",
         f"📝 Watchlist entries : {total_watches}",
         "",
         "🔔 Alerts (all-time, per-user counters):",
