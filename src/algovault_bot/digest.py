@@ -31,8 +31,12 @@ def render_digest(db: Database) -> str:
     with db._cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM subscribers")
         total_subs = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM subscribers WHERE last_seen_at >= ?", (day_ago,))
-        active_24h = int(cur.fetchone()[0])
+        # Operator format change 2026-05-10: previous metric was
+        # "active 24h" (last_seen_at >= day_ago). New metric is
+        # "new subscribers last 24h" (created_at >= day_ago) — funnel
+        # acquisition signal rather than retention.
+        cur.execute("SELECT COUNT(*) FROM subscribers WHERE created_at >= ?", (day_ago,))
+        new_subs_24h = int(cur.fetchone()[0])
 
         cur.execute("SELECT COALESCE(SUM(total_regime_alerts), 0) FROM subscribers")
         regime_total = int(cur.fetchone()[0])
@@ -43,10 +47,12 @@ def render_digest(db: Database) -> str:
         watch_total = int(cur.fetchone()[0])
 
     return (
-        "🤖 algovault-bot — daily digest "
+        "🤖 Algovault-Telegram-bot — Daily Digest "
         f"({now.strftime('%Y-%m-%d %H:%M UTC')})\n"
         f"\n"
-        f"👥 Subscribers: {total_subs} (active 24h: {active_24h})\n"
+        f"👥 Total Subscribers: {total_subs}\n"
+        f"👥 New Subscribers last 24h: {new_subs_24h}\n"
+        f"\n"
         f"📝 Watchlist entries: {watch_total}\n"
         f"\n"
         f"All-time alerts:\n"

@@ -23,8 +23,9 @@ def test_telegram_global_semaphore_size_25() -> None:
 def test_digest_renders_with_zero_state(tmp_db: Database) -> None:
     from algovault_bot.digest import render_digest
     text = render_digest(tmp_db)
-    assert "algovault-bot — daily digest" in text
-    assert "Subscribers: 0" in text
+    assert "Algovault-Telegram-bot — Daily Digest" in text
+    assert "Total Subscribers: 0" in text
+    assert "New Subscribers last 24h: 0" in text
 
 
 def test_digest_aggregates_sample_data(tmp_db: Database) -> None:
@@ -36,7 +37,9 @@ def test_digest_aggregates_sample_data(tmp_db: Database) -> None:
     tmp_db.increment_total_regime_alerts(1)
     tmp_db.increment_total_call_alerts(2)
     text = render_digest(tmp_db)
-    assert "Subscribers: 2" in text
+    assert "Total Subscribers: 2" in text
+    # Both subscribers were just upserted → both count as "new" within last 24h.
+    assert "New Subscribers last 24h: 2" in text
     # All-time block still renders the lifetime totals.
     assert "📊 Regime: 2" in text
     assert "📈 Calls: 1" in text
