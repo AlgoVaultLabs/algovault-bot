@@ -103,6 +103,15 @@ ALERT_CLEANUP_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN quota_90_last_fired_at TIMESTAMP",
 )
 
+# BOT-ZOMBIE-W1 (2026-05-17) — mark subscribers who've blocked the bot so the
+# digest/stats counts reflect reachable users only. Set by the alert engine
+# when bot.send_message / send_photo raises Forbidden ("bot was blocked by
+# the user"); cleared by handle_start when the subscriber sends /start
+# again (i.e. they've unblocked).
+ZOMBIE_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN bot_blocked_at TIMESTAMP",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -135,6 +144,7 @@ class Database:
                 *C5_MIGRATIONS,
                 *W2_LINKED_MIGRATIONS,
                 *ALERT_CLEANUP_MIGRATIONS,
+                *ZOMBIE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -401,6 +411,42 @@ class Database:
                 f"UPDATE subscribers SET {col} = ? WHERE chat_id = ?",
                 (now_iso, chat_id),
             )
+
+    # ── BOT-ZOMBIE-W1: bot-blocked subscriber bookkeeping ────────────
+
+    def mark_subscriber_blocked(self, chat_id: int, now_iso: str) -> None:
+        """Record that bot.send_* returned Forbidden ("bot was blocked by the
+        user") for this chat. Digest/stats exclude subscribers with a
+        non-null ``bot_blocked_at`` so the count reflects reachable users.
+        Idempotent — re-blocking just updates the timestamp."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET bot_blocked_at = ? WHERE chat_id = ?",
+                (now_iso, chat_id),
+            )
+
+    def unmark_subscriber_blocked(self, chat_id: int) -> None:
+        """Clear ``bot_blocked_at`` — called from handle_start when a previously
+        blocked subscriber sends /start again (i.e. they've unblocked).
+        No-op if the column was already NULL."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET bot_blocked_at = NULL "
+                "WHERE chat_id = ? AND bot_blocked_at IS NOT NULL",
+                (chat_id,),
+            )
+
+    def count_active_subscribers(self) -> int:
+        """Count subscribers who haven't blocked the bot."""
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NULL")
+            return int(cur.fetchone()[0])
+
+    def count_blocked_subscribers(self) -> int:
+        """Count subscribers who HAVE blocked the bot (zombies)."""
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NOT NULL")
+            return int(cur.fetchone()[0])
 
     def update_watch_after_fetch(
         self,

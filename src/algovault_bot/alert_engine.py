@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import Forbidden, TelegramError
 
 from datetime import datetime, timezone
 
@@ -168,12 +168,37 @@ def format_quota_exhausted_alert(row: WatchRow, call: str, cta: str) -> str:
 # ── one-shot cron tick ─────────────────────────────────────────
 
 
-async def _push(bot: Bot, chat_id: int, text: str) -> bool:
+def _handle_forbidden(db: Database | None, chat_id: int, err: BaseException) -> None:
+    """BOT-ZOMBIE-W1: when bot.send_* raises Forbidden (almost always
+    "bot was blocked by the user"), mark the subscriber so the digest/stats
+    counts exclude them. Falls through silently if db is None (some test
+    paths or one-shot scripts don't have DB access)."""
+    if db is None:
+        return
+    try:
+        db.mark_subscriber_blocked(chat_id, datetime.now(timezone.utc).isoformat())
+        log.info(json.dumps({
+            "event": "subscriber_marked_blocked",
+            "chat_id": chat_id,
+            "err": str(err)[:200],
+        }))
+    except Exception as e:  # noqa: BLE001 — mark is best-effort
+        log.warning(json.dumps({
+            "event": "mark_subscriber_blocked_failed",
+            "chat_id": chat_id,
+            "err": str(e)[:200],
+        }))
+
+
+async def _push(bot: Bot, chat_id: int, text: str, db: Database | None = None) -> bool:
     """Send a message under the per-bot Telegram global semaphore."""
     async with TELEGRAM_GLOBAL_SEMAPHORE:
         try:
             await bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
             return True
+        except Forbidden as e:
+            _handle_forbidden(db, chat_id, e)
+            return False
         except TelegramError as e:
             log.warning(
                 json.dumps({"event": "telegram_send_failed", "chat_id": chat_id, "err": str(e)})
@@ -182,7 +207,11 @@ async def _push(bot: Bot, chat_id: int, text: str) -> bool:
 
 
 async def _push_photo(
-    bot: Bot, chat_id: int, photo_bytes: bytes, caption: str | None = None
+    bot: Bot,
+    chat_id: int,
+    photo_bytes: bytes,
+    caption: str | None = None,
+    db: Database | None = None,
 ) -> bool:
     """Send a photo (PNG bytes) under the global semaphore. Used for the
     image-format trade-call alerts. Caption holds optional CTA text (URLs are
@@ -196,6 +225,9 @@ async def _push_photo(
                 caption=caption,
             )
             return True
+        except Forbidden as e:
+            _handle_forbidden(db, chat_id, e)
+            return False
         except TelegramError as e:
             log.warning(
                 json.dumps({"event": "telegram_send_photo_failed", "chat_id": chat_id, "err": str(e)})
@@ -359,7 +391,7 @@ async def process_one_row(
                     text = format_regime_alert(
                         row, row.regime_last_seen, current_regime, confidence, cta=cta,
                     )
-                    if await _push(bot, row.chat_id, text):
+                    if await _push(bot, row.chat_id, text, db=db):
                         regime_seen = current_regime
                         fetched["regime"] = "fired"
                         if cta:
@@ -403,7 +435,7 @@ async def process_one_row(
                     # C4: send the exhausted-quota notice + quota_100 CTA + x402 fallback.
                     cta = trade_call_cta_text(state, now=now)
                     text = format_quota_exhausted_alert(row, call, cta)
-                    if await _push(bot, row.chat_id, text):
+                    if await _push(bot, row.chat_id, text, db=db):
                         fetched["trade_call"] = "exhausted_alert_sent"
                         db.increment_total_ctas_shown(row.chat_id)
                 else:
@@ -422,7 +454,7 @@ async def process_one_row(
                     # image carries the metric card itself. None caption is
                     # fine for paid users + free users without an active CTA.
                     caption = cta or None
-                    if await _push_photo(bot, row.chat_id, photo_bytes, caption):
+                    if await _push_photo(bot, row.chat_id, photo_bytes, caption, db=db):
                         consume_quota(db, row.chat_id)
                         db.increment_total_call_alerts(row.chat_id)
                         if cta:

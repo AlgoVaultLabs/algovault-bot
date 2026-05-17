@@ -40,8 +40,15 @@ def render_stats(db: Database) -> str:
     day_ago = (now - timedelta(days=1)).isoformat()
 
     with db._cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM subscribers")
+        # BOT-ZOMBIE-W1 2026-05-17: Total excludes bot-blocked subscribers.
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NULL"
+        )
         total_subs = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NOT NULL"
+        )
+        blocked = int(cur.fetchone()[0])
 
         cur.execute("SELECT COUNT(*) FROM watchlists")
         total_watches = int(cur.fetchone()[0])
@@ -84,8 +91,14 @@ def render_stats(db: Database) -> str:
 
         # Operator format alignment 2026-05-10: replaced "active 24h / 7d"
         # retention metrics with "new subscribers last 24h" acquisition
-        # metric to match the daily digest format.
-        cur.execute("SELECT COUNT(*) FROM subscribers WHERE created_at >= ?", (day_ago,))
+        # metric to match the daily digest format. BOT-ZOMBIE-W1 2026-05-17:
+        # excludes bot-blocked subscribers so the count reflects reachable
+        # users.
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers "
+            "WHERE created_at >= ? AND bot_blocked_at IS NULL",
+            (day_ago,),
+        )
         new_subs_24h = int(cur.fetchone()[0])
 
     # BOT-W2 conversion attribution. Compute ratio CTAs-shown → signups-linked.
@@ -100,6 +113,10 @@ def render_stats(db: Database) -> str:
         "",
         f"👥 Total Subscribers: {total_subs}",
         f"👥 New Subscribers last 24h: {new_subs_24h}",
+    ]
+    if blocked > 0:
+        lines.append(f"🚫 Blocked the bot: {blocked}")
+    lines.extend([
         f"📝 Watchlist entries : {total_watches}",
         "",
         "🔔 Alerts (all-time, per-user counters):",
@@ -109,7 +126,7 @@ def render_stats(db: Database) -> str:
         "",
         "💎 Conversion attribution (BOT-W2):",
         f"  Linked subscribers : {linked_total}",
-    ]
+    ])
     for r in linked_by_tier:
         lines.append(f"    {r['tier']:<10} : {r['c']}")
     if not linked_by_tier:

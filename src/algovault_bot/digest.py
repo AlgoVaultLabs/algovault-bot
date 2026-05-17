@@ -29,14 +29,23 @@ def render_digest(db: Database) -> str:
     day_ago = (now - timedelta(days=1)).isoformat()
 
     with db._cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM subscribers")
+        # BOT-ZOMBIE-W1 2026-05-17: "Total" + "New 24h" both exclude
+        # bot-blocked subscribers so the count reflects reachable users.
+        # The Blocked line surfaces only when at least one zombie exists.
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NULL"
+        )
         total_subs = int(cur.fetchone()[0])
-        # Operator format change 2026-05-10: previous metric was
-        # "active 24h" (last_seen_at >= day_ago). New metric is
-        # "new subscribers last 24h" (created_at >= day_ago) — funnel
-        # acquisition signal rather than retention.
-        cur.execute("SELECT COUNT(*) FROM subscribers WHERE created_at >= ?", (day_ago,))
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers "
+            "WHERE created_at >= ? AND bot_blocked_at IS NULL",
+            (day_ago,),
+        )
         new_subs_24h = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NOT NULL"
+        )
+        blocked = int(cur.fetchone()[0])
 
         cur.execute("SELECT COALESCE(SUM(total_regime_alerts), 0) FROM subscribers")
         regime_total = int(cur.fetchone()[0])
@@ -46,19 +55,25 @@ def render_digest(db: Database) -> str:
         cur.execute("SELECT COUNT(*) FROM watchlists")
         watch_total = int(cur.fetchone()[0])
 
-    return (
+    lines = [
         "🤖 Algovault-Telegram-bot — Daily Digest "
-        f"({now.strftime('%Y-%m-%d %H:%M UTC')})\n"
-        f"\n"
-        f"👥 Total Subscribers: {total_subs}\n"
-        f"👥 New Subscribers last 24h: {new_subs_24h}\n"
-        f"\n"
-        f"📝 Watchlist entries: {watch_total}\n"
-        f"\n"
-        f"All-time alerts:\n"
-        f"  📊 Regime: {regime_total}\n"
-        f"  📈 Calls: {calls_total}\n"
-    )
+        f"({now.strftime('%Y-%m-%d %H:%M UTC')})",
+        "",
+        f"👥 Total Subscribers: {total_subs}",
+        f"👥 New Subscribers last 24h: {new_subs_24h}",
+    ]
+    if blocked > 0:
+        lines.append(f"🚫 Blocked the bot: {blocked}")
+    lines.extend([
+        "",
+        f"📝 Watchlist entries: {watch_total}",
+        "",
+        "All-time alerts:",
+        f"  📊 Regime: {regime_total}",
+        f"  📈 Calls: {calls_total}",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def send_via_internal_monitor(text: str) -> None:

@@ -113,6 +113,10 @@ def handle_start(
     db: Database, chat_id: int, username: str | None, lang_code: str | None
 ) -> str:
     db.upsert_subscriber(chat_id, username, lang_code)
+    # BOT-ZOMBIE-W1: if this subscriber was previously marked bot-blocked,
+    # /start is hard proof they've unblocked. Clear the flag so digest/stats
+    # count them as a reachable subscriber again.
+    db.unmark_subscriber_blocked(chat_id)
     return messages.WELCOME_MESSAGE
 
 
