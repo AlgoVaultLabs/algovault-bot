@@ -133,6 +133,27 @@ def usage_unwatch_message() -> str:
     )
 
 
+def symbol_unknown_message(coin: str, exchange: str) -> str:
+    """Reply when /watch tried to add a symbol the upstream doesn't recognize.
+
+    BOT-WATCH-VALIDATE-W1 (2026-05-17): preflight `get_trade_call` returned a
+    clean null-call/null-price response — the upstream silently doesn't know
+    the symbol. Tell the user before the watch lands in the DB and starts
+    swallowing 1m ticks for days with zero alerts.
+    """
+    return (
+        f"❌ '{coin}' isn't recognized by AlgoVault on {exchange}.\n"
+        "\n"
+        "TradFi symbols (Binance / Bybit / OKX / Bitget):\n"
+        "  • GOLD or XAU — gold\n"
+        "  • SP500 — S&P 500\n"
+        "  • TSLA, NVDA, MSTR, AAPL — US stocks\n"
+        "Crypto: use uppercase tickers (BTC, ETH, SOL, DOGE, etc.).\n"
+        "\n"
+        "Use /help for the full command reference."
+    )
+
+
 # ── BOT-W2 link confirmation messages ──────────────────────────
 
 

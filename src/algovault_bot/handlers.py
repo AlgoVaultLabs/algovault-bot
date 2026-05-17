@@ -9,6 +9,7 @@ a temp SQLite, no Telegram sockets in the loop.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Sequence
 
@@ -19,6 +20,7 @@ from . import messages
 from .admin import handle_stats as admin_handle_stats
 from .db import Database, PER_USER_WATCHLIST_CAP
 from .link_validator import validate_api_key
+from .mcp_client import McpError, from_env
 from .validators import (
     DEFAULT_ALERT_TYPE,
     DEFAULT_EXCHANGE,
@@ -30,6 +32,72 @@ from .validators import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# ── BOT-WATCH-VALIDATE-W1 — symbol preflight at /watch time ───
+#
+# Discovered 2026-05-17: a watch row whose symbol the upstream doesn't
+# recognize (e.g. `XAUUSD` instead of `GOLD` / `XAU`) gets a 200 OK with
+# null call/price on every cron tick — the alert engine treats null call
+# as HOLD-equivalent and silently absorbs it. Result: the watch sits dead
+# in the DB forever, never firing a single alert.
+#
+# Fix: at /watch insert time, fire one preflight `get_trade_call` against
+# the proposed (coin, tf, exchange). If the upstream returns a clean null
+# response, reject the watch before it lands. If the MCP itself errors,
+# fail-open (allow the watch through; cron will sort it out — beats
+# blocking legitimate watches during a transient outage).
+
+
+def _validate_symbol_impl(coin: str, timeframe: str, exchange: str) -> str | None:
+    """Real preflight implementation — fires a live MCP call. Tests call this
+    directly to exercise the real logic; production calls ``_validate_symbol``
+    which is just an alias (the alias seam exists so the test fixture can
+    monkeypatch the alias to a no-op without breaking direct-impl tests)."""
+    try:
+        with from_env() as cli:
+            result = cli.call_tool(
+                "get_trade_call",
+                {
+                    "coin": coin,
+                    "timeframe": timeframe,
+                    "exchange": exchange,
+                    "includeReasoning": False,
+                },
+            )
+    except McpError as e:
+        log.warning(
+            json.dumps({
+                "event": "watch_validate_mcp_failed",
+                "coin": coin,
+                "timeframe": timeframe,
+                "exchange": exchange,
+                "err": str(e)[:200],
+            })
+        )
+        return None  # fail-open
+    # Clean null response = upstream silently doesn't know this symbol.
+    # A valid HOLD call returns call='HOLD' + a real price.
+    if result.get("call") is None and result.get("price") is None:
+        log.info(
+            json.dumps({
+                "event": "watch_rejected_unknown_symbol",
+                "coin": coin,
+                "timeframe": timeframe,
+                "exchange": exchange,
+            })
+        )
+        return messages.symbol_unknown_message(coin, exchange)
+    return None
+
+
+# Test seam — production wires through this alias. The conftest autouse
+# fixture monkeypatches THIS alias to a no-op so handler tests don't hit
+# a live MCP server. Tests that want to exercise the real logic call
+# ``_validate_symbol_impl`` directly (which the autouse fixture leaves
+# untouched).
+def _validate_symbol(coin: str, timeframe: str, exchange: str) -> str | None:
+    return _validate_symbol_impl(coin, timeframe, exchange)
 
 
 # ── /start deep-link parameter (BOT-W2) ───────────────────────
@@ -128,6 +196,15 @@ def handle_watch(
     )
     if not is_existing and existing_count >= PER_USER_WATCHLIST_CAP:
         return messages.cap_reached_message(PER_USER_WATCHLIST_CAP)
+
+    # Symbol preflight (BOT-WATCH-VALIDATE-W1) — only on insert. Modifying
+    # an existing entry's alert_type doesn't need re-validation (the row was
+    # already validated when first added, OR predates the validation; in
+    # both cases the user can /unwatch via /list without help).
+    if not is_existing:
+        symbol_err = _validate_symbol(coin, timeframe, exchange)
+        if symbol_err:
+            return symbol_err
 
     db.add_watch(chat_id, coin, timeframe, exchange, alert_type)
     return messages.watch_added_message(coin, timeframe, exchange, alert_type)
