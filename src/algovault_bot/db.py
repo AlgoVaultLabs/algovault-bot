@@ -112,6 +112,29 @@ ZOMBIE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN bot_blocked_at TIMESTAMP",
 )
 
+# BOT-DIGEST-LAST24H-W1 (2026-05-21) — per-alert log so the daily digest can
+# report a rolling-24h window instead of the lifetime sum of
+# subscribers.total_regime_alerts + total_call_alerts. The lifetime counters
+# stay in place (admin /stats still reports them under a separate header),
+# but the daily digest now answers "what happened yesterday" via a
+# SELECT COUNT(*) ... WHERE fired_at >= datetime('now', '-1 day') filter
+# against this table.
+#
+# Idempotent CREATE pattern: SQLite has CREATE TABLE IF NOT EXISTS so no
+# try/except needed here, but we keep the ADD-COLUMN-style tuple shape for
+# consistency with the rest of the wave migrations + so a later wave can
+# tack on indexes via the same loop.
+DIGEST_LAST24H_MIGRATIONS = (
+    "CREATE TABLE IF NOT EXISTS alerts_fired ("
+    "  id       INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  chat_id  INTEGER NOT NULL,"
+    "  kind     TEXT NOT NULL CHECK (kind IN ('regime', 'call')),"
+    "  fired_at TIMESTAMP NOT NULL DEFAULT (datetime('now'))"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_alerts_fired_at ON alerts_fired(fired_at)",
+    "CREATE INDEX IF NOT EXISTS idx_alerts_fired_kind_at ON alerts_fired(kind, fired_at)",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -145,11 +168,16 @@ class Database:
                 *W2_LINKED_MIGRATIONS,
                 *ALERT_CLEANUP_MIGRATIONS,
                 *ZOMBIE_MIGRATIONS,
+                *DIGEST_LAST24H_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
                 except sqlite3.OperationalError as e:
-                    if "duplicate column name" not in str(e):
+                    msg = str(e).lower()
+                    if (
+                        "duplicate column name" not in msg
+                        and "already exists" not in msg
+                    ):
                         raise
 
     def _enforce_mode_660(self) -> None:
@@ -447,6 +475,36 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NOT NULL")
             return int(cur.fetchone()[0])
+
+    # ── BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h digest ──
+
+    def record_alert_fired(self, chat_id: int, kind: str) -> None:
+        """Record one successful Telegram alert delivery for the rolling-24h
+        digest count. Called from ``alert_engine._push`` /
+        ``_push_photo`` AFTER the Telegram API returns OK — failed sends are
+        not counted. ``kind`` ∈ {'regime', 'call'}; quota-exhausted notices
+        are operator UX nudges, not signal volume, so they are NOT recorded.
+        ``fired_at`` defaults to ``datetime('now')`` (UTC) at the DB layer."""
+        if kind not in ("regime", "call"):
+            raise ValueError(f"alerts_fired.kind must be 'regime' or 'call', got {kind!r}")
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO alerts_fired(chat_id, kind) VALUES (?, ?)",
+                (chat_id, kind),
+            )
+
+    def count_alerts_fired_last_24h(self) -> tuple[int, int]:
+        """Return ``(regime_count, call_count)`` for the rolling-24h window
+        ending now. UTC throughout; SQLite ``datetime('now')`` is UTC by
+        default, matching the digest cron fire time (03:00 UTC nightly)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT kind, COUNT(*) FROM alerts_fired "
+                "WHERE fired_at >= datetime('now', '-1 day') "
+                "GROUP BY kind"
+            )
+            counts = {row[0]: int(row[1]) for row in cur.fetchall()}
+        return counts.get("regime", 0), counts.get("call", 0)
 
     def update_watch_after_fetch(
         self,

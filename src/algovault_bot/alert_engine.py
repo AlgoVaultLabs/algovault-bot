@@ -394,6 +394,10 @@ async def process_one_row(
                     if await _push(bot, row.chat_id, text, db=db):
                         regime_seen = current_regime
                         fetched["regime"] = "fired"
+                        # BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h
+                        # digest count. Recorded ONLY after _push returned True,
+                        # so failed-send rows don't inflate the 24h count.
+                        db.record_alert_fired(row.chat_id, "regime")
                         if cta:
                             db.increment_total_ctas_shown(row.chat_id)
                         log_alert_event(
@@ -457,6 +461,11 @@ async def process_one_row(
                     if await _push_photo(bot, row.chat_id, photo_bytes, caption, db=db):
                         consume_quota(db, row.chat_id)
                         db.increment_total_call_alerts(row.chat_id)
+                        # BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h
+                        # digest count. Recorded ONLY after _push_photo
+                        # returned True; quota-exhausted notices (handled above)
+                        # are operator UX nudges and are NOT recorded.
+                        db.record_alert_fired(row.chat_id, "call")
                         if cta:
                             db.increment_total_ctas_shown(row.chat_id)
                             # 24h-per-threshold throttle for the soft/urgent

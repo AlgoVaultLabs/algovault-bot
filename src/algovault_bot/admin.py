@@ -53,7 +53,20 @@ def render_stats(db: Database) -> str:
         cur.execute("SELECT COUNT(*) FROM watchlists")
         total_watches = int(cur.fetchone()[0])
 
-        # All-time totals
+        # BOT-DIGEST-LAST24H-W1 2026-05-21: rolling-24h alert counts from
+        # the alerts_fired log; matches the daily-digest shape so digest +
+        # admin stay aligned (BOT-ZOMBIE-W1 precedent).
+        cur.execute(
+            "SELECT kind, COUNT(*) FROM alerts_fired "
+            "WHERE fired_at >= datetime('now', '-1 day') "
+            "GROUP BY kind"
+        )
+        kind_counts = {row[0]: int(row[1]) for row in cur.fetchall()}
+        regime_24h = kind_counts.get("regime", 0)
+        calls_24h = kind_counts.get("call", 0)
+
+        # Lifetime per-user totals (kept for admin-only deep view + the
+        # CTAs→Linked conversion ratio computed below).
         cur.execute("SELECT COALESCE(SUM(total_regime_alerts), 0) FROM subscribers")
         regime_alerts_total = int(cur.fetchone()[0])
         cur.execute("SELECT COALESCE(SUM(total_call_alerts), 0) FROM subscribers")
@@ -119,7 +132,11 @@ def render_stats(db: Database) -> str:
     lines.extend([
         f"📝 Watchlist entries : {total_watches}",
         "",
-        "🔔 Alerts (all-time, per-user counters):",
+        "Last 24h Alerts:",
+        f"  📊 Regime: {regime_24h}",
+        f"  📈 Calls: {calls_24h}",
+        "",
+        "🔔 Alerts (lifetime, per-user counters):",
         f"  📊 Regime shifts   : {regime_alerts_total}",
         f"  📈 Trade calls     : {call_alerts_total}",
         f"  🎯 CTAs shown      : {ctas_total}",

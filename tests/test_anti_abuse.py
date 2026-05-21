@@ -33,13 +33,18 @@ def test_digest_aggregates_sample_data(tmp_db: Database) -> None:
     tmp_db.upsert_subscriber(1, "u1", "en")
     tmp_db.upsert_subscriber(2, "u2", "en")
     tmp_db.add_watch(1, "BTC", "4h", "BINANCE", "both")
-    tmp_db.increment_total_regime_alerts(1)
-    tmp_db.increment_total_regime_alerts(1)
-    tmp_db.increment_total_call_alerts(2)
+    # BOT-DIGEST-LAST24H-W1 2026-05-21: digest now reads from alerts_fired
+    # (rolling-24h log) instead of subscribers.total_regime_alerts /
+    # total_call_alerts (lifetime). Test rewritten to record alerts via the
+    # new helper; lifetime counter increments would no longer surface in
+    # the digest body.
+    tmp_db.record_alert_fired(1, "regime")
+    tmp_db.record_alert_fired(1, "regime")
+    tmp_db.record_alert_fired(2, "call")
     text = render_digest(tmp_db)
     assert "Total Subscribers: 2" in text
     # Both subscribers were just upserted → both count as "new" within last 24h.
     assert "New Subscribers last 24h: 2" in text
-    # All-time block still renders the lifetime totals.
+    # Last 24h block renders the alerts_fired counts.
     assert "📊 Regime: 2" in text
     assert "📈 Calls: 1" in text

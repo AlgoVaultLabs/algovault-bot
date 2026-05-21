@@ -47,10 +47,20 @@ def render_digest(db: Database) -> str:
         )
         blocked = int(cur.fetchone()[0])
 
-        cur.execute("SELECT COALESCE(SUM(total_regime_alerts), 0) FROM subscribers")
-        regime_total = int(cur.fetchone()[0])
-        cur.execute("SELECT COALESCE(SUM(total_call_alerts), 0) FROM subscribers")
-        calls_total = int(cur.fetchone()[0])
+        # BOT-DIGEST-LAST24H-W1 2026-05-21: switched from
+        # SUM(total_regime_alerts) / SUM(total_call_alerts) lifetime counters
+        # to a rolling-24h count over the alerts_fired log so the digest
+        # answers "what happened yesterday" instead of "what happened since
+        # /opt/algovault-bot/ was first deployed". Lifetime totals still live
+        # in admin /stats under a separate "(all-time)" header.
+        cur.execute(
+            "SELECT kind, COUNT(*) FROM alerts_fired "
+            "WHERE fired_at >= datetime('now', '-1 day') "
+            "GROUP BY kind"
+        )
+        kind_counts = {row[0]: int(row[1]) for row in cur.fetchall()}
+        regime_24h = kind_counts.get("regime", 0)
+        calls_24h = kind_counts.get("call", 0)
 
         cur.execute("SELECT COUNT(*) FROM watchlists")
         watch_total = int(cur.fetchone()[0])
@@ -68,9 +78,9 @@ def render_digest(db: Database) -> str:
         "",
         f"📝 Watchlist entries: {watch_total}",
         "",
-        "All-time alerts:",
-        f"  📊 Regime: {regime_total}",
-        f"  📈 Calls: {calls_total}",
+        "Last 24h Alerts:",
+        f"  📊 Regime: {regime_24h}",
+        f"  📈 Calls: {calls_24h}",
         "",
     ])
     return "\n".join(lines)
