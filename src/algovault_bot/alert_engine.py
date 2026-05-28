@@ -442,6 +442,22 @@ async def process_one_row(
                     if await _push(bot, row.chat_id, text, db=db):
                         fetched["trade_call"] = "exhausted_alert_sent"
                         db.increment_total_ctas_shown(row.chat_id)
+                        # ACTIVATION-FUNNEL-AUDIT-W1 (2026-05-28): funnel stage 13.
+                        # Q-C Option α: emit to alerts.log JSON-line stream; the
+                        # snapshot reader greps for "event": "tg_bot_quota_hit"
+                        # within the window. Fire ONLY when _push returned True
+                        # (Telegram message actually delivered) — no event for
+                        # blocked-subscriber or rate-limit-suppressed cases.
+                        log_alert_event(
+                            "tg_bot_quota_hit",
+                            chat_id=row.chat_id,
+                            coin=row.coin,
+                            timeframe=row.timeframe,
+                            exchange=row.exchange,
+                            call=call,
+                            quota_used=state.used,
+                            quota_total=state.total,
+                        )
                 else:
                     cta = trade_call_cta_text(state, now=now)
                     threshold = quota_threshold(state)

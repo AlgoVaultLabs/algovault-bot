@@ -135,6 +135,19 @@ DIGEST_LAST24H_MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS idx_alerts_fired_kind_at ON alerts_fired(kind, fired_at)",
 )
 
+# ACTIVATION-FUNNEL-AUDIT-W1 (2026-05-28): tracks the first non-/start command
+# per subscriber for the `tg_bot_first_command` funnel stage. NULL = subscriber
+# hasn't issued any non-/start command yet. Set once via
+# `set_first_command_fired_at()` on the first wrapper invocation that detects
+# the NULL value; never reset. Snapshot reader (scripts/funnel-snapshot.ts)
+# grabs the COUNT from the alerts.log JSON-line stream rather than directly
+# from this column — the column is a per-subscriber DEDUP flag for the
+# `log_alert_event("tg_bot_first_command", ...)` emit, not the canonical
+# count source.
+ACTIVATION_FUNNEL_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN first_command_fired_at TIMESTAMP",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -169,6 +182,7 @@ class Database:
                 *ALERT_CLEANUP_MIGRATIONS,
                 *ZOMBIE_MIGRATIONS,
                 *DIGEST_LAST24H_MIGRATIONS,
+                *ACTIVATION_FUNNEL_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -409,6 +423,37 @@ class Database:
             )
             row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    # ── ACTIVATION-FUNNEL-AUDIT-W1: first-command dedup flag ─────────────
+
+    def get_first_command_fired_at(self, chat_id: int) -> str | None:
+        """Return the raw `first_command_fired_at` ISO string for a subscriber,
+        or None if the subscriber has never fired a non-/start command (or
+        the row is absent).
+
+        Used by handlers.py wrappers to dedup the `tg_bot_first_command`
+        funnel-stage 11 emit per CLAUDE.md Q-C Option α — only fire the
+        log_alert_event once per subscriber, ever.
+        """
+        row = self.get_subscriber(chat_id)
+        if row is None:
+            return None
+        return row["first_command_fired_at"]
+
+    def set_first_command_fired_at(self, chat_id: int, now_iso: str) -> None:
+        """Set the `first_command_fired_at` flag for a subscriber (once-ever
+        marker). Idempotent in spirit — callers should check
+        `get_first_command_fired_at(chat_id) is None` BEFORE invoking, but
+        re-calling this method just overwrites the same row.
+
+        Used by handlers.py wrappers in coordination with the
+        `tg_bot_first_command` funnel-stage 11 emit (ACTIVATION-FUNNEL-AUDIT-W1).
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET first_command_fired_at = ? WHERE chat_id = ?",
+                (now_iso, chat_id),
+            )
 
     # ── BOT-ALERT-CLEANUP-W1: soft/urgent CTA per-threshold throttle ────
 

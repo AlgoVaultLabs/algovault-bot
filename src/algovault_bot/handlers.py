@@ -16,10 +16,13 @@ from typing import Sequence
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from datetime import datetime, timezone
+
 from . import messages
 from .admin import handle_stats as admin_handle_stats
 from .db import Database, PER_USER_WATCHLIST_CAP
 from .link_validator import validate_api_key
+from .log_setup import log_alert_event
 from .mcp_client import McpError, from_env
 from .validators import (
     DEFAULT_ALERT_TYPE,
@@ -267,6 +270,28 @@ def handle_list(db: Database, chat_id: int, username: str | None, lang_code: str
 # ── telegram framework adapters ─────────────────────────────────
 
 
+def _maybe_fire_first_command_event(db: Database, chat_id: int) -> None:
+    """ACTIVATION-FUNNEL-AUDIT-W1 (2026-05-28): fire `tg_bot_first_command`
+    (funnel stage 11) the FIRST time a subscriber issues any non-/start
+    command. Dedup via `subscribers.first_command_fired_at` column: once-set,
+    never re-emitted for the same chat_id. Q-C Option α: event lands in
+    `/var/log/algovault-bot/alerts.log` as JSON line; snapshot reader greps
+    for `"event": "tg_bot_first_command"` within window.
+
+    Fail-open: any DB or log error is swallowed so the command handler still
+    reaches reply_text(). The funnel emit is OBSERVATIONAL — it must not
+    block user-visible bot behavior.
+    """
+    try:
+        if db.get_first_command_fired_at(chat_id) is not None:
+            return  # already fired for this subscriber; dedup
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        db.set_first_command_fired_at(chat_id, now_iso)
+        log_alert_event("tg_bot_first_command", chat_id=chat_id)
+    except Exception as e:  # pragma: no cover — fail-open
+        logging.warning("tg_bot_first_command emit failed for chat_id=%s: %s", chat_id, e)
+
+
 def _user_meta(update: Update) -> tuple[int, str | None, str | None]:
     chat = update.effective_chat
     user = update.effective_user
@@ -301,6 +326,7 @@ def register_handlers(app: Application, db: Database) -> None:
         if update.message is None:
             return
         chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
         reply = handle_help(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
@@ -308,6 +334,7 @@ def register_handlers(app: Application, db: Database) -> None:
         if update.message is None:
             return
         chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_watch(db, chat_id, username, lang, args)
         await update.message.reply_text(reply, disable_web_page_preview=True)
@@ -316,6 +343,7 @@ def register_handlers(app: Application, db: Database) -> None:
         if update.message is None:
             return
         chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_unwatch(db, chat_id, username, lang, args)
         await update.message.reply_text(reply, disable_web_page_preview=True)
@@ -324,6 +352,7 @@ def register_handlers(app: Application, db: Database) -> None:
         if update.message is None:
             return
         chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
         reply = handle_list(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
@@ -331,6 +360,7 @@ def register_handlers(app: Application, db: Database) -> None:
         if update.message is None:
             return
         chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
         reply = handle_stats(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
