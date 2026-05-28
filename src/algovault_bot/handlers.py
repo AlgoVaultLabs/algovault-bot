@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from . import messages
 from .admin import handle_stats as admin_handle_stats
+from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
 from .db import Database, PER_USER_WATCHLIST_CAP
 from .link_validator import validate_api_key
 from .log_setup import log_alert_event
@@ -214,7 +215,19 @@ def handle_watch(
             return symbol_err
 
     db.add_watch(chat_id, coin, timeframe, exchange, alert_type)
-    return messages.watch_added_message(coin, timeframe, exchange, alert_type)
+    # OPS-TRADE-CALL-CLUSTER-W1 CH4 — append expected-fire-rate nudge so
+    # subscribers don't unknowingly watch a 0-fire pocket (e.g. BTC 4h BINANCE
+    # = 0 alerts in 7d per OPS-BOT-NO-TRADE-CALLS-AUDIT-W1). Per Plan-Mode
+    # Path η ratification: signal-performance MCP resource → venue+TF activity
+    # proxy. Defensive: format_nudge returns "" on McpError so confirm-msg
+    # always lands cleanly.
+    base_msg = messages.watch_added_message(coin, timeframe, exchange, alert_type)
+    try:
+        est = compute_coverage_estimate(coin, timeframe, exchange)
+        return base_msg + format_nudge(coin, timeframe, exchange, est)
+    except Exception as exc:  # noqa: BLE001 — bot must never crash on nudge failure
+        log.warning("coverage nudge failed for %s %s %s: %s", coin, timeframe, exchange, exc)
+        return base_msg
 
 
 def handle_unwatch(
@@ -253,18 +266,25 @@ def handle_list(db: Database, chat_id: int, username: str | None, lang_code: str
     rows = db.list_watches(chat_id)
     if not rows:
         return messages.list_empty_message()
-    return messages.list_message(
-        [
-            {
-                "coin": r["coin"],
-                "timeframe": r["timeframe"],
-                "exchange": r["exchange"],
-                "alert_type": r["alert_type"],
-            }
-            for r in rows
-        ],
-        cap=PER_USER_WATCHLIST_CAP,
-    )
+    # OPS-TRADE-CALL-CLUSTER-W1 CH4 — append compact per-row nudge so existing
+    # subscribers see expected fire-rate for each watched combo. Same coverage
+    # source as /watch (signal-performance MCP resource; cached 5min in-process).
+    enriched_rows: list[dict[str, str]] = []
+    for r in rows:
+        nudge = ""
+        try:
+            est = compute_coverage_estimate(r["coin"], r["timeframe"], r["exchange"])
+            nudge = format_nudge_short(est)
+        except Exception as exc:  # noqa: BLE001 — bot must never crash on nudge failure
+            log.warning("coverage nudge failed for /list row %s: %s", r, exc)
+        enriched_rows.append({
+            "coin": r["coin"],
+            "timeframe": r["timeframe"],
+            "exchange": r["exchange"],
+            "alert_type": r["alert_type"],
+            "nudge": nudge,
+        })
+    return messages.list_message(enriched_rows, cap=PER_USER_WATCHLIST_CAP)
 
 
 # ── telegram framework adapters ─────────────────────────────────

@@ -111,7 +111,13 @@ def list_message(rows: list[dict[str, str]], cap: int = 50) -> str:
     lines = ["Your watchlist:"]
     for r in rows:
         glyph = type_glyph.get(r["alert_type"], "")
-        lines.append(f"  {glyph} {r['coin']} {r['timeframe']} on {r['exchange']}  ({r['alert_type']})")
+        # OPS-TRADE-CALL-CLUSTER-W1 CH4 — `nudge` field optional (handlers.py
+        # populates from coverage_nudge.format_nudge_short); empty string for
+        # backward-compatible call sites that don't pass a nudge.
+        nudge = r.get("nudge", "")
+        lines.append(
+            f"  {glyph} {r['coin']} {r['timeframe']} on {r['exchange']}  ({r['alert_type']}){nudge}"
+        )
     lines.append(f"\n{len(rows)}/{cap} used.")
     return "\n".join(lines)
 

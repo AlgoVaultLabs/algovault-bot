@@ -169,6 +169,32 @@ class McpClient:
         except httpx.HTTPError:
             pass
 
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        """Read an MCP resource and return its parsed contents.
+
+        Used by OPS-TRADE-CALL-CLUSTER-W1 CH4 coverage nudge to consume
+        `performance://signal-performance` for per-venue+TF signal volume
+        without adding a new producer/consumer edge (the bot↔signal-MCP
+        edge already exists; this just widens the surface used).
+        """
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._next_request_id(),
+            "method": "resources/read",
+            "params": {"uri": uri},
+        }
+        _, body = self._post(payload)
+        if not body or "result" not in body:
+            raise McpError(f"resources/read returned no result: {body!r}")
+        contents = body["result"].get("contents") or []
+        if contents and isinstance(contents[0], dict):
+            text = contents[0].get("text", "")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {"_raw_text": text}
+        return body["result"]
+
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Invoke an MCP tool and return its parsed result.
 
