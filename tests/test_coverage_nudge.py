@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from algovault_bot import coverage_nudge
 from algovault_bot.coverage_nudge import (
     CoverageEstimate,
     _classify_band,

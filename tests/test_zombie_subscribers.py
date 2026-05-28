@@ -16,7 +16,6 @@ import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
-import pytest
 from telegram.error import Forbidden
 
 from algovault_bot import handlers
