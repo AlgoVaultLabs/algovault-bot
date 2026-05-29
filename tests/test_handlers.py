@@ -94,23 +94,21 @@ def test_list_after_watch(tmp_db: Database) -> None:
     reply = handle_list(tmp_db, 1, "u", "en")
     assert "BTC 4h on BINANCE" in reply
     assert "ETH 1h on BINANCE" in reply
-    assert "2/50 used" in reply
+    assert "2 watches" in reply  # TG-BATCH-WATCHLIST-W1 — footer no longer "/50"
 
 
-def test_watch_cap_51st_rejected_with_utm(tmp_db: Database) -> None:
-    # AC2.5 — 51st pair rejected with `?utm_source=tg_bot&utm_campaign=watchlist_cap`.
+def test_watch_51st_accepted_cap_removed(tmp_db: Database) -> None:
+    # TG-BATCH-WATCHLIST-W1 AC1.4 — the 50-combo cap is removed; 51st accepted.
     for i in range(50):
         coin = f"COIN{i:02d}"
         r = handle_watch(tmp_db, 1, "u", "en", [coin, "4h"])
         assert r.startswith("✅"), f"add #{i} failed: {r}"
     assert tmp_db.count_watches(1) == 50
-    # 51st must be rejected.
+    # 51st now accepted (was rejected pre-W1) — no "watchlist cap" rejection.
     reply = handle_watch(tmp_db, 1, "u", "en", ["XYZ", "4h"])
-    assert "watchlist cap" in reply
-    assert "utm_source=tg_bot" in reply
-    assert "utm_campaign=watchlist_cap" in reply
-    # Counter unchanged after rejection.
-    assert tmp_db.count_watches(1) == 50
+    assert reply.startswith("✅")
+    assert "cap" not in reply.lower()
+    assert tmp_db.count_watches(1) == 51
 
 
 def test_watch_cap_does_not_apply_to_existing_entry_update(tmp_db: Database) -> None:

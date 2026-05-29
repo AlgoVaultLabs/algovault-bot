@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from typing import Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -26,7 +27,7 @@ from telegram.ext import (
 
 from datetime import datetime, timezone
 
-from . import messages
+from . import asset_universe, batch, messages
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
 from .db import Database, PER_USER_WATCHLIST_CAP
@@ -118,6 +119,93 @@ def _validate_symbol(coin: str, timeframe: str, exchange: str) -> str | None:
 _AUTH_PREFIX = "auth_"
 
 
+# ── TG-BATCH-WATCHLIST-W1 — batch reply + helpers ──────────────
+
+
+class BatchReply(str):
+    """A handler reply that behaves exactly like its message string (so the
+    existing pure-handler tests' ``in`` / ``==`` / ``startswith`` assertions
+    keep working) while optionally carrying confirmation-keyboard metadata for
+    the async wrapper:
+
+    - ``confirm``: True → the wrapper attaches an inline keyboard instead of
+      committing immediately.
+    - ``pending``: the batch spec to stash in ``ctx.user_data`` under a token.
+    - ``combos``: the expansion size (for the "Add all N" button label).
+    """
+
+    confirm: bool
+    pending: dict | None
+    combos: int
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        confirm: bool = False,
+        pending: dict | None = None,
+        combos: int = 0,
+    ) -> "BatchReply":
+        obj = super().__new__(cls, text)
+        obj.confirm = confirm
+        obj.pending = pending
+        obj.combos = combos
+        return obj
+
+
+def _batch_threshold() -> int:
+    """Confirmation-nudge threshold (env ``BATCH_CONFIRM_THRESHOLD``, default 50)."""
+    try:
+        return int(
+            os.environ.get("BATCH_CONFIRM_THRESHOLD", batch.DEFAULT_BATCH_CONFIRM_THRESHOLD)
+        )
+    except (TypeError, ValueError):
+        return batch.DEFAULT_BATCH_CONFIRM_THRESHOLD
+
+
+def _commit_watch_combos(
+    db: Database,
+    chat_id: int,
+    combos: list[tuple[str, str, str]],
+    n_coins: int,
+    n_tfs: int,
+    n_exch: int,
+    alert_type: str,
+    skip_preflight: bool,
+) -> str:
+    """Insert a batch of combos (idempotent). Preflights each DISTINCT new coin
+    ONCE (never per combo — avoids the 41K-preflight trap on `all all all`);
+    universe-sourced coins (`all` / Top-N) skip preflight (known-valid). On a
+    rejected coin, nothing is inserted and the error is returned."""
+    if not skip_preflight:
+        existing = {
+            (r["coin"], r["timeframe"], r["exchange"]) for r in db.list_watches(chat_id)
+        }
+        new_combos = [c for c in combos if c not in existing]
+        checked: set[str] = set()
+        for coin, tf, exch in new_combos:
+            if coin in checked:
+                continue
+            checked.add(coin)
+            err = _validate_symbol(coin, tf, exch)
+            if err:
+                return err
+
+    db.add_watch_batch(chat_id, combos, alert_type)
+
+    if len(combos) == 1:
+        # Backward-compatible single-add message + coverage nudge.
+        coin, tf, exch = combos[0]
+        base = messages.watch_added_message(coin, tf, exch, alert_type)
+        try:
+            est = compute_coverage_estimate(coin, tf, exch)
+            return base + format_nudge(coin, tf, exch, est)
+        except Exception as exc:  # noqa: BLE001 — bot must never crash on nudge failure
+            log.warning("coverage nudge failed for %s %s %s: %s", coin, tf, exch, exc)
+            return base
+    return messages.batch_watch_added_message(len(combos), n_coins, n_tfs, n_exch, alert_type)
+
+
 # ── pure handlers ──────────────────────────────────────────────
 
 
@@ -185,57 +273,110 @@ def handle_watch(
     username: str | None,
     lang_code: str | None,
     args: Sequence[str],
-) -> str:
+) -> BatchReply:
+    """TG-BATCH-WATCHLIST-W1: bulk-capable /watch. Each of COINS / TFS /
+    EXCHANGES may be a single token, a comma-list, or ``all``. Returns a
+    ``BatchReply`` — if ``.confirm`` is set the async wrapper shows a
+    confirmation keyboard (large expansion or `all` coins) instead of
+    committing. The cap is GONE; server safety lives in the C2 fetch budget.
+    """
     db.upsert_subscriber(chat_id, username, lang_code)
 
     if len(args) < 2:
-        return messages.usage_watch_message()
+        return BatchReply(messages.usage_watch_message())
     if len(args) > 4:
-        return "Too many arguments. " + messages.usage_watch_message()
+        return BatchReply("Too many arguments. " + messages.usage_watch_message())
+
+    coins_raw = args[0]
+    tfs_raw = args[1]
+    exch_raw = args[2] if len(args) >= 3 else DEFAULT_EXCHANGE
+    type_raw = args[3] if len(args) >= 4 else None
 
     try:
-        coin = normalize_coin(args[0])
-        timeframe = normalize_timeframe(args[1])
-        exchange = normalize_exchange(args[2] if len(args) >= 3 else None)
-        alert_type = normalize_alert_type(args[3] if len(args) >= 4 else None)
+        alert_type = normalize_alert_type(type_raw)
+    except ValidationError as e:
+        return BatchReply(f"❌ {e}")
+
+    coins_is_all = batch.is_all(coins_raw)
+    universe = asset_universe.get_asset_universe() if coins_is_all else []
+    if coins_is_all and not universe:
+        return BatchReply(
+            "⚠️ Couldn't load the asset list right now. Try specific coins, "
+            "e.g. /watch BTC,ETH 1h."
+        )
+
+    try:
+        coins = batch.parse_coins(coins_raw, universe)
+        tfs = batch.parse_timeframes(tfs_raw)
+        exchanges = batch.parse_exchanges(exch_raw)
+    except ValidationError as e:
+        return BatchReply(f"❌ {e}")
+
+    combos = batch.cartesian(coins, tfs, exchanges)
+    if not combos:
+        return BatchReply(messages.usage_watch_message())
+
+    n_combos, n_coins, n_tfs, n_exch = len(combos), len(coins), len(tfs), len(exchanges)
+
+    if batch.should_confirm(n_combos, coins_raw, _batch_threshold()):
+        pending = {
+            "kind": "watch",
+            "coins_raw": coins_raw,
+            "tfs_raw": tfs_raw,
+            "exch_raw": exch_raw,
+            "alert_type": alert_type,
+            "coins_is_all": coins_is_all,
+            "n_combos": n_combos,
+            "n_coins": n_coins,
+            "n_tfs": n_tfs,
+            "n_exch": n_exch,
+        }
+        return BatchReply(
+            messages.batch_confirm_message(n_combos, n_coins, n_tfs, n_exch),
+            confirm=True,
+            pending=pending,
+            combos=n_combos,
+        )
+
+    return BatchReply(
+        _commit_watch_combos(
+            db, chat_id, combos, n_coins, n_tfs, n_exch, alert_type,
+            skip_preflight=coins_is_all,
+        )
+    )
+
+
+def commit_watch_batch(db: Database, chat_id: int, pending: dict | None, choice: str) -> str:
+    """Commit a confirmed batch (``choice`` ∈ {"add", "top", "cancel"}). Called
+    by the inline-keyboard callback after the confirmation nudge. Re-expands
+    from the stored raw spec; ``top`` clamps COINS to the Top-N most-active."""
+    if not pending:
+        return messages.batch_expired_message()
+    if choice == "cancel":
+        return messages.batch_cancelled_message()
+
+    try:
+        tfs = batch.parse_timeframes(pending["tfs_raw"])
+        exchanges = batch.parse_exchanges(pending["exch_raw"])
+        if choice == "top":
+            coins = asset_universe.get_top_assets(batch.DEFAULT_TOP_N)
+            skip_preflight = True  # Top-N coins are universe-sourced → known valid
+        else:  # "add"
+            coins_is_all = bool(pending.get("coins_is_all"))
+            universe = asset_universe.get_asset_universe() if coins_is_all else []
+            coins = batch.parse_coins(pending["coins_raw"], universe)
+            skip_preflight = coins_is_all
     except ValidationError as e:
         return f"❌ {e}"
 
-    # Cap check — only on insert, not on update of an existing entry.
-    existing_count = db.count_watches(chat_id)
-    # If this exact (chat_id, coin, tf, exchange) already exists, we update
-    # alert_type instead of inserting; cap doesn't apply.
-    rows = db.list_watches(chat_id)
-    is_existing = any(
-        r["coin"] == coin and r["timeframe"] == timeframe and r["exchange"] == exchange
-        for r in rows
+    if not coins:
+        return messages.batch_expired_message()
+
+    combos = batch.cartesian(coins, tfs, exchanges)
+    return _commit_watch_combos(
+        db, chat_id, combos, len(coins), len(tfs), len(exchanges),
+        pending["alert_type"], skip_preflight=skip_preflight,
     )
-    if not is_existing and existing_count >= PER_USER_WATCHLIST_CAP:
-        return messages.cap_reached_message(PER_USER_WATCHLIST_CAP)
-
-    # Symbol preflight (BOT-WATCH-VALIDATE-W1) — only on insert. Modifying
-    # an existing entry's alert_type doesn't need re-validation (the row was
-    # already validated when first added, OR predates the validation; in
-    # both cases the user can /unwatch via /list without help).
-    if not is_existing:
-        symbol_err = _validate_symbol(coin, timeframe, exchange)
-        if symbol_err:
-            return symbol_err
-
-    db.add_watch(chat_id, coin, timeframe, exchange, alert_type)
-    # OPS-TRADE-CALL-CLUSTER-W1 CH4 — append expected-fire-rate nudge so
-    # subscribers don't unknowingly watch a 0-fire pocket (e.g. BTC 4h BINANCE
-    # = 0 alerts in 7d per OPS-BOT-NO-TRADE-CALLS-AUDIT-W1). Per Plan-Mode
-    # Path η ratification: signal-performance MCP resource → venue+TF activity
-    # proxy. Defensive: format_nudge returns "" on McpError so confirm-msg
-    # always lands cleanly.
-    base_msg = messages.watch_added_message(coin, timeframe, exchange, alert_type)
-    try:
-        est = compute_coverage_estimate(coin, timeframe, exchange)
-        return base_msg + format_nudge(coin, timeframe, exchange, est)
-    except Exception as exc:  # noqa: BLE001 — bot must never crash on nudge failure
-        log.warning("coverage nudge failed for %s %s %s: %s", coin, timeframe, exchange, exc)
-        return base_msg
 
 
 def handle_unwatch(
@@ -244,24 +385,54 @@ def handle_unwatch(
     username: str | None,
     lang_code: str | None,
     args: Sequence[str],
-) -> str:
+) -> BatchReply:
+    """TG-BATCH-WATCHLIST-W1: bulk-capable /unwatch. Each dimension is either a
+    specific token (filter) or ``all`` / omitted (wildcard — no filter). So
+    ``/unwatch BTC all`` removes every BTC row; ``/unwatch all 1m`` removes
+    every 1m row; ``/unwatch BTC 4h`` removes BTC 4h on any exchange."""
     db.upsert_subscriber(chat_id, username, lang_code)
 
     if len(args) < 2:
-        return messages.usage_unwatch_message()
+        return BatchReply(messages.usage_unwatch_message())
     if len(args) > 3:
-        return "Too many arguments. " + messages.usage_unwatch_message()
+        return BatchReply("Too many arguments. " + messages.usage_unwatch_message())
 
     try:
-        coin = normalize_coin(args[0])
-        timeframe = normalize_timeframe(args[1])
-        exchange = normalize_exchange(args[2] if len(args) >= 3 else None)
+        coin = None if batch.is_all(args[0]) else normalize_coin(args[0])
+        timeframe = None if batch.is_all(args[1]) else normalize_timeframe(args[1])
+        if len(args) >= 3 and not batch.is_all(args[2]):
+            exchange: str | None = normalize_exchange(args[2])
+        else:
+            exchange = None  # omitted or `all` → wildcard
     except ValidationError as e:
-        return f"❌ {e}"
+        return BatchReply(f"❌ {e}")
 
-    if db.remove_watch(chat_id, coin, timeframe, exchange):
-        return messages.watch_removed_message(coin, timeframe, exchange)
-    return messages.watch_not_found_message(coin, timeframe, exchange)
+    removed = db.remove_watch_batch(
+        chat_id, coin=coin, timeframe=timeframe, exchange=exchange
+    )
+    return BatchReply(messages.batch_unwatch_message(removed))
+
+
+def handle_unwatchall(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None
+) -> BatchReply:
+    """TG-BATCH-WATCHLIST-W1: clear the entire watchlist — confirm first."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    n = db.count_watches(chat_id)
+    if n == 0:
+        return BatchReply(messages.unwatchall_empty_message())
+    return BatchReply(
+        messages.unwatchall_confirm_message(n),
+        confirm=True,
+        pending={"kind": "unwatchall"},
+        combos=n,
+    )
+
+
+def commit_unwatchall(db: Database, chat_id: int) -> str:
+    """Delete every watchlist row for the user (after /unwatchall confirm)."""
+    removed = db.remove_all_watches(chat_id)
+    return messages.unwatchall_done_message(removed)
 
 
 def handle_stats(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
@@ -274,6 +445,22 @@ def handle_list(db: Database, chat_id: int, username: str | None, lang_code: str
     rows = db.list_watches(chat_id)
     if not rows:
         return messages.list_empty_message()
+    # TG-BATCH-WATCHLIST-W1: watchlists are now uncapped, so a per-row dump can
+    # be thousands of lines. Above the page threshold (repurposed
+    # PER_USER_WATCHLIST_CAP), show a bounded grouped summary (by TF + exchange)
+    # and skip per-row coverage nudges (would be N MCP fetches).
+    if len(rows) > PER_USER_WATCHLIST_CAP:
+        return messages.list_summary_message(
+            [
+                {
+                    "coin": r["coin"],
+                    "timeframe": r["timeframe"],
+                    "exchange": r["exchange"],
+                    "alert_type": r["alert_type"],
+                }
+                for r in rows
+            ]
+        )
     # OPS-TRADE-CALL-CLUSTER-W1 CH4 — append compact per-row nudge so existing
     # subscribers see expected fire-rate for each watched combo. Same coverage
     # source as /watch (signal-performance MCP resource; cached 5min in-process).
@@ -365,7 +552,79 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_watch(db, chat_id, username, lang, args)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+        if reply.confirm and reply.pending is not None:
+            # Stash the pending spec under a short token; the callback re-reads
+            # it from ctx.user_data (per-user) and commits the chosen action.
+            token = secrets.token_urlsafe(6)
+            if ctx.user_data is not None:
+                ctx.user_data[token] = reply.pending
+            rows = [
+                [InlineKeyboardButton(
+                    messages.batch_btn_add_all(reply.combos), callback_data=f"bw:add:{token}"
+                )]
+            ]
+            if reply.pending.get("coins_is_all"):
+                # Top-N clamp only makes sense when COINS == all (it narrows coins).
+                rows.append([InlineKeyboardButton(
+                    messages.batch_btn_top_n(batch.DEFAULT_TOP_N), callback_data=f"bw:top:{token}"
+                )])
+            rows.append([InlineKeyboardButton(
+                messages.BATCH_BTN_CANCEL, callback_data=f"bw:cancel:{token}"
+            )])
+            await update.message.reply_text(
+                str(reply), reply_markup=InlineKeyboardMarkup(rows),
+                disable_web_page_preview=True,
+            )
+        else:
+            await update.message.reply_text(str(reply), disable_web_page_preview=True)
+
+    async def _unwatchall(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        reply = handle_unwatchall(db, chat_id, username, lang)
+        if reply.confirm:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(messages.UNWATCHALL_BTN_YES, callback_data="uwa:yes"),
+                InlineKeyboardButton(messages.UNWATCHALL_BTN_CANCEL, callback_data="uwa:cancel"),
+            ]])
+            await update.message.reply_text(str(reply), reply_markup=kb)
+        else:
+            await update.message.reply_text(str(reply))
+
+    async def _on_batch_watch_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles the [Add all N] / [Top N most-active] / [Cancel] nudge taps."""
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        await query.answer()
+        parts = query.data.split(":")
+        if len(parts) != 3:
+            return
+        _, choice, token = parts
+        pending = ctx.user_data.pop(token, None) if ctx.user_data is not None else None
+        # from_user is always present on a callback query (the tapper).
+        chat_id = query.from_user.id if query.from_user else 0
+        text = commit_watch_batch(db, chat_id, pending, choice)
+        try:
+            await query.edit_message_text(text, disable_web_page_preview=True)
+        except Exception as e:  # noqa: BLE001 — message may be uneditable; log + drop
+            log.warning("batch-watch callback edit failed chat_id=%s err=%s", chat_id, e)
+
+    async def _on_unwatchall_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles the /unwatchall [Yes, clear all] / [Cancel] taps."""
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        await query.answer()
+        choice = query.data.split(":")[-1]
+        chat_id = query.from_user.id if query.from_user else 0
+        text = commit_unwatchall(db, chat_id) if choice == "yes" else messages.batch_cancelled_message()
+        try:
+            await query.edit_message_text(text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("unwatchall callback edit failed chat_id=%s err=%s", chat_id, e)
 
     async def _unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -685,8 +944,16 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("watch", _watch))
     app.add_handler(CommandHandler("unwatch", _unwatch))
+    app.add_handler(CommandHandler("unwatchall", _unwatchall))
     app.add_handler(CommandHandler("list", _list))
     app.add_handler(CommandHandler("stats", _stats))
+    # TG-BATCH-WATCHLIST-W1 — batch /watch confirm-nudge + /unwatchall confirm.
+    app.add_handler(
+        CallbackQueryHandler(_on_batch_watch_callback, pattern=r"^bw:(add|top|cancel):")
+    )
+    app.add_handler(
+        CallbackQueryHandler(_on_unwatchall_callback, pattern=r"^uwa:(yes|cancel)$")
+    )
     # TG-BROADCAST-STACK-W1 C4 + C5: /unlock_premium_alerts +
     # 2 CallbackQueryHandlers (unlock-path picker + operator approve/reject) +
     # photo MessageHandler for X-follow screenshot upload.
@@ -704,10 +971,14 @@ def register_handlers(app: Application, db: Database) -> None:
 __all__ = [
     "DEFAULT_ALERT_TYPE",
     "DEFAULT_EXCHANGE",
+    "BatchReply",
+    "commit_unwatchall",
+    "commit_watch_batch",
     "handle_help",
     "handle_list",
     "handle_start",
     "handle_unwatch",
+    "handle_unwatchall",
     "handle_watch",
     "register_handlers",
 ]

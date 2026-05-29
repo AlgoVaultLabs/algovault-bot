@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from .batch import DEFAULT_TOP_N, TF_ORDER
+
 
 SIGNUP_BASE: Final = "api.algovault.com/signup?plan=starter"
 
@@ -36,10 +38,18 @@ WELCOME_MESSAGE: Final = (
     "• /watch BTC 15m       — fast (~30 alerts/mo per pair)\n"
     "• /watch BTC 1m        — very fast (cap blown in days)\n"
     "\n"
+    '⚡ Add in bulk — use "all" or comma-lists:\n'
+    "• /watch BTC all           — BTC on every timeframe\n"
+    "• /watch BTC,ETH,SOL 15m   — 3 coins, one timeframe\n"
+    "• /watch BTC all all       — BTC, every TF, every exchange\n"
+    "• /watch all 1h            — every asset (I'll confirm first)\n"
+    "\n"
     "Get started:\n"
-    "/watch <COIN> <TF>     — add to watchlist\n"
-    "/list                  — see your picks\n"
-    "/help                  — full commands\n"
+    '/watch <COIN> <TF> [EXCH]   — add (COIN/TF/EXCH can be "all" or a,b,c)\n'
+    "/list                       — see your picks\n"
+    '/unwatch <COIN> <TF>        — remove one (TF/EXCH can be "all")\n'
+    "/unwatchall                 — clear everything\n"
+    "/help                       — full commands\n"
     "\n"
     "Hit the cap? Upgrade to Starter ($9.99 → 3,000 calls/mo) or pay per call via x402.\n"
     f"→ {signup_url('start_welcome')}"
@@ -55,15 +65,20 @@ HELP_MESSAGE: Final = (
     "    TF:       1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d\n"
     "    EXCHANGE: HL BINANCE BYBIT OKX BITGET (default: BINANCE)\n"
     "    TYPE:     regime | calls | both (default: calls)\n"
-    "/unwatch <COIN> <TF> [EXCHANGE] — remove from watchlist\n"
-    "/list — show your watchlist (max 50 entries)\n"
+    '    Bulk:     any of COIN/TF/EXCHANGE can be "all" or a comma-list (BTC,ETH,SOL)\n'
+    "/unwatch <COIN> <TF> [EXCHANGE] — remove from watchlist (TF/EXCHANGE can be \"all\")\n"
+    "/unwatchall — clear your entire watchlist\n"
+    "/list — show your watchlist\n"
     "/help — this message\n"
     "\n"
     "Examples:\n"
     "  /watch BTC 4h                — trade calls only, default BINANCE\n"
     "  /watch ETH 1h HL regime      — regime-only on Hyperliquid\n"
     "  /watch SOL 15m BYBIT both    — regime + trade calls on Bybit\n"
-    "  /unwatch BTC 4h              — remove BTC 4h from BINANCE\n"
+    "  /watch BTC all               — BTC on every timeframe\n"
+    "  /watch BTC,ETH,SOL 15m       — 3 coins, one timeframe\n"
+    "  /unwatch BTC 4h              — remove BTC 4h\n"
+    "  /unwatch BTC all             — remove every BTC watch\n"
     "\n"
     "Quota:\n"
     "📊 Regime shifts — free, no limit\n"
@@ -118,8 +133,106 @@ def list_message(rows: list[dict[str, str]], cap: int = 50) -> str:
         lines.append(
             f"  {glyph} {r['coin']} {r['timeframe']} on {r['exchange']}  ({r['alert_type']}){nudge}"
         )
-    lines.append(f"\n{len(rows)}/{cap} used.")
+    # TG-BATCH-WATCHLIST-W1: cap removed — footer is a plain count (no "/50").
+    n = len(rows)
+    lines.append(f"\n{n} watch{'es' if n != 1 else ''}.")
     return "\n".join(lines)
+
+
+def list_summary_message(rows: list[dict[str, str]]) -> str:
+    """TG-BATCH-WATCHLIST-W1: bounded grouped summary for large watchlists
+    (used when a user has more than the per-page threshold). Aggregates by
+    timeframe + exchange so the message length stays bounded regardless of
+    how many coins are watched (a per-row dump of thousands is unusable)."""
+    n = len(rows)
+    coins = {r["coin"] for r in rows}
+    by_tf: dict[str, int] = {}
+    by_exch: dict[str, int] = {}
+    for r in rows:
+        by_tf[r["timeframe"]] = by_tf.get(r["timeframe"], 0) + 1
+        by_exch[r["exchange"]] = by_exch.get(r["exchange"], 0) + 1
+    # TF in canonical ascending order; exchanges by count desc.
+    tf_lines = [
+        f"  {tf}: {by_tf[tf]}" for tf in TF_ORDER if tf in by_tf
+    ]
+    exch_lines = [
+        f"  {x}: {c}" for x, c in sorted(by_exch.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+    lines = [
+        f"📋 Your watchlist — {n} watches "
+        f"({len(coins)} coins, {len(by_tf)} timeframes, {len(by_exch)} exchanges).",
+        "",
+        "By timeframe:",
+        *tf_lines,
+        "",
+        "By exchange:",
+        *exch_lines,
+        "",
+        "Too many to list one-by-one. Trim with /unwatch <COIN> all, "
+        "/unwatch all <TF>, or /unwatchall.",
+    ]
+    return "\n".join(lines)
+
+
+# ── TG-BATCH-WATCHLIST-W1 — batch add / nudge / bulk-remove copy ──
+
+# Inline-keyboard button labels (T2 plain voice; honest to the byAsset.count
+# "most-active" ranking — NOT "most-liquid", which would imply an AUM source).
+def batch_btn_add_all(n: int) -> str:
+    return f"✅ Add all {n}"
+
+
+def batch_btn_top_n(n: int) -> str:
+    return f"Top {n} most-active"
+
+
+BATCH_BTN_CANCEL: Final = "Cancel"
+UNWATCHALL_BTN_YES: Final = "Yes, clear all"
+UNWATCHALL_BTN_CANCEL: Final = "Cancel"
+
+
+def batch_watch_added_message(
+    n_combos: int, n_coins: int, n_tfs: int, n_exch: int, alert_type: str
+) -> str:
+    types = {"regime": "regime only", "calls": "trade calls only", "both": "regime + calls"}
+    return (
+        f"✅ Watching {n_combos} combos: "
+        f"{n_coins} coins × {n_tfs} TFs × {n_exch} exchanges ({types[alert_type]})."
+    )
+
+
+def batch_confirm_message(n_combos: int, n_coins: int, n_tfs: int, n_exch: int) -> str:
+    return (
+        f"⚠️ That's {n_combos} combos ({n_coins} coins × {n_tfs} TFs × {n_exch} exchanges) "
+        f"→ expect a lot of alerts and your 100 free calls/month can go fast. "
+        f"Add all, or start with the Top {DEFAULT_TOP_N} most-active?"
+    )
+
+
+def batch_cancelled_message() -> str:
+    return "Cancelled — nothing added."
+
+
+def batch_expired_message() -> str:
+    return "That request expired. Re-run your /watch command."
+
+
+def batch_unwatch_message(removed: int) -> str:
+    if removed <= 0:
+        return "Nothing matched — that isn't on your watchlist."
+    return f"🗑️ Removed {removed} watch{'es' if removed != 1 else ''}."
+
+
+def unwatchall_confirm_message(n: int) -> str:
+    return f"Remove all {n} watch{'es' if n != 1 else ''}? This can't be undone."
+
+
+def unwatchall_empty_message() -> str:
+    return "Your watchlist is already empty."
+
+
+def unwatchall_done_message(n: int) -> str:
+    return f"🗑️ Cleared your watchlist — removed {n} watch{'es' if n != 1 else ''}."
 
 
 def usage_watch_message() -> str:

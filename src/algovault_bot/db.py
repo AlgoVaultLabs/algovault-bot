@@ -357,6 +357,66 @@ class Database:
             )
             return cur.rowcount > 0
 
+    def add_watch_batch(
+        self,
+        chat_id: int,
+        combos: "list[tuple[str, str, str]]",
+        alert_type: str,
+    ) -> int:
+        """TG-BATCH-WATCHLIST-W1: insert many (coin, tf, exchange) rows in one
+        ``executemany``. Idempotent — PK conflicts update ``alert_type`` instead
+        of duplicating (SQLite 3.45+ ``ON CONFLICT DO UPDATE``). Returns the
+        number of NEWLY-inserted rows (count delta; conflicts count as 0)."""
+        if not combos:
+            return 0
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM watchlists WHERE chat_id = ?", (chat_id,))
+            before = int(cur.fetchone()[0])
+            cur.executemany(
+                """
+                INSERT INTO watchlists(chat_id, coin, timeframe, exchange, alert_type)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, coin, timeframe, exchange)
+                DO UPDATE SET alert_type = excluded.alert_type
+                """,
+                [(chat_id, c, t, x, alert_type) for (c, t, x) in combos],
+            )
+            cur.execute("SELECT COUNT(*) FROM watchlists WHERE chat_id = ?", (chat_id,))
+            after = int(cur.fetchone()[0])
+        return after - before
+
+    def remove_watch_batch(
+        self,
+        chat_id: int,
+        coin: str | None = None,
+        timeframe: str | None = None,
+        exchange: str | None = None,
+    ) -> int:
+        """TG-BATCH-WATCHLIST-W1: scoped bulk DELETE for one user. A ``None``
+        dimension is a wildcard (no filter on it); a value filters exactly.
+        Returns the number of rows removed."""
+        clauses = ["chat_id = ?"]
+        params: list[object] = [chat_id]
+        if coin is not None:
+            clauses.append("coin = ?")
+            params.append(coin)
+        if timeframe is not None:
+            clauses.append("timeframe = ?")
+            params.append(timeframe)
+        if exchange is not None:
+            clauses.append("exchange = ?")
+            params.append(exchange)
+        sql = f"DELETE FROM watchlists WHERE {' AND '.join(clauses)}"
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return cur.rowcount
+
+    def remove_all_watches(self, chat_id: int) -> int:
+        """Remove every watchlist row for one user. Returns rows removed."""
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM watchlists WHERE chat_id = ?", (chat_id,))
+            return cur.rowcount
+
     def list_watches(self, chat_id: int) -> list[sqlite3.Row]:
         with self._cursor() as cur:
             cur.execute(
