@@ -11,10 +11,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Sequence
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from datetime import datetime, timezone
 
@@ -384,12 +392,312 @@ def register_handlers(app: Application, db: Database) -> None:
         reply = handle_stats(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
+    # TG-BROADCAST-STACK-W1 C4 (2026-05-28): /unlock_premium_alerts entry.
+    # Two-button inline keyboard offering X-follow OR npm-install paths;
+    # callback handlers below dispatch on `unlock:x` / `unlock:npm` payloads.
+    async def _unlock_premium_alerts(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        from .unlock import (
+            CB_UNLOCK_NPM,
+            CB_UNLOCK_X,
+            format_already_verified_body,
+            format_button_labels,
+            format_intro_body,
+        )
+
+        # If active Pro grant exists, short-circuit with already_verified reply.
+        grant = db.get_pro_grant(chat_id)
+        if grant is not None:
+            try:
+                expires_at = datetime.fromisoformat(
+                    str(grant["expires_at"]).replace("Z", "+00:00")
+                )
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if expires_at > datetime.now(timezone.utc):
+                    body = format_already_verified_body(expires_at, lang)
+                    await update.message.reply_text(body, disable_web_page_preview=True)
+                    return
+            except Exception:
+                pass
+
+        body = format_intro_body(lang)
+        x_label, npm_label = format_button_labels(lang)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(x_label, callback_data=CB_UNLOCK_X)],
+                [InlineKeyboardButton(npm_label, callback_data=CB_UNLOCK_NPM)],
+            ]
+        )
+        await update.message.reply_text(
+            body,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+        log_alert_event("tg_unlock_attempted", chat_id=chat_id, lang_code=lang)
+
+    async def _on_photo(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """TG-BROADCAST-STACK-W1 CH5: photo handler for X-follow screenshots.
+
+        Triggers only when subscriber is in ``pending_x_screenshot`` state.
+        Downloads the highest-resolution photo, saves to disk, updates DB,
+        and fires operator-review DM (when TG_ADMIN_CHAT_ID env set).
+        """
+        if update.message is None or not update.message.photo:
+            return
+        chat_id, username, lang = _user_meta(update)
+        status, method, _, _ = db.get_unlock_state(chat_id)
+        from .screenshots import (
+            DEFAULT_SCREENSHOTS_DIR,
+            compute_screenshot_path,
+            format_operator_review_caption,
+            is_pending_x_screenshot,
+        )
+
+        if not is_pending_x_screenshot(status):
+            # Photo arrived from a subscriber NOT in the X-screenshot flow;
+            # ignore silently (could be unsolicited; do NOT reply or store).
+            return
+
+        # Pick the highest-resolution PhotoSize (last in the list per
+        # python-telegram-bot semantics).
+        photo = update.message.photo[-1]
+        try:
+            tg_file = await photo.get_file()
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_file failed chat_id=%s err=%s", chat_id, e)
+            return
+
+        DEFAULT_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = compute_screenshot_path(chat_id)
+        try:
+            await tg_file.download_to_drive(custom_path=str(path))
+        except Exception as e:  # noqa: BLE001
+            log.warning("download_to_drive failed chat_id=%s err=%s", chat_id, e)
+            return
+
+        db.set_unlock_screenshot_path(chat_id, str(path))
+        log_alert_event(
+            "tg_unlock_screenshot_uploaded",
+            chat_id=chat_id,
+            lang_code=lang,
+            screenshot_path=str(path),
+        )
+
+        # Operator-review DM with [Approve]/[Reject] buttons.
+        admin_chat_id_raw = os.environ.get("TG_ADMIN_CHAT_ID", "").strip()
+        if admin_chat_id_raw:
+            try:
+                admin_chat_id = int(admin_chat_id_raw)
+                caption = format_operator_review_caption(chat_id, username, lang)
+                from .unlock import CB_APPROVE_PREFIX, CB_REJECT_PREFIX
+                review_keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "✅ Approve",
+                                callback_data=f"{CB_APPROVE_PREFIX}{chat_id}",
+                            ),
+                            InlineKeyboardButton(
+                                "❌ Reject",
+                                callback_data=f"{CB_REJECT_PREFIX}{chat_id}",
+                            ),
+                        ]
+                    ]
+                )
+                with open(path, "rb") as photo_fp:
+                    await update.get_bot().send_photo(
+                        chat_id=admin_chat_id,
+                        photo=photo_fp,
+                        caption=caption,
+                        reply_markup=review_keyboard,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("operator-review DM failed: %s", e)
+        else:
+            log.info(
+                "TG_ADMIN_CHAT_ID unset; screenshot saved at %s but no "
+                "operator-review DM sent (manual review required)",
+                path,
+            )
+
+        # Acknowledge to subscriber that screenshot was received.
+        from .unlock import normalize_lang as _nl
+        lang_norm = _nl(lang)
+        if lang_norm == "id":
+            ack = "Screenshot diterima! Saya akan verifikasi dalam 24 jam."
+        elif lang_norm == "zh-hans":
+            ack = "已收到截图！我将在 24 小时内验证。"
+        else:
+            ack = "Screenshot received! I'll verify within 24h."
+        await update.message.reply_text(ack)
+
+    async def _on_unlock_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles taps on the [Follow X] / [Install] inline buttons."""
+        from .unlock import (
+            CB_UNLOCK_NPM,
+            CB_UNLOCK_X,
+            METHOD_NPM_INSTALL,
+            METHOD_X_FOLLOW,
+            STATE_PENDING_NPM,
+            STATE_PENDING_X,
+            format_pending_npm_body,
+            format_pending_x_body,
+            generate_track_token,
+        )
+
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        await query.answer()  # acknowledge tap (no toast)
+        chat_id = query.from_user.id if query.from_user else (
+            query.message.chat_id if query.message else 0
+        )
+        sub = db.get_subscriber(chat_id)
+        lang = sub["lang_code"] if sub else None
+
+        if query.data == CB_UNLOCK_X:
+            db.set_unlock_pending(chat_id, STATE_PENDING_X, METHOD_X_FOLLOW)
+            body = format_pending_x_body(lang)
+            if query.message:
+                await query.message.reply_text(body, disable_web_page_preview=True)
+            log_alert_event("tg_unlock_x_chosen", chat_id=chat_id, lang_code=lang)
+        elif query.data == CB_UNLOCK_NPM:
+            track_token = generate_track_token()
+            db.set_unlock_pending(
+                chat_id, STATE_PENDING_NPM, METHOD_NPM_INSTALL, track_token=track_token
+            )
+            body = format_pending_npm_body(track_token, lang)
+            if query.message:
+                # parse_mode=None so the ```snippet``` code-fence renders raw.
+                await query.message.reply_text(body, disable_web_page_preview=True)
+            log_alert_event(
+                "tg_unlock_npm_chosen",
+                chat_id=chat_id,
+                lang_code=lang,
+                track_token_prefix=track_token[:8],  # PII-safe shape
+            )
+
+    async def _on_review_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Operator-side [Approve]/[Reject] tap handler. callback_data shape:
+        ``unlock_approve:<chat_id>`` or ``unlock_reject:<chat_id>``.
+        Only fires for the configured TG_ADMIN_CHAT_ID — silently ignores
+        taps from non-admin chats.
+        """
+        from .unlock import (
+            CB_APPROVE_PREFIX,
+            CB_REJECT_PREFIX,
+            METHOD_X_FOLLOW,
+            compute_grant_expiry,
+            format_rejected_body,
+            format_verified_body,
+        )
+
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        await query.answer()
+
+        # Auth gate: only the configured admin chat can approve/reject.
+        admin_chat_id_raw = os.environ.get("TG_ADMIN_CHAT_ID", "").strip()
+        if not admin_chat_id_raw or not query.from_user:
+            return
+        try:
+            admin_chat_id = int(admin_chat_id_raw)
+        except ValueError:
+            return
+        if query.from_user.id != admin_chat_id:
+            return
+
+        # Parse target subscriber chat_id from callback_data.
+        data = query.data
+        if data.startswith(CB_APPROVE_PREFIX):
+            decision = "approve"
+            target_str = data[len(CB_APPROVE_PREFIX):]
+        elif data.startswith(CB_REJECT_PREFIX):
+            decision = "reject"
+            target_str = data[len(CB_REJECT_PREFIX):]
+        else:
+            return
+        try:
+            target_chat_id = int(target_str)
+        except ValueError:
+            return
+
+        sub = db.get_subscriber(target_chat_id)
+        target_lang = sub["lang_code"] if sub else None
+
+        if decision == "approve":
+            now = datetime.now(timezone.utc)
+            expires = compute_grant_expiry(now)
+            db.set_unlock_verified(target_chat_id, now.isoformat(timespec="seconds"))
+            db.insert_or_replace_pro_grant(
+                target_chat_id,
+                expires.isoformat(timespec="seconds"),
+                METHOD_X_FOLLOW,
+            )
+            body = format_verified_body(METHOD_X_FOLLOW, target_lang)
+            try:
+                await update.get_bot().send_message(
+                    chat_id=target_chat_id, text=body, disable_web_page_preview=True
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("approve DM failed target=%s err=%s", target_chat_id, e)
+            log_alert_event(
+                "tg_unlock_verified",
+                chat_id=target_chat_id,
+                method=METHOD_X_FOLLOW,
+                granted_expires_at=expires.isoformat(timespec="seconds"),
+            )
+            if query.message:
+                try:
+                    await query.message.reply_text(
+                        f"✅ Approved chat_id={target_chat_id} · Pro until {expires.strftime('%Y-%m-%d')}"
+                    )
+                except Exception:
+                    pass
+        else:  # reject
+            db.reset_unlock_state(target_chat_id)
+            body = format_rejected_body(target_lang)
+            try:
+                await update.get_bot().send_message(
+                    chat_id=target_chat_id, text=body, disable_web_page_preview=True
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("reject DM failed target=%s err=%s", target_chat_id, e)
+            log_alert_event(
+                "tg_unlock_failed",
+                chat_id=target_chat_id,
+                reason="operator_rejected_screenshot",
+            )
+            if query.message:
+                try:
+                    await query.message.reply_text(
+                        f"❌ Rejected chat_id={target_chat_id} · subscriber asked to retry"
+                    )
+                except Exception:
+                    pass
+
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("watch", _watch))
     app.add_handler(CommandHandler("unwatch", _unwatch))
     app.add_handler(CommandHandler("list", _list))
     app.add_handler(CommandHandler("stats", _stats))
+    # TG-BROADCAST-STACK-W1 C4 + C5: /unlock_premium_alerts +
+    # 2 CallbackQueryHandlers (unlock-path picker + operator approve/reject) +
+    # photo MessageHandler for X-follow screenshot upload.
+    app.add_handler(CommandHandler("unlock_premium_alerts", _unlock_premium_alerts))
+    app.add_handler(
+        CallbackQueryHandler(_on_unlock_callback, pattern=r"^unlock:(x|npm)$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(_on_review_callback, pattern=r"^unlock_(approve|reject):\d+$")
+    )
+    app.add_handler(MessageHandler(filters.PHOTO, _on_photo))
 
 
 # Re-export the constants kept (for now) so existing tests/import paths still work.

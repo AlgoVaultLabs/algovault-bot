@@ -42,6 +42,12 @@ from .cta import (
 from .db import Database, DEFAULT_DB_PATH
 from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
+from .paywall import (
+    extract_tier_warning,
+    format_paywall_body,
+    mark_fired as paywall_mark_fired,
+    should_fire_paywall_dm,
+)
 from .quota import QuotaState, consume_quota, get_quota_state
 from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
@@ -430,6 +436,43 @@ async def process_one_row(
             )
             call = (tc_result.get("call") or "").upper()
             fetched["trade_call"] = "ok"
+
+            # TG-BROADCAST-STACK-W1 CH3 (2026-05-28): paywall-at-quota hook.
+            # Inspect MCP `_algovault.tier_warning` for 75% / 90% / 100% quota
+            # crossings on subscriber's linked_api_key; fire one-time DM per
+            # level per calendar month (UTC). Idempotent via paywall.mark_fired.
+            # Fail-open: any error swallowed; alert flow continues unaffected.
+            try:
+                paywall_warning = extract_tier_warning(tc_result)
+                if paywall_warning is not None:
+                    fire, level = should_fire_paywall_dm(
+                        db.path, row.chat_id, paywall_warning
+                    )
+                    if fire and level:
+                        sub = db.get_subscriber(row.chat_id)
+                        lang_code = sub["lang_code"] if sub else None
+                        paywall_body = format_paywall_body(
+                            level,
+                            paywall_warning.get("current_usage"),
+                            paywall_warning.get("monthly_limit"),
+                            paywall_warning.get("suggested_upgrade_url"),
+                            lang_code,
+                        )
+                        if await _push(bot, row.chat_id, paywall_body, db=db):
+                            paywall_mark_fired(db.path, row.chat_id, level)
+                            log_alert_event(
+                                "tg_paywall_dm_fired",
+                                chat_id=row.chat_id,
+                                level=level,
+                                lang_code=lang_code,
+                                current_usage=paywall_warning.get("current_usage"),
+                                monthly_limit=paywall_warning.get("monthly_limit"),
+                            )
+            except Exception as paywall_err:  # noqa: BLE001
+                log.warning(
+                    "paywall hook error chat_id=%s err=%s",
+                    row.chat_id, paywall_err,
+                )
 
             if call in ("BUY", "SELL"):
                 # No 24h cap — only the 100/mo quota gate applies.
