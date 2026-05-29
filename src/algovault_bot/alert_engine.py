@@ -32,6 +32,7 @@ from telegram.error import Forbidden, TelegramError
 from datetime import datetime, timezone
 
 from .alert_image import SeeAlsoCell, TradeCallView, render_trade_call_card
+from .caption import compose_caption, format_verdict_caption_line
 from .cta import (
     quota_exhausted_message,
     quota_threshold,
@@ -513,10 +514,16 @@ async def process_one_row(
                     )
                     view = _build_trade_call_view(row, tc_result, state, see_also)
                     photo_bytes = render_trade_call_card(view)
-                    # Caption holds the quota-CTA text (URLs clickable);
-                    # image carries the metric card itself. None caption is
-                    # fine for paid users + free users without an active CTA.
-                    caption = cta or None
+                    # TG-ALERT-VERDICT-CAPTION-W1: line 1 is a one-line
+                    # glanceable verdict (e.g. "LTC 15min Buy 76% Binance") so
+                    # the call surfaces in the lock-screen / banner notification
+                    # (a photo-only message previews as just "📷 Photo"). Any
+                    # quota-CTA text (URLs clickable) is preserved verbatim
+                    # below it; image carries the metric card itself.
+                    verdict_line = format_verdict_caption_line(
+                        row.coin, row.timeframe, call, primary_conf, row.exchange
+                    )
+                    caption = compose_caption(verdict_line, cta or None)
                     if await _push_photo(bot, row.chat_id, photo_bytes, caption, db=db):
                         consume_quota(db, row.chat_id)
                         db.increment_total_call_alerts(row.chat_id)

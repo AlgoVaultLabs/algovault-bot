@@ -1,14 +1,21 @@
-"""Render 3 sample trade-call alert PNGs for operator review.
+"""Render sample trade-call alert PNGs for operator review + print captions.
 
-Outputs three previews modeling the cases that actually fire from the bot:
+Outputs previews modeling the cases that actually fire from the bot and,
+for each, prints the FULL Telegram caption — the TG-ALERT-VERDICT-CAPTION-W1
+glanceable verdict line (always line 1) plus any quota-CTA below it. The
+verdict line is printed at column 0 so it is reviewable without sending to
+a live chat (and so a render-gate grep can confirm its shape).
+
+Cases:
   1. SOL 5m BUY on BYBIT — free user at 47/100 quota, no CTA
-  2. BTC 1h SELL on BINANCE — free user at 80/100 quota (would carry a
-     quota_75 CTA in caption — printed alongside the image path)
-  3. SOL 5m BUY on BYBIT — paid Starter user (validates the new "💎 Starter Plan"
-     footer badge)
+  2. BTC 1h SELL on BINANCE — free user at 80/100 quota (carries a quota_75
+     CTA below the verdict line)
+  3. SOL 5m BUY on BYBIT — paid Starter user (no CTA)
+  4. ETH 4h SELL on BINANCE — paid Pro user (no CTA)
+  5. BTC 1h BUY on BINANCE — paid Enterprise user (no CTA)
 
 Run from repo root:
-    PYTHONPATH=src python scripts/preview_alert_images.py <output_dir>
+    PYTHONPATH=src python scripts/preview_alert_images.py [output_dir]
 """
 
 from __future__ import annotations
@@ -21,6 +28,9 @@ from algovault_bot.alert_image import (
     TradeCallView,
     render_trade_call_card,
 )
+from algovault_bot.caption import compose_caption, format_verdict_caption_line
+from algovault_bot.cta import trade_call_cta_text
+from algovault_bot.quota import QuotaState
 
 
 SAMPLE_REASONING_BUY = (
@@ -36,6 +46,12 @@ SAMPLE_REASONING_SELL = (
 )
 
 
+# Real quota_75 CTA text for a free user at 80/100 (last-fired None → fires).
+# Derived from the production formatter so the preview can't drift from it.
+_QUOTA_75_CTA = trade_call_cta_text(QuotaState(80, 100, None, 0.80))
+
+
+# (filename, view, cta_or_None, note)
 SAMPLES = [
     (
         "01_free_low_conf_with_see_also_SOL_5m_BUY.png",
@@ -60,7 +76,8 @@ SAMPLES = [
             quota_used=47,
             quota_total=100,
         ),
-        "Caption (free, low-conf, no quota CTA): empty — image carries the alert + See Also.",
+        None,
+        "free, low-conf, no quota CTA — verdict line stands alone",
     ),
     (
         "02_free_with_quota75_cta_BTC_1h_SELL.png",
@@ -84,9 +101,8 @@ SAMPLES = [
             quota_used=80,
             quota_total=100,
         ),
-        "Caption (free, 75% nudge active):\n"
-        "⏰ You've used 75% of your free calls. Upgrade to Starter ($9.99 → 3,000 calls/mo):\n"
-        "→ api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_75",
+        _QUOTA_75_CTA,
+        "free, 75% nudge active — verdict line 1, quota_75 CTA below",
     ),
     (
         "03_paid_starter_SOL_5m_BUY.png",
@@ -113,7 +129,8 @@ SAMPLES = [
             ),
             tier_label="Starter",
         ),
-        "Caption (paid Starter): empty — green diamond + 'Starter Plan' footer.",
+        None,
+        "paid Starter — no CTA; green diamond + 'Starter Plan' footer",
     ),
     (
         "04_paid_pro_ETH_4h_SELL.png",
@@ -140,7 +157,8 @@ SAMPLES = [
             ),
             tier_label="Pro",
         ),
-        "Caption (paid Pro): empty — gold diamond + 'Pro Plan' footer.",
+        None,
+        "paid Pro — no CTA; gold diamond + 'Pro Plan' footer",
     ),
     (
         "05_paid_enterprise_BTC_1h_BUY.png",
@@ -166,7 +184,8 @@ SAMPLES = [
             ),
             tier_label="Enterprise",
         ),
-        "Caption (paid Enterprise): empty — purple diamond + 'Enterprise Plan' footer.",
+        None,
+        "paid Enterprise — no CTA; purple diamond + 'Enterprise Plan' footer",
     ),
 ]
 
@@ -174,11 +193,20 @@ SAMPLES = [
 def main() -> None:
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./preview-out")
     out_dir.mkdir(parents=True, exist_ok=True)
-    for fname, view, caption_note in SAMPLES:
+    for fname, view, cta, note in SAMPLES:
         path = out_dir / fname
         path.write_bytes(render_trade_call_card(view))
-        print(f"WROTE {path}")
-        print(f"  {caption_note}\n")
+        # The verdict line re-projects the same fields the card renders.
+        verdict_line = format_verdict_caption_line(
+            view.coin, view.timeframe, view.call, view.confidence, view.exchange
+        )
+        caption = compose_caption(verdict_line, cta)
+        print(f"WROTE {path}  ({note})")
+        print("  caption (verdict line is line 1; printed at column 0 below):")
+        # Print caption content at column 0 so the verdict line is reviewable
+        # verbatim and matches the render-gate regex anchor.
+        print(caption)
+        print()
 
 
 if __name__ == "__main__":
