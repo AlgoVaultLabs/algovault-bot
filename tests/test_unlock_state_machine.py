@@ -17,15 +17,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from algovault_bot.unlock import (
-    CB_UNLOCK_NPM,
-    CB_UNLOCK_X,
     METHOD_NPM_INSTALL,
     METHOD_X_FOLLOW,
     STATE_PENDING_NPM,
     STATE_PENDING_X,
     STATE_VERIFIED,
     compute_grant_expiry,
-    format_already_verified_body,
     format_button_labels,
     format_expired_body,
     format_intro_body,
