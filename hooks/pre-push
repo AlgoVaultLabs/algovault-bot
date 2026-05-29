@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# OPS-BOT-CI-LINT-TYPECHECK-CLEANUP-W1 — client-side lint/type push gate.
+#
+# `algovault-bot` has NO GHA deploy (deploy is manual ssh+rsync+systemctl), so
+# a red `ruff`/`mypy` CI run gates nothing server-side and lint/type debt can
+# silently re-accumulate. This hook is the deploy-gate the repo otherwise
+# lacks: it runs ruff+mypy before every push and blocks on red.
+#
+# Reuses the project's AOE client-side pre-push pattern (CLAUDE.md ## Git rules).
+# Activate per clone:  git config --local core.hooksPath hooks
+#
+# git invokes pre-push with (remote, url) args + ref lines on stdin; a lint
+# gate ignores them and just runs the checks — non-zero exit aborts the push.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+echo "[pre-push] running lint + type checks (ruff + mypy)…"
+exec bash "$ROOT/scripts/lint.sh"

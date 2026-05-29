@@ -15,7 +15,7 @@ import os
 import secrets
 from typing import Sequence
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -812,16 +812,19 @@ def register_handlers(app: Application, db: Database) -> None:
         if query is None or query.data is None:
             return
         await query.answer()  # acknowledge tap (no toast)
-        chat_id = query.from_user.id if query.from_user else (
-            query.message.chat_id if query.message else 0
-        )
+        # from_user is the tapper (always present on a callback query); the
+        # prior query.message.chat_id fallback tripped mypy on the
+        # MaybeInaccessibleMessage union and is unreachable in practice.
+        chat_id = query.from_user.id if query.from_user else 0
         sub = db.get_subscriber(chat_id)
         lang = sub["lang_code"] if sub else None
 
         if query.data == CB_UNLOCK_X:
             db.set_unlock_pending(chat_id, STATE_PENDING_X, METHOD_X_FOLLOW)
             body = format_pending_x_body(lang)
-            if query.message:
+            # isinstance narrows MaybeInaccessibleMessage → Message (has
+            # reply_text); skips gracefully if the message is inaccessible.
+            if isinstance(query.message, Message):
                 await query.message.reply_text(body, disable_web_page_preview=True)
             log_alert_event("tg_unlock_x_chosen", chat_id=chat_id, lang_code=lang)
         elif query.data == CB_UNLOCK_NPM:
@@ -830,7 +833,7 @@ def register_handlers(app: Application, db: Database) -> None:
                 chat_id, STATE_PENDING_NPM, METHOD_NPM_INSTALL, track_token=track_token
             )
             body = format_pending_npm_body(track_token, lang)
-            if query.message:
+            if isinstance(query.message, Message):
                 # parse_mode=None so the ```snippet``` code-fence renders raw.
                 await query.message.reply_text(body, disable_web_page_preview=True)
             log_alert_event(
@@ -911,7 +914,7 @@ def register_handlers(app: Application, db: Database) -> None:
                 method=METHOD_X_FOLLOW,
                 granted_expires_at=expires.isoformat(timespec="seconds"),
             )
-            if query.message:
+            if isinstance(query.message, Message):
                 try:
                     await query.message.reply_text(
                         f"✅ Approved chat_id={target_chat_id} · Pro until {expires.strftime('%Y-%m-%d')}"
@@ -932,7 +935,7 @@ def register_handlers(app: Application, db: Database) -> None:
                 chat_id=target_chat_id,
                 reason="operator_rejected_screenshot",
             )
-            if query.message:
+            if isinstance(query.message, Message):
                 try:
                     await query.message.reply_text(
                         f"❌ Rejected chat_id={target_chat_id} · subscriber asked to retry"
