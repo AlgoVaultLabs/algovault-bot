@@ -31,6 +31,7 @@ from telegram.error import Forbidden, TelegramError
 
 from datetime import datetime, timezone
 
+from . import fetch_budget
 from .alert_image import SeeAlsoCell, TradeCallView, render_trade_call_card
 from .caption import compose_caption, format_verdict_caption_line
 from .cta import (
@@ -567,8 +568,82 @@ async def process_one_row(
     return fetched
 
 
+# TG-BATCH-WATCHLIST-W1 C2 — persistent sustained-deferred state (the cron is a
+# oneshot, so cross-tick state lives on disk). Resets on every clean tick.
+_SATURATION_STATE_PATH = os.environ.get(
+    "FETCH_SATURATION_STATE_PATH", "/var/lib/algovault-bot/fetch_budget_saturation.json"
+)
+
+
+def _percentiles_ms(latencies: list[float]) -> tuple[int, int]:
+    """p50 / p95 in milliseconds from a list of per-row seconds (0,0 if empty)."""
+    if not latencies:
+        return (0, 0)
+    s = sorted(latencies)
+    p50 = s[len(s) // 2]
+    p95 = s[min(len(s) - 1, int(len(s) * 0.95))]
+    return (int(p50 * 1000), int(p95 * 1000))
+
+
+def _emit_saturation_alert(deferred: int, threshold: int) -> None:
+    """Sustained-deferred operator-action signal. Severity-gate + 24h cooldown +
+    OPS-<CLASS>-W{NEXT} template resolution all live in send_telegram.sh — we
+    delegate (never re-implement those gates) and fail open."""
+    wrapper = "/opt/algovault-monitoring/send_telegram.sh"
+    if not os.path.exists(wrapper):
+        log.warning("saturation: wrapper missing at %s (deferred=%s)", wrapper, deferred)
+        return
+    body = (
+        f"AlgoVault bot fetch budget saturated — {deferred} watch rows deferred for "
+        f"{threshold}+ consecutive ticks. Real demand exceeds FETCH_BUDGET_PER_MIN; "
+        f"raise the budget or ship shared-fetch dedup.\n"
+        f"Recommended wave: OPS-TG-FETCH-BUDGET-TUNE-W{{NEXT}}"
+    )
+    try:
+        import subprocess
+
+        subprocess.run(
+            [wrapper, "tg_fetch_budget_saturation", "CRITICAL_PERSISTENT", "-"],
+            input=body,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never break the cycle
+        log.warning("saturation alert send failed: %s", e)
+
+
+def _record_saturation(deferred: int) -> None:
+    """Update the persistent consecutive-deferred counter; emit the operator
+    signal when it crosses the threshold. Fail-open (observability only)."""
+    try:
+        threshold = fetch_budget.saturation_ticks()
+        state: dict = {}
+        if os.path.exists(_SATURATION_STATE_PATH):
+            try:
+                with open(_SATURATION_STATE_PATH) as f:
+                    state = json.load(f) or {}
+            except (json.JSONDecodeError, OSError):
+                state = {}
+        new_state, should_alert = fetch_budget.update_saturation_state(
+            state, deferred, threshold
+        )
+        try:
+            with open(_SATURATION_STATE_PATH, "w") as f:
+                json.dump(new_state, f)
+        except OSError as e:
+            log.warning("saturation state write failed: %s", e)
+        if should_alert:
+            _emit_saturation_alert(deferred, threshold)
+    except Exception as e:  # noqa: BLE001 — never break the cycle on observability
+        log.warning("saturation bookkeeping failed: %s", e)
+
+
 async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: str) -> dict[str, int]:
-    """One cron-fire cycle. Returns counts for journal."""
+    """One cron-fire cycle. Routes due rows through the C2 fetch budget
+    (skip-exhausted → fair-share round-robin → TF-priority → deadline guard) so
+    server load is bounded by ``FETCH_BUDGET_PER_MIN`` for ANY watchlist size.
+    Returns counts for the journal."""
     db = Database(db_path)
     bot = Bot(token=token)
 
@@ -576,14 +651,34 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     due_rows_raw = db.list_due_watches(now_epoch, TF_SECONDS)
     due_rows = [_row_from_sqlite(r) for r in due_rows_raw]
 
-    counts = {
+    counts: dict[str, int] = {
         "due": len(due_rows),
         "regime_fired": 0,
         "calls_fired": 0,
         "errors": 0,
+        "processed": 0,
+        "deferred": 0,
+        "skipped_exhausted": 0,
+        "active_users": 0,
+        "budget": fetch_budget.fetch_budget_per_min(),
+        "fetch_p50_ms": 0,
+        "fetch_p95_ms": 0,
     }
     if not due_rows:
+        _record_saturation(0)  # clean tick resets the sustained-deferred counter
         return counts
+
+    # C2: skip-exhausted (compute once per distinct `calls` owner) + budget +
+    # fair-share + TF-priority. Deferred rows are simply not marked fetched →
+    # they stay due and are picked up next tick.
+    budget = counts["budget"]
+    calls_owners = {r.chat_id for r in due_rows if r.alert_type == "calls"}
+    exhausted = {cid for cid in calls_owners if get_quota_state(db, cid).exhausted}
+    sched = fetch_budget.schedule(
+        due_rows, budget=budget, is_exhausted=lambda cid: cid in exhausted
+    )
+    counts["skipped_exhausted"] = sched.stats["skipped_exhausted"]
+    counts["active_users"] = sched.stats["active_users"]
 
     from .mcp_client import McpClient, McpClientConfig
 
@@ -591,11 +686,29 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
         url=mcp_url or "http://127.0.0.1:3000/mcp",
         internal_bypass_key=bypass_key,
     )
+    deadline = fetch_budget.tick_deadline_sec()
+    tick_start = time.monotonic()
+    latencies: list[float] = []
+    deadline_deferred = 0
     try:
         with McpClient(cfg) as mcp:
-            for row in due_rows:
+            for i, row in enumerate(sched.scheduled):
+                # Wall-clock guard: a latency spike must never overrun the 60s
+                # tick — defer the rest (they remain due, unmarked).
+                if time.monotonic() - tick_start > deadline:
+                    deadline_deferred = len(sched.scheduled) - i
+                    log.warning(
+                        json.dumps({
+                            "event": "fetch_tick_deadline_hit",
+                            "deadline_s": deadline,
+                            "deadline_deferred": deadline_deferred,
+                        })
+                    )
+                    break
+                row_start = time.monotonic()
                 try:
                     fetched = await process_one_row(bot, mcp, db, row)
+                    counts["processed"] += 1
                     if fetched.get("regime") == "fired":
                         counts["regime_fired"] += 1
                     if fetched.get("trade_call") == "fired":
@@ -606,9 +719,16 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
                         "row processing failed: %s/%s/%s — %s",
                         row.coin, row.timeframe, row.exchange, e,
                     )
+                finally:
+                    latencies.append(time.monotonic() - row_start)
     except McpError as e:
         log.error("mcp client init failed: %s", e)
         counts["errors"] += 1
+
+    total_deferred = sched.stats["deferred"] + deadline_deferred
+    counts["deferred"] = total_deferred
+    counts["fetch_p50_ms"], counts["fetch_p95_ms"] = _percentiles_ms(latencies)
+    _record_saturation(total_deferred)
     return counts
 
 
@@ -644,6 +764,14 @@ def main() -> None:
             {
                 "event": "alert_engine: complete",
                 "due": counts["due"],
+                # TG-BATCH-WATCHLIST-W1 C2 — fetch-budget observability.
+                "processed": counts["processed"],
+                "deferred": counts["deferred"],
+                "skipped_exhausted": counts["skipped_exhausted"],
+                "active_users": counts["active_users"],
+                "budget": counts["budget"],
+                "fetch_p50_ms": counts["fetch_p50_ms"],
+                "fetch_p95_ms": counts["fetch_p95_ms"],
                 "regime_fired": counts["regime_fired"],
                 "calls_fired": counts["calls_fired"],
                 "errors": counts["errors"],
@@ -656,6 +784,13 @@ def main() -> None:
     log_alert_event(
         "cycle_complete",
         due=counts["due"],
+        processed=counts["processed"],
+        deferred=counts["deferred"],
+        skipped_exhausted=counts["skipped_exhausted"],
+        active_users=counts["active_users"],
+        budget=counts["budget"],
+        fetch_p50_ms=counts["fetch_p50_ms"],
+        fetch_p95_ms=counts["fetch_p95_ms"],
         regime_fired=counts["regime_fired"],
         calls_fired=counts["calls_fired"],
         errors=counts["errors"],
