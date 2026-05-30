@@ -16,6 +16,7 @@ import secrets
 from typing import Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -533,9 +534,15 @@ def register_handlers(app: Application, db: Database) -> None:
                 len(api_key),
             )
             reply = handle_link(db, chat_id, username, lang, api_key)
+            # Link-confirmation replies are plain text.
+            await update.message.reply_text(reply, disable_web_page_preview=True)
         else:
+            # TG-START-COPY-TRIM-W1: the welcome carries an <a> "Upgrade" link →
+            # send as HTML (body is fully HTML-escaped in messages.WELCOME_MESSAGE).
             reply = handle_start(db, chat_id, username, lang)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+            await update.message.reply_text(
+                reply, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+            )
 
     async def _help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:

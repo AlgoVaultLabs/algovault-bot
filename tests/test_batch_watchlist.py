@@ -278,14 +278,23 @@ def test_handle_list_summarizes_over_threshold(tmp_db: Database) -> None:
 # ── /start + /help copy (AC1.9) ────────────────────────────────
 
 
-def test_start_copy_has_bulk_block_and_unwatchall() -> None:
+def test_start_copy_trimmed_with_upgrade_link() -> None:
+    # TG-START-COPY-TRIM-W1: burn-examples + standalone "⚡ Add in bulk" block
+    # removed; /watch consolidated into one Get-started line; raw URL → <a> Upgrade.
     w = messages.WELCOME_MESSAGE
-    assert "⚡ Add in bulk" in w
+    assert "⚡ Add in bulk" not in w
+    assert "faster quota burn" not in w
+    # consolidated Get-started + preserved command lines (placeholders escaped)
+    assert "/watch &lt;COIN&gt; &lt;Timeframe&gt; &lt;Exchange&gt;" in w
+    assert "Example: BTC All Binance" in w
+    assert "/list" in w
+    assert "/unwatch &lt;COIN&gt; &lt;TF&gt;" in w
     assert "/unwatchall" in w
-    assert "/watch BTC all" in w
-    # preserved lines + live signup URL (generated, not hardcoded)
+    assert "/help" in w
+    # preserved explainer + clickable Upgrade (generated, utm-preserved)
     assert "the brain layer for AI trading agents" in w
     assert "all 710+ assets" in w
+    assert ">Upgrade</a>" in w
     assert "utm_campaign=start_welcome" in w
 
 

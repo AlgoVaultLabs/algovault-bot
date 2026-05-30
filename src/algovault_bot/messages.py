@@ -22,6 +22,15 @@ def signup_url(campaign: str) -> str:
     return f"{SIGNUP_BASE}&utm_source=tg_bot&utm_campaign={campaign}"
 
 
+# TG-START-COPY-TRIM-W1: the /start welcome is sent with parse_mode=HTML so
+# "Upgrade" is a clickable link instead of a raw wrapping URL. The href is
+# GENERATED from signup_url('start_welcome') (utm attribution byte-identical)
+# with the scheme prepended and `&` HTML-escaped to `&amp;`. The four <…>
+# placeholders are HTML-escaped to &lt;…&gt; so they render literally; every
+# other char in the body is HTML-safe. KEEP this body fully escaped — it is
+# sent as HTML (see handlers._start).
+_UPGRADE_HREF: Final = "https://" + signup_url("start_welcome").replace("&", "&amp;")
+
 WELCOME_MESSAGE: Final = (
     "👋 Welcome to AlgoVault — the brain layer for AI trading agents.\n"
     "\n"
@@ -32,27 +41,16 @@ WELCOME_MESSAGE: Final = (
     "\n"
     "Free tier covers all 710+ assets and all 11 timeframes (1m–1d). YOU choose what to watch.\n"
     "\n"
-    "More assets + lower timeframes = faster quota burn. Examples:\n"
-    "• /watch BTC 1d        — slow burn (~1 alert/mo)\n"
-    "• /watch BTC 4h        — moderate (~5 alerts/mo per pair)\n"
-    "• /watch BTC 15m       — fast (~30 alerts/mo per pair)\n"
-    "• /watch BTC 1m        — very fast (cap blown in days)\n"
-    "\n"
-    '⚡ Add in bulk — use "all" or comma-lists:\n'
-    "• /watch BTC all           — BTC on every timeframe\n"
-    "• /watch BTC,ETH,SOL 15m   — 3 coins, one timeframe\n"
-    "• /watch BTC all all       — BTC, every TF, every exchange\n"
-    "• /watch all 1h            — every asset (I'll confirm first)\n"
-    "\n"
     "Get started:\n"
-    '/watch <COIN> <TF> [EXCH]   — add (COIN/TF/EXCH can be "all" or a,b,c)\n'
+    "/watch &lt;COIN&gt; &lt;Timeframe&gt; &lt;Exchange&gt;   — add one coin, or in bulk\n"
+    "Example: BTC All Binance / ETH 15m Bybit / XRP 5m All\n"
     "/list                       — see your picks\n"
-    '/unwatch <COIN> <TF>        — remove one (TF/EXCH can be "all")\n'
+    '/unwatch &lt;COIN&gt; &lt;TF&gt;        — remove one (TF/EXCH can be "all")\n'
     "/unwatchall                 — clear everything\n"
     "/help                       — full commands\n"
     "\n"
-    "Hit the cap? Upgrade to Starter ($9.99 → 3,000 calls/mo) or pay per call via x402.\n"
-    f"→ {signup_url('start_welcome')}"
+    f'Hit the cap? <a href="{_UPGRADE_HREF}">Upgrade</a> to Starter '
+    "($9.99 → 3,000 calls/mo) or pay per call via x402."
 )
 
 

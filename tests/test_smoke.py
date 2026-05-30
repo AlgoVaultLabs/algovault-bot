@@ -1,20 +1,33 @@
-"""Welcome-message constant fixtures (AC1.3 byte-level checks)."""
+"""Welcome-message constant fixtures.
+
+TG-START-COPY-TRIM-W1: the quota-burn examples block + standalone "⚡ Add in
+bulk" block were removed; /watch is taught in one consolidated line; "Upgrade"
+is a clickable HTML <a> link (welcome sent with parse_mode=HTML) instead of a
+raw wrapping URL.
+"""
 
 from algovault_bot.messages import WELCOME_MESSAGE
 
 
-def test_welcome_message_includes_4_watch_examples() -> None:
-    for tf in ("1d", "4h", "15m", "1m"):
-        assert f"/watch BTC {tf}" in WELCOME_MESSAGE
+def test_welcome_message_consolidated_watch_line() -> None:
+    # Single Get-started /watch line (placeholders HTML-escaped) + one Example.
+    assert "/watch &lt;COIN&gt; &lt;Timeframe&gt; &lt;Exchange&gt;" in WELCOME_MESSAGE
+    assert "Example: BTC All Binance / ETH 15m Bybit / XRP 5m All" in WELCOME_MESSAGE
+    # The removed blocks are gone.
+    assert "faster quota burn" not in WELCOME_MESSAGE
+    assert "⚡ Add in bulk" not in WELCOME_MESSAGE
 
 
 def test_welcome_message_quota_line() -> None:
     assert "📈 Trade calls (BUY/SELL) — counts against your free 100 calls/month" in WELCOME_MESSAGE
 
 
-def test_welcome_message_signup_url_with_utm() -> None:
-    # D3-A applied: api.algovault.com/signup?plan=starter (NOT algovault.com/signup which 404s).
-    assert (
-        "api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=start_welcome"
-        in WELCOME_MESSAGE
-    )
+def test_welcome_message_upgrade_link_with_utm() -> None:
+    # D3-A applied: api.algovault.com/signup?plan=starter (NOT algovault.com/signup
+    # which 404s). Now a clickable HTML <a> "Upgrade" (utm preserved, generated
+    # from signup_url('start_welcome')); the raw URL line is gone.
+    assert '<a href="https://api.algovault.com/signup?plan=starter' in WELCOME_MESSAGE
+    assert "utm_source=tg_bot" in WELCOME_MESSAGE
+    assert "utm_campaign=start_welcome" in WELCOME_MESSAGE
+    assert ">Upgrade</a>" in WELCOME_MESSAGE
+    assert "→ api.algovault.com/signup" not in WELCOME_MESSAGE  # no raw URL line
