@@ -1,0 +1,168 @@
+{
+  "server": "algovault-crypto-quant-signal-mcp",
+  "version": "fallback-snapshot",
+  "_note": "Committed offline fallback for the TG bot — regenerate from projectCapabilities() when the registry changes (FEATURE-PARITY-CHANNELS-W1 CH3).",
+  "tools": [
+    {
+      "name": "get_trade_call",
+      "canonical": "get_trade_call",
+      "channels": {
+        "mcp": true,
+        "httpX402": true,
+        "bot": true,
+        "webhook": true
+      },
+      "quota": {
+        "unit": "per-non-hold",
+        "holdFree": true
+      },
+      "x402": {
+        "basePriceUsd": 0.02
+      },
+      "description": "Composite verdict BUY SELL HOLD trade call for crypto perpetual futures on Binance Bybit OKX Bitget Hyperliquid. Returns verdict, confidence, market regime, funding rate, reasoning. Verified track record, merkle anchor on Base — on-chain verified. MCP tool for trading. Cross-venue multi-exchange AI trading signal for Claude trading agents.",
+      "enabled": true
+    },
+    {
+      "name": "get_trade_signal",
+      "canonical": "get_trade_call",
+      "channels": {
+        "mcp": true,
+        "httpX402": true,
+        "bot": true,
+        "webhook": true
+      },
+      "quota": {
+        "unit": "per-non-hold",
+        "holdFree": true
+      },
+      "x402": {
+        "basePriceUsd": 0.02
+      },
+      "description": "Composite verdict BUY SELL HOLD trade call for crypto perpetual futures on Binance Bybit OKX Bitget Hyperliquid. Returns verdict, confidence, market regime, funding rate, reasoning. Verified track record, merkle anchor on Base — on-chain verified. MCP tool for trading. Cross-venue multi-exchange AI trading signal for Claude trading agents.",
+      "enabled": true
+    },
+    {
+      "name": "get_market_regime",
+      "canonical": "get_market_regime",
+      "channels": {
+        "mcp": true,
+        "httpX402": true,
+        "bot": true,
+        "webhook": true
+      },
+      "quota": {
+        "unit": "per-call",
+        "holdFree": false
+      },
+      "x402": {
+        "basePriceUsd": 0.02
+      },
+      "description": "Market regime classifier — TRENDING_UP TRENDING_DOWN RANGING VOLATILE — for crypto perpetual futures on Binance Bybit OKX Bitget Hyperliquid. Composite verdict blends trend ranging signals, volatility, cross-venue funding rate sentiment. Returns label, confidence, strategy hint. MCP tool for trading. Verified track record, merkle anchor on Base.",
+      "enabled": true
+    },
+    {
+      "name": "scan_funding_arb",
+      "canonical": "scan_funding_arb",
+      "channels": {
+        "mcp": true,
+        "httpX402": true,
+        "bot": false,
+        "webhook": false
+      },
+      "quota": {
+        "unit": "per-call",
+        "holdFree": false
+      },
+      "x402": {
+        "basePriceUsd": 0.01
+      },
+      "description": "Cross-venue funding arbitrage scanner. Funding rate spreads across Binance Bybit OKX Bitget Hyperliquid perpetual futures — long one, short other. Composite verdict, multi-exchange funding intelligence. MCP tool for trading. AI trading signal for crypto quant + Claude trading agents. Verified track record, on-chain verified merkle anchor on Base.",
+      "enabled": true
+    },
+    {
+      "name": "scan_trade_calls",
+      "canonical": "scan_trade_calls",
+      "channels": {
+        "mcp": true,
+        "httpX402": false,
+        "bot": true,
+        "webhook": true
+      },
+      "quota": {
+        "unit": "per-non-hold-min1",
+        "holdFree": true
+      },
+      "x402": null,
+      "description": "Cross-asset market scanner — composite verdict BUY SELL HOLD trade calls across the top 1-100 crypto perpetual futures by open interest on Binance Bybit OKX Bitget Hyperliquid. Returns ranked non-HOLD calls with confidence and market regime. One scan, whole-market coverage for AI trading agents. Use get_trade_call for per-coin depth and reasoning.",
+      "enabled": true
+    },
+    {
+      "name": "get_equity_call",
+      "canonical": "get_equity_call",
+      "channels": {
+        "mcp": true,
+        "httpX402": false,
+        "bot": false,
+        "webhook": false
+      },
+      "quota": {
+        "unit": "per-non-hold",
+        "holdFree": true
+      },
+      "x402": null,
+      "description": "Composite daily-bar trade call (BUY/SELL/HOLD) for a US equity or ETF, with confidence, market regime, and the technical factors that drove it. Universe = top US equities by dollar-volume plus index and crypto-proxy ETFs (SPY, QQQ, IBIT, …). Verdicts are computed once per session from Databento EQUS.MINI daily bars. Out-of-universe tickers return a structured SYMBOL_NOT_IN_UNIVERSE error with nearest-symbol suggestions. Accepts BRK-B or BRK.B.",
+      "enabled": true
+    },
+    {
+      "name": "get_equity_regime",
+      "canonical": "get_equity_regime",
+      "channels": {
+        "mcp": true,
+        "httpX402": false,
+        "bot": false,
+        "webhook": false
+      },
+      "quota": {
+        "unit": "per-call",
+        "holdFree": false
+      },
+      "x402": null,
+      "description": "Market regime for a US equity or ETF (defaults to SPY): trending_up, trending_down, compression, or ranging, with a confidence score. Derived from daily-bar trend strength (ADX/DI), persistence (Hurst), and volatility compression.",
+      "enabled": true
+    },
+    {
+      "name": "chat_knowledge",
+      "canonical": "chat_knowledge",
+      "channels": {
+        "mcp": true,
+        "httpX402": false,
+        "bot": false,
+        "webhook": false
+      },
+      "quota": {
+        "unit": "rate-limited",
+        "holdFree": false
+      },
+      "x402": null,
+      "description": "Ask AlgoVault a natural-language question — get a synthesized answer with citations, grounded in the canonical knowledge bundle (every MCP tool description, response shape, integration tutorial, and code example). Use this when you need an explanation, code pattern, or \"how do I\" answer. For raw ranked snippets without LLM synthesis, use search_knowledge (faster, no quota cost). Quota: Free 10/month, Starter 50/month, Pro 200/month, Enterprise 2000/month.",
+      "enabled": true
+    },
+    {
+      "name": "search_knowledge",
+      "canonical": "search_knowledge",
+      "channels": {
+        "mcp": true,
+        "httpX402": false,
+        "bot": false,
+        "webhook": false
+      },
+      "quota": {
+        "unit": "rate-limited",
+        "holdFree": false
+      },
+      "x402": null,
+      "description": "Ask AlgoVault any question about its MCP tools, response shapes, integration patterns (LangChain / LlamaIndex / MAF / CrewAI), or code examples. Returns ranked snippets from the canonical knowledge bundle. Use this BEFORE attempting any tool call to confirm correct parameter usage and avoid hallucinating tool shapes. Fast (BM25 lexical search, no LLM call, no quota cost). For natural-language synthesized answers, use chat_knowledge instead.",
+      "enabled": true
+    }
+  ]
+}

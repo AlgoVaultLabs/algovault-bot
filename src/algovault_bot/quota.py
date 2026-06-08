@@ -143,8 +143,19 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     )
 
 
-def consume_quota(db: Database, chat_id: int) -> QuotaState:
-    """Increment the user's billable-alert counter (trade call / regime). Starts a new window if needed.
+def _clamp_units(units: int) -> int:
+    """Default-deny clamp (CLAUDE.md): NaN/invalid/<1 → 1; else floor to an int ≥ 1."""
+    try:
+        u = int(units)
+    except (TypeError, ValueError):
+        return 1
+    return u if u >= 1 else 1
+
+
+def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
+    """Increment the user's billable-alert counter by `units` (default 1 = byte-identical
+    for existing callers; the scanner rule passes max(1, non-HOLD) — FEATURE-PARITY-CHANNELS-W1
+    CH3). Starts a new window if needed.
 
     BOT-W2 C3: paid-tier-linked users SKIP the increment entirely (no-op
     return of current state). Their bot-pushed alerts don't count against
@@ -159,7 +170,7 @@ def consume_quota(db: Database, chat_id: int) -> QuotaState:
     state = get_quota_state(db, chat_id)
     if state.is_paid:
         return state  # no-op for paid tiers
-    new_used = state.used + 1
+    new_used = state.used + _clamp_units(units)
     with db._cursor() as cur:
         if state.window_start is None:
             window_start = _now()

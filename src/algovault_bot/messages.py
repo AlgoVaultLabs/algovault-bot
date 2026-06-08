@@ -67,6 +67,7 @@ HELP_MESSAGE: Final = (
     "/unwatch <COIN> <TF> [EXCHANGE] — remove from watchlist (TF/EXCHANGE can be \"all\")\n"
     "/unwatchall — clear your entire watchlist\n"
     "/list — show your watchlist\n"
+    "/scan [TOP_N] [TF] [EXCHANGE] — scan the top-N perps by OI for actionable calls\n"
     "/help — this message\n"
     "\n"
     "Examples:\n"

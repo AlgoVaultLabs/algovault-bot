@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import Final
 
+from .capabilities import BOT_TOOL_SURFACE
+
 
 COIN_RE: Final = re.compile(r"^[A-Z0-9]{2,10}$")
 
@@ -39,7 +41,15 @@ EXCHANGES: Final[frozenset[str]] = frozenset({"HL", "BINANCE", "BYBIT", "OKX", "
 # rate-limit hot from external IPs per REGIME-BOT-W1 P5 truth-table).
 DEFAULT_EXCHANGE: Final = "BINANCE"
 
-ALERT_TYPES: Final[frozenset[str]] = frozenset({"regime", "calls", "both"})
+# FEATURE-PARITY-CHANNELS-W1 CH3: DERIVED from the bot-flagged 'alert'-kind tools in
+# capabilities.BOT_TOOL_SURFACE (the SoT the CH5 canary ties to /capabilities) + the
+# 'both' composite. Value-identical to the prior hardcoded {regime,calls,both} — now
+# sourced from the surface map, so a future alert tool extends it by construction
+# (replaces the hand-maintained list per CH3(b)).
+_ALERT_BASE: Final[frozenset[str]] = frozenset(
+    s["alert_type"] for s in BOT_TOOL_SURFACE.values() if s.get("kind") == "alert"
+)
+ALERT_TYPES: Final[frozenset[str]] = _ALERT_BASE | {"both"}
 DEFAULT_ALERT_TYPE: Final = "calls"
 
 

@@ -38,12 +38,15 @@ from .mcp_client import McpError, from_env
 from .validators import (
     DEFAULT_ALERT_TYPE,
     DEFAULT_EXCHANGE,
+    EXCHANGES,
+    TIMEFRAMES,
     ValidationError,
     normalize_alert_type,
     normalize_coin,
     normalize_exchange,
     normalize_timeframe,
 )
+from .quota import consume_quota, get_quota_state
 
 log = logging.getLogger(__name__)
 
@@ -266,6 +269,98 @@ def handle_link(
 def handle_help(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
     db.upsert_subscriber(chat_id, username, lang_code)
     return messages.HELP_MESSAGE
+
+
+# ── FEATURE-PARITY-CHANNELS-W1 CH3 — /scan (pull the market scanner) ──
+DEFAULT_SCAN_TOP_N = 20
+DEFAULT_SCAN_TF = "15m"
+
+
+def _scan_via_mcp_impl(top_n: int, timeframe: str, exchange: str) -> dict:
+    """Real scan call — fires scan_trade_calls over the internal-bypass MCP edge."""
+    with from_env() as cli:
+        return cli.call_tool(
+            "scan_trade_calls",
+            {"topN": top_n, "timeframe": timeframe, "exchange": exchange},
+        )
+
+
+# Test seam (mirrors _validate_symbol): tests monkeypatch THIS alias to return a
+# fixture result without a live MCP server.
+def _scan_via_mcp(top_n: int, timeframe: str, exchange: str) -> dict:
+    return _scan_via_mcp_impl(top_n, timeframe, exchange)
+
+
+def _parse_scan_args(args: list[str]) -> tuple[int, str, str]:
+    """Tolerant positional parse of [TOP_N] [TIMEFRAME] [EXCHANGE] (any order). The
+    scanner ranks the top-N perps by OI — it takes no coin list (use /watch for
+    specific coins). Raises ValidationError on an unrecognized token."""
+    top_n, timeframe, exchange = DEFAULT_SCAN_TOP_N, DEFAULT_SCAN_TF, DEFAULT_EXCHANGE
+    for raw in args:
+        tok = raw.strip()
+        if tok.isdigit():
+            n = int(tok)
+            if not 1 <= n <= 100:
+                raise ValidationError("TOP_N must be between 1 and 100")
+            top_n = n
+        elif tok.lower() in TIMEFRAMES:
+            timeframe = tok.lower()
+        elif tok.upper() in EXCHANGES:
+            exchange = tok.upper()
+        else:
+            raise ValidationError(f"unrecognized argument {raw!r}")
+    return top_n, timeframe, exchange
+
+
+def _format_scan_reply(result: dict, top_n: int, timeframe: str, exchange: str) -> str:
+    calls = result.get("calls") or []
+    non_hold = [c for c in calls if c.get("call") not in (None, "HOLD")]
+    scanned = result.get("scanned", 0)
+    header = f"🔍 Scan — top {top_n} perps by OI on {exchange} @ {timeframe}"
+    if not non_hold:
+        return f"{header}\n\nNo actionable BUY/SELL calls right now ({scanned} scanned). Charged 1 call."
+    lines = [f"{header} — {len(non_hold)} actionable:", ""]
+    for c in non_hold:
+        mark = "🟢" if c.get("call") == "BUY" else "🔴"
+        lines.append(f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}")
+    lines.append("")
+    lines.append(f"Charged {len(non_hold)} call(s) against your monthly quota. Not financial advice.")
+    return "\n".join(lines)
+
+
+def handle_scan(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
+) -> str:
+    """Pull the market scanner (scan_trade_calls) + meter max(1, non-HOLD) against the
+    user's monthly quota (HOLD-only scan = 1; paid tiers = no-op via consume_quota)."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    try:
+        top_n, timeframe, exchange = _parse_scan_args(list(args))
+    except ValidationError as e:
+        return (
+            "Usage: /scan [TOP_N] [TIMEFRAME] [EXCHANGE]\n"
+            "Ranks the top-N perps by open interest for actionable (BUY/SELL) calls.\n"
+            "  /scan            — top 20 on BINANCE @ 15m\n"
+            "  /scan 25 1h      — top 25 @ 1h\n"
+            "  /scan 1h BYBIT   — top 20 on BYBIT @ 1h\n"
+            "(For specific coins use /watch — the scanner takes no coin list.)\n"
+            f"↳ {e}"
+        )
+    state = get_quota_state(db, chat_id)
+    if state.exhausted:
+        return (
+            f"You've used all {state.total} free calls this month. "
+            f"Upgrade for more: {messages.signup_url('scan_quota_exhausted')}"
+        )
+    try:
+        result = _scan_via_mcp(top_n, timeframe, exchange)
+    except McpError as e:
+        log.warning(json.dumps({"event": "scan_mcp_failed", "err": str(e)[:200]}))
+        return "⚠️ The scanner is temporarily unavailable — please try again shortly."
+    calls = result.get("calls") or []
+    non_hold = sum(1 for c in calls if c.get("call") not in (None, "HOLD"))
+    consume_quota(db, chat_id, units=max(1, non_hold))
+    return _format_scan_reply(result, top_n, timeframe, exchange)
 
 
 def handle_watch(
@@ -550,6 +645,15 @@ def register_handlers(app: Application, db: Database) -> None:
         chat_id, username, lang = _user_meta(update)
         _maybe_fire_first_command_event(db, chat_id)
         reply = handle_help(db, chat_id, username, lang)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        args = ctx.args or []
+        reply = handle_scan(db, chat_id, username, lang, args)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
     async def _watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -957,6 +1061,9 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("unwatchall", _unwatchall))
     app.add_handler(CommandHandler("list", _list))
     app.add_handler(CommandHandler("stats", _stats))
+    # FEATURE-PARITY-CHANNELS-W1 CH3: /scan (pull the market scanner). scan_trade_calls
+    # is bot-flagged in the registry → its command surfaces here (capabilities.BOT_TOOL_SURFACE).
+    app.add_handler(CommandHandler("scan", _scan))
     # TG-BATCH-WATCHLIST-W1 — batch /watch confirm-nudge + /unwatchall confirm.
     app.add_handler(
         CallbackQueryHandler(_on_batch_watch_callback, pattern=r"^bw:(add|top|cancel):")
@@ -986,6 +1093,7 @@ __all__ = [
     "commit_watch_batch",
     "handle_help",
     "handle_list",
+    "handle_scan",
     "handle_start",
     "handle_unwatch",
     "handle_unwatchall",
