@@ -738,6 +738,88 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     return counts
 
 
+def _format_scan_digest_push(
+    non_hold: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str, scanned: int = 0
+) -> str:
+    header = f"🔁 Scan digest ({cadence}) — top {top_n} perps by OI on {exchange} @ {tf}"
+    if not non_hold:
+        return f"{header}\n\nNo actionable BUY/SELL calls this round ({scanned} scanned)."
+    lines = [f"{header} — {len(non_hold)} actionable:", ""]
+    for c in non_hold:
+        mark = "🟢" if c.get("call") == "BUY" else "🔴"
+        lines.append(f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}")
+    lines.append("")
+    lines.append("Not financial advice. Manage with /list · /unscanwatch.")
+    return "\n".join(lines)
+
+
+async def process_scan_digests(
+    token: str, db_path: str, mcp_url: str | None, bypass_key: str, *, now_epoch: int | None = None
+) -> dict[str, int]:
+    """FEATURE-PARITY-CHANNELS-W1 CH4 — scheduled scan-digest producer (the bot twin of the
+    webhook scan_digest scheduler). ISOLATED from run_cycle so the /watch path is byte-
+    unchanged. For each scan-digest sub whose CURRENT cadence bucket hasn't fired: run
+    scan_trade_calls ONCE per (top_n,tf,exchange) group, push the ranked calls, meter
+    max(1, non-HOLD), and advance the bucket (one push per bucket; an exhausted owner is
+    skipped but the bucket still advances — parity with the webhook PAUSE, no re-scan storm)."""
+    from .mcp_client import McpClientConfig
+    from .scan_digest import cadence_bucket_epoch
+
+    db = Database(db_path)
+    now = now_epoch if now_epoch is not None else int(time.time())
+    counts: dict[str, int] = {"scan_due": 0, "scan_fired": 0, "scan_skipped_exhausted": 0, "scan_errors": 0}
+
+    rows = db.list_all_scan_watches()
+    due = [r for r in rows if cadence_bucket_epoch(r["cadence"], now) > r["last_fired_bucket"]]
+    counts["scan_due"] = len(due)
+    if not due:
+        return counts
+
+    bot = Bot(token=token)
+    cfg = McpClientConfig(url=mcp_url or "http://127.0.0.1:3000/mcp", internal_bypass_key=bypass_key)
+
+    groups: dict[tuple[int, str, str], list[Any]] = {}
+    for r in due:
+        groups.setdefault((r["top_n"], r["timeframe"], r["exchange"]), []).append(r)
+
+    try:
+        with McpClient(cfg) as mcp:
+            for (top_n, tf, exchange), grp in groups.items():
+                try:
+                    result = mcp.call_tool(
+                        "scan_trade_calls", {"topN": top_n, "timeframe": tf, "exchange": exchange}
+                    )
+                except McpError as e:
+                    log.warning(json.dumps({
+                        "event": "scan_digest_mcp_failed", "top_n": top_n,
+                        "tf": tf, "exchange": exchange, "err": str(e)[:200],
+                    }))
+                    counts["scan_errors"] += len(grp)
+                    continue
+                calls = result.get("calls") or []
+                non_hold = [c for c in calls if c.get("call") not in (None, "HOLD")]
+                scanned = int(result.get("scanned", 0) or 0)
+                for r in grp:
+                    chat_id = r["chat_id"]
+                    bucket = cadence_bucket_epoch(r["cadence"], now)
+                    # Exhausted free owner → skip the push+charge but ADVANCE the bucket
+                    # (one attempt per bucket; mirrors the webhook PAUSE; no re-scan storm).
+                    if get_quota_state(db, chat_id).exhausted:
+                        counts["scan_skipped_exhausted"] += 1
+                        db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
+                        continue
+                    text = _format_scan_digest_push(non_hold, top_n, tf, exchange, r["cadence"], scanned=scanned)
+                    ok = await _push(bot, chat_id, text, db)
+                    if ok:
+                        consume_quota(db, chat_id, units=max(1, len(non_hold)))
+                        counts["scan_fired"] += 1
+                    db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
+    except McpError as e:
+        log.error("scan-digest mcp client init failed: %s", e)
+        counts["scan_errors"] += len(due)
+    return counts
+
+
 def main() -> None:
     """Cron entry point — invoked by systemd timer every 1 min."""
     logging.basicConfig(
@@ -802,6 +884,15 @@ def main() -> None:
         errors=counts["errors"],
         elapsed_s=round(elapsed, 2),
     )
+
+    # FEATURE-PARITY-CHANNELS-W1 CH4: scheduled scan-digest pass — isolated from run_cycle
+    # (the /watch path above is byte-unchanged). Pushes due scan digests per cadence bucket.
+    # Fail-soft: a scan-digest error never aborts the watch cycle (already journaled above).
+    try:
+        scan_counts = asyncio.run(process_scan_digests(token, db_path, mcp_url, bypass_key))
+        log.info(json.dumps({"event": "scan_digests: complete", **scan_counts}))
+    except Exception as e:  # noqa: BLE001 — a scan-digest failure must never crash the cron
+        log.exception("scan-digest pass failed: %s", e)
 
 
 if __name__ == "__main__":

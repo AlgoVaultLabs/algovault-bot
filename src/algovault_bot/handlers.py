@@ -47,6 +47,7 @@ from .validators import (
     normalize_timeframe,
 )
 from .quota import consume_quota, get_quota_state
+from .scan_digest import cadence_for_timeframe, is_valid_cadence, scan_digest_reminder
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +364,101 @@ def handle_scan(
     return _format_scan_reply(result, top_n, timeframe, exchange)
 
 
+# ── FEATURE-PARITY-CHANNELS-W1 CH4 — /scanwatch (scheduled scan digest → chat) ──
+
+
+def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str]:
+    """Positional-ish [TOP_N] [TF] [EXCHANGE] [CADENCE]. Cadence values (1h/4h/1d)
+    are also valid timeframes, so the FIRST time-token is the TF and the SECOND is
+    the cadence. Cadence defaults to cadence_for_timeframe(tf) when omitted."""
+    top_n, timeframe, exchange, cadence = DEFAULT_SCAN_TOP_N, DEFAULT_SCAN_TF, DEFAULT_EXCHANGE, None
+    seen_tf = False
+    for raw in args:
+        tok = raw.strip()
+        if tok.isdigit():
+            n = int(tok)
+            if not 1 <= n <= 100:
+                raise ValidationError("TOP_N must be between 1 and 100")
+            top_n = n
+        elif tok.upper() in EXCHANGES:
+            exchange = tok.upper()
+        elif tok.lower() in TIMEFRAMES:
+            if not seen_tf:
+                timeframe = tok.lower()
+                seen_tf = True
+            elif is_valid_cadence(tok.lower()):
+                cadence = tok.lower()
+            else:
+                raise ValidationError(f"cadence must be one of 1h/4h/1d, got {raw!r}")
+        else:
+            raise ValidationError(f"unrecognized argument {raw!r}")
+    if cadence is None:
+        cadence = cadence_for_timeframe(timeframe)
+    return top_n, timeframe, exchange, cadence
+
+
+def _scanwatch_usage(err: object) -> str:
+    return (
+        "Usage: /scanwatch [TOP_N] [TIMEFRAME] [EXCHANGE] [CADENCE]\n"
+        "Schedules a recurring whole-market scan digest pushed to this chat.\n"
+        "  /scanwatch              — top 20 on BINANCE @ 15m, every 1h\n"
+        "  /scanwatch 25 1h        — top 25 @ 1h, cadence auto (1h)\n"
+        "  /scanwatch 4h 1d BYBIT  — top 20 @ 4h on BYBIT, every 1d\n"
+        "Cadence ∈ {1h, 4h, 1d}; defaults from your timeframe (floor 1h).\n"
+        f"↳ {err}"
+    )
+
+
+def handle_scanwatch(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
+) -> str:
+    """Create/update a scheduled scan-digest subscription (the alert-engine cron pushes it)."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    try:
+        top_n, timeframe, exchange, cadence = _parse_scanwatch_args(list(args))
+    except ValidationError as e:
+        return _scanwatch_usage(e)
+    inserted = db.add_scan_watch(chat_id, top_n, timeframe, exchange, cadence)
+    verb = "Scheduled" if inserted else "Updated"
+    return (
+        f"{verb} scan digest — top {top_n} perps by OI on {exchange} @ {timeframe}, every {cadence}.\n"
+        f"{scan_digest_reminder(cadence, timeframe)}\n"
+        f"See it in /list · remove with /unscanwatch {top_n} {timeframe} {exchange}."
+    )
+
+
+def handle_unscanwatch(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
+) -> str:
+    """Remove a scheduled scan-digest subscription (matched by TOP_N/TF/EXCHANGE)."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    try:
+        top_n, timeframe, exchange, _ = _parse_scanwatch_args(list(args))
+    except ValidationError as e:
+        return _scanwatch_usage(e)
+    removed = db.remove_scan_watch(chat_id, top_n, timeframe, exchange)
+    if removed:
+        return f"Removed scan digest — top {top_n} on {exchange} @ {timeframe}."
+    return f"No scan digest found for top {top_n} on {exchange} @ {timeframe}. See /list."
+
+
+def _format_scan_watch_section(scan_rows: list) -> str:
+    """The scan-digest block appended to /list — empty string when there are none
+    (so /list's watchlist rendering stays byte-identical for users with no digests)."""
+    if not scan_rows:
+        return ""
+    lines = ["🔁 Scheduled scan digests:"]
+    for r in scan_rows:
+        lines.append(f"  • top {r['top_n']} on {r['exchange']} @ {r['timeframe']} — every {r['cadence']}")
+    lines.append("Remove one with /unscanwatch <TOP_N> <TF> <EXCHANGE>.")
+    return "\n".join(lines)
+
+
+def _with_scan(base: str, scan_section: str) -> str:
+    """Append the scan-digest section to a /list reply (no-op when there are none)."""
+    return f"{base}\n\n{scan_section}" if scan_section else base
+
+
 def handle_watch(
     db: Database,
     chat_id: int,
@@ -539,23 +635,30 @@ def handle_stats(db: Database, chat_id: int, username: str | None, lang_code: st
 def handle_list(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
     db.upsert_subscriber(chat_id, username, lang_code)
     rows = db.list_watches(chat_id)
+    # FEATURE-PARITY-CHANNELS-W1 CH4: /list also shows scheduled scan digests. The
+    # watchlist rendering below is BYTE-UNCHANGED; the scan section is appended (and
+    # is "" for users with no digests, so existing /list output is identical).
+    scan_section = _format_scan_watch_section(db.list_scan_watches(chat_id))
     if not rows:
-        return messages.list_empty_message()
+        return scan_section or messages.list_empty_message()
     # TG-BATCH-WATCHLIST-W1: watchlists are now uncapped, so a per-row dump can
     # be thousands of lines. Above the page threshold (repurposed
     # PER_USER_WATCHLIST_CAP), show a bounded grouped summary (by TF + exchange)
     # and skip per-row coverage nudges (would be N MCP fetches).
     if len(rows) > PER_USER_WATCHLIST_CAP:
-        return messages.list_summary_message(
-            [
-                {
-                    "coin": r["coin"],
-                    "timeframe": r["timeframe"],
-                    "exchange": r["exchange"],
-                    "alert_type": r["alert_type"],
-                }
-                for r in rows
-            ]
+        return _with_scan(
+            messages.list_summary_message(
+                [
+                    {
+                        "coin": r["coin"],
+                        "timeframe": r["timeframe"],
+                        "exchange": r["exchange"],
+                        "alert_type": r["alert_type"],
+                    }
+                    for r in rows
+                ]
+            ),
+            scan_section,
         )
     # OPS-TRADE-CALL-CLUSTER-W1 CH4 — append compact per-row nudge so existing
     # subscribers see expected fire-rate for each watched combo. Same coverage
@@ -575,7 +678,7 @@ def handle_list(db: Database, chat_id: int, username: str | None, lang_code: str
             "alert_type": r["alert_type"],
             "nudge": nudge,
         })
-    return messages.list_message(enriched_rows, cap=PER_USER_WATCHLIST_CAP)
+    return _with_scan(messages.list_message(enriched_rows, cap=PER_USER_WATCHLIST_CAP), scan_section)
 
 
 # ── telegram framework adapters ─────────────────────────────────
@@ -654,6 +757,23 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_scan(db, chat_id, username, lang, args)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _scanwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        args = ctx.args or []
+        reply = handle_scanwatch(db, chat_id, username, lang, args)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _unscanwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        args = ctx.args or []
+        reply = handle_unscanwatch(db, chat_id, username, lang, args)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
     async def _watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1064,6 +1184,10 @@ def register_handlers(app: Application, db: Database) -> None:
     # FEATURE-PARITY-CHANNELS-W1 CH3: /scan (pull the market scanner). scan_trade_calls
     # is bot-flagged in the registry → its command surfaces here (capabilities.BOT_TOOL_SURFACE).
     app.add_handler(CommandHandler("scan", _scan))
+    # FEATURE-PARITY-CHANNELS-W1 CH4: scheduled scan digests (the bot twin of the
+    # webhook scan_digest). The alert-engine cron pushes due digests per cadence bucket.
+    app.add_handler(CommandHandler("scanwatch", _scanwatch))
+    app.add_handler(CommandHandler("unscanwatch", _unscanwatch))
     # TG-BATCH-WATCHLIST-W1 — batch /watch confirm-nudge + /unwatchall confirm.
     app.add_handler(
         CallbackQueryHandler(_on_batch_watch_callback, pattern=r"^bw:(add|top|cancel):")
@@ -1094,7 +1218,9 @@ __all__ = [
     "handle_help",
     "handle_list",
     "handle_scan",
+    "handle_scanwatch",
     "handle_start",
+    "handle_unscanwatch",
     "handle_unwatch",
     "handle_unwatchall",
     "handle_watch",

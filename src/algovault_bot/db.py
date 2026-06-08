@@ -213,6 +213,25 @@ NPM_UNLOCK_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN npm_unlock_detected_at TIMESTAMP",
 )
 
+# FEATURE-PARITY-CHANNELS-W1 CH4 (2026-06-08): scheduled scan-digest subscriptions —
+# the TG-bot twin of the webhook scan_digest. One row per (chat, top_n, tf, exchange)
+# scan filter; `cadence` is timeframe-derived by default (floor 1h); `last_fired_bucket`
+# is the epoch of the last cadence bucket pushed → at most one digest per bucket.
+SCAN_WATCHES_TABLE_MIGRATIONS = (
+    "CREATE TABLE IF NOT EXISTS scan_watches ("
+    "  chat_id           INTEGER NOT NULL,"
+    "  top_n             INTEGER NOT NULL DEFAULT 20,"
+    "  timeframe         TEXT NOT NULL DEFAULT '15m',"
+    "  exchange          TEXT NOT NULL DEFAULT 'BINANCE',"
+    "  cadence           TEXT NOT NULL DEFAULT '1h' CHECK (cadence IN ('1h','4h','1d')),"
+    "  last_fired_bucket INTEGER NOT NULL DEFAULT 0,"
+    "  added_at          TIMESTAMP NOT NULL DEFAULT (datetime('now')),"
+    "  PRIMARY KEY (chat_id, top_n, timeframe, exchange),"
+    "  FOREIGN KEY (chat_id) REFERENCES subscribers(chat_id) ON DELETE CASCADE"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_scan_watches_chat ON scan_watches(chat_id)",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -255,6 +274,7 @@ class Database:
                 *UNLOCK_STATE_MIGRATIONS,
                 *PRO_GRANTS_TABLE_MIGRATIONS,
                 *NPM_UNLOCK_MIGRATIONS,
+                *SCAN_WATCHES_TABLE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -434,6 +454,69 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM watchlists WHERE chat_id = ?", (chat_id,))
             return int(cur.fetchone()[0])
+
+    # ── FEATURE-PARITY-CHANNELS-W1 CH4 — scan_watches (scheduled scan-digest subs) ──
+
+    def add_scan_watch(
+        self, chat_id: int, top_n: int, timeframe: str, exchange: str, cadence: str
+    ) -> bool:
+        """Insert a scan-digest subscription. Returns True on insert, False if it
+        already existed (updates the cadence in that case)."""
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    "INSERT INTO scan_watches(chat_id, top_n, timeframe, exchange, cadence) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (chat_id, top_n, timeframe, exchange, cadence),
+                )
+                return True
+            except sqlite3.IntegrityError as e:
+                if "UNIQUE" in str(e) or "PRIMARY KEY" in str(e):
+                    cur.execute(
+                        "UPDATE scan_watches SET cadence = ? "
+                        "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ?",
+                        (cadence, chat_id, top_n, timeframe, exchange),
+                    )
+                    return False
+                raise
+
+    def remove_scan_watch(self, chat_id: int, top_n: int, timeframe: str, exchange: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM scan_watches "
+                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ?",
+                (chat_id, top_n, timeframe, exchange),
+            )
+            return cur.rowcount > 0
+
+    def list_scan_watches(self, chat_id: int) -> list[sqlite3.Row]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, added_at "
+                "FROM scan_watches WHERE chat_id = ? ORDER BY added_at ASC",
+                (chat_id,),
+            )
+            return list(cur.fetchall())
+
+    def list_all_scan_watches(self) -> list[sqlite3.Row]:
+        """Every scan-digest subscription (the cron's candidate set; due is computed in
+        Python via cadence_bucket_epoch since the bucket period depends on per-row cadence)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket "
+                "FROM scan_watches ORDER BY chat_id ASC"
+            )
+            return list(cur.fetchall())
+
+    def mark_scan_watch_fired(
+        self, chat_id: int, top_n: int, timeframe: str, exchange: str, bucket: int
+    ) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE scan_watches SET last_fired_bucket = ? "
+                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ?",
+                (bucket, chat_id, top_n, timeframe, exchange),
+            )
 
     def list_due_watches(self, now_epoch_seconds: int, tf_seconds: dict[str, int]) -> list[sqlite3.Row]:
         """Return rows due for the next cron fire (C3 consumer).

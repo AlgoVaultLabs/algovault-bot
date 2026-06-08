@@ -68,6 +68,8 @@ HELP_MESSAGE: Final = (
     "/unwatchall — clear your entire watchlist\n"
     "/list — show your watchlist\n"
     "/scan [TOP_N] [TF] [EXCHANGE] — scan the top-N perps by OI for actionable calls\n"
+    "/scanwatch [TOP_N] [TF] [EXCHANGE] [CADENCE] — schedule a recurring scan digest\n"
+    "/unscanwatch [TOP_N] [TF] [EXCHANGE] — stop a scheduled scan digest\n"
     "/help — this message\n"
     "\n"
     "Examples:\n"
