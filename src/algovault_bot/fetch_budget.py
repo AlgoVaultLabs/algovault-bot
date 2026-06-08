@@ -8,7 +8,9 @@ fetch load):
 
   1. **Skip-exhausted** — drop `calls`-type rows whose owner's monthly quota is
      exhausted (they cannot receive a trade call until reset/upgrade, so
-     fetching is pure waste). `regime` (free) and `both` rows are kept.
+     fetching is pure waste). `regime` and `both` rows are kept — regime
+     alerts are still delivered (they now count toward quota per
+     QUOTA-CONSISTENCY-COUNT-ALL-W1, but are not exhaustion-gated).
   2. **Budget + fair-share** — process at most ``FETCH_BUDGET_PER_MIN`` rows per
      tick, **round-robin across users** (no single user can consume the whole
      budget), and **TF-priority within a user** (rarer/higher TFs first; 1m

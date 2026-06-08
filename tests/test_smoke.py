@@ -19,7 +19,13 @@ def test_welcome_message_consolidated_watch_line() -> None:
 
 
 def test_welcome_message_quota_line() -> None:
-    assert "📈 Trade calls (BUY/SELL) — counts against your free 100 calls/month" in WELCOME_MESSAGE
+    # QUOTA-CONSISTENCY-COUNT-ALL-W1: regime shifts AND trade calls both count
+    # toward the free 100/mo; only HOLD trade calls stay free (parity w/ signal-MCP).
+    assert "📊 Regime shifts — count toward your free 100 calls/month" in WELCOME_MESSAGE
+    assert "📈 Trade calls (BUY/SELL) — count toward your free 100 calls/month" in WELCOME_MESSAGE
+    assert "HOLD verdicts are silent + free." in WELCOME_MESSAGE
+    # The pre-wave "regime free, no limit" claim must be gone (metering parity).
+    assert "free, no limit" not in WELCOME_MESSAGE
 
 
 def test_welcome_message_upgrade_link_with_utm() -> None:

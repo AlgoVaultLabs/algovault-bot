@@ -402,6 +402,12 @@ async def process_one_row(
                     if await _push(bot, row.chat_id, text, db=db):
                         regime_seen = current_regime
                         fetched["regime"] = "fired"
+                        # QUOTA-CONSISTENCY-COUNT-ALL-W1 (2026-06-08): regime
+                        # alerts now count toward the shared 100/mo free quota —
+                        # parity with signal-MCP, which meters get_market_regime.
+                        # Only HOLD *trade calls* stay free. Paid-linked users are
+                        # a no-op inside consume_quota (PAID_TIERS bypass).
+                        consume_quota(db, row.chat_id)
                         # BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h
                         # digest count. Recorded ONLY after _push returned True,
                         # so failed-send rows don't inflate the 24h count.

@@ -14,9 +14,15 @@ Calendar-month windowing matches signal-MCP's existing ``MONTH_MS`` rolling
 is set to the current ``datetime('now')``; subsequent calls in the same
 30-day window increment ``alert_count``.
 
-Only **trade-call alerts that actually fire** consume quota. HOLD verdicts and
-regime alerts are FREE per the spec (matches signal-MCP's free-HOLD policy in
-``getTradeSignal``).
+Both **trade-call alerts (BUY/SELL)** and **regime-shift alerts** that actually
+fire consume quota — parity with signal-MCP, which meters get_trade_call
+(non-HOLD), get_market_regime, and scan_funding_arb alike. Only **HOLD trade
+calls** stay free (silent, no tick), mirroring signal-MCP's free-HOLD policy in
+``getTradeSignal``.
+
+QUOTA-CONSISTENCY-COUNT-ALL-W1 (2026-06-08): corrected the prior premise that
+regime alerts were free. (Funding-arb / market-scan are not yet bot features —
+metering for those is deferred to a follow-up wave.)
 """
 
 from __future__ import annotations
@@ -138,7 +144,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
 
 
 def consume_quota(db: Database, chat_id: int) -> QuotaState:
-    """Increment the user's trade-call counter. Starts a new window if needed.
+    """Increment the user's billable-alert counter (trade call / regime). Starts a new window if needed.
 
     BOT-W2 C3: paid-tier-linked users SKIP the increment entirely (no-op
     return of current state). Their bot-pushed alerts don't count against
