@@ -50,7 +50,14 @@ def render_stats(db: Database) -> str:
         )
         blocked = int(cur.fetchone()[0])
 
-        cur.execute("SELECT COUNT(*) FROM watchlists")
+        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: exclude watchlist rows owned
+        # by bot-blocked subscribers (parity with the daily digest) — keeps the
+        # headline count + the Top-10 breakdown below internally consistent.
+        cur.execute(
+            "SELECT COUNT(*) FROM watchlists w "
+            "JOIN subscribers s ON s.chat_id = w.chat_id "
+            "WHERE s.bot_blocked_at IS NULL"
+        )
         total_watches = int(cur.fetchone()[0])
 
         # BOT-DIGEST-LAST24H-W1 2026-05-21: rolling-24h alert counts from
@@ -64,6 +71,14 @@ def render_stats(db: Database) -> str:
         kind_counts = {row[0]: int(row[1]) for row in cur.fetchall()}
         regime_24h = kind_counts.get("regime", 0)
         calls_24h = kind_counts.get("call", 0)
+
+        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: rolling-24h quota-exhausted
+        # notice count (matches the daily-digest line; digest + /stats aligned).
+        cur.execute(
+            "SELECT COUNT(*) FROM quota_notices_fired "
+            "WHERE fired_at >= datetime('now', '-1 day')"
+        )
+        quota_notices_24h = int(cur.fetchone()[0])
 
         # Lifetime per-user totals (kept for admin-only deep view + the
         # CTAs→Linked conversion ratio computed below).
@@ -93,10 +108,12 @@ def render_stats(db: Database) -> str:
         # Top 10 watched assets
         cur.execute(
             """
-            SELECT coin, COUNT(*) AS c
-            FROM watchlists
-            GROUP BY coin
-            ORDER BY c DESC, coin ASC
+            SELECT w.coin, COUNT(*) AS c
+            FROM watchlists w
+            JOIN subscribers s ON s.chat_id = w.chat_id
+            WHERE s.bot_blocked_at IS NULL
+            GROUP BY w.coin
+            ORDER BY c DESC, w.coin ASC
             LIMIT 10
             """
         )
@@ -135,6 +152,7 @@ def render_stats(db: Database) -> str:
         "Last 24h Alerts:",
         f"  📊 Regime: {regime_24h}",
         f"  📈 Calls: {calls_24h}",
+        f"  🔒 Quota-exhausted notices: {quota_notices_24h}",
         "",
         "🔔 Alerts (lifetime, per-user counters):",
         f"  📊 Regime shifts   : {regime_alerts_total}",

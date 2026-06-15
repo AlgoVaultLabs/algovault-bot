@@ -62,8 +62,27 @@ def render_digest(db: Database) -> str:
         regime_24h = kind_counts.get("regime", 0)
         calls_24h = kind_counts.get("call", 0)
 
-        cur.execute("SELECT COUNT(*) FROM watchlists")
+        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: exclude watchlist rows owned
+        # by bot-blocked subscribers — they can never receive an alert, so
+        # counting them overstated reachable watchers. (watchlists.chat_id is
+        # FK→subscribers, so the JOIN never drops a real row.)
+        cur.execute(
+            "SELECT COUNT(*) FROM watchlists w "
+            "JOIN subscribers s ON s.chat_id = w.chat_id "
+            "WHERE s.bot_blocked_at IS NULL"
+        )
         watch_total = int(cur.fetchone()[0])
+
+        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: rolling-24h count of
+        # quota-exhausted notices delivered (a watcher hit the 100/mo free
+        # cap). Surfaced so "Calls: 0" isn't misread as "quiet market" when
+        # really the only active watcher is quota-capped. Separate table from
+        # alerts_fired (UX-nudge volume, not signal volume).
+        cur.execute(
+            "SELECT COUNT(*) FROM quota_notices_fired "
+            "WHERE fired_at >= datetime('now', '-1 day')"
+        )
+        quota_notices_24h = int(cur.fetchone()[0])
 
     lines = [
         "🤖 Algovault-Telegram-bot — Daily Digest "
@@ -81,6 +100,7 @@ def render_digest(db: Database) -> str:
         "Last 24h Alerts:",
         f"  📊 Regime: {regime_24h}",
         f"  📈 Calls: {calls_24h}",
+        f"  🔒 Quota-exhausted notices: {quota_notices_24h}",
         "",
     ])
     return "\n".join(lines)

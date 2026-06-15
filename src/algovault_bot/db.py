@@ -135,6 +135,25 @@ DIGEST_LAST24H_MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS idx_alerts_fired_kind_at ON alerts_fired(kind, fired_at)",
 )
 
+# BOT-DIGEST-QUOTA-NOTICES-W1 (2026-06-15) — per-notice log for quota-exhausted
+# trade-call notices, so the daily digest + admin /stats can surface a rolling
+# 24h count of "BUY/SELL signals a watcher would have received but for the
+# 100/mo free-quota cap". Deliberately a SEPARATE table from alerts_fired:
+# alerts_fired tracks delivered signal volume (regime shifts + trade-call
+# cards), whereas a quota-exhausted notice is an operator-UX nudge, not signal
+# volume. Keeping it separate also freezes the alerts_fired
+# CHECK(kind IN ('regime','call')) contract — no table rebuild, existing alert
+# rows untouched. CREATE TABLE IF NOT EXISTS is idempotent on every init.
+QUOTA_NOTICES_MIGRATIONS = (
+    "CREATE TABLE IF NOT EXISTS quota_notices_fired ("
+    "  id       INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  chat_id  INTEGER NOT NULL,"
+    "  fired_at TIMESTAMP NOT NULL DEFAULT (datetime('now'))"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_quota_notices_fired_at "
+    "ON quota_notices_fired(fired_at)",
+)
+
 # ACTIVATION-FUNNEL-AUDIT-W1 (2026-05-28): tracks the first non-/start command
 # per subscriber for the `tg_bot_first_command` funnel stage. NULL = subscriber
 # hasn't issued any non-/start command yet. Set once via
@@ -266,6 +285,7 @@ class Database:
                 *ALERT_CLEANUP_MIGRATIONS,
                 *ZOMBIE_MIGRATIONS,
                 *DIGEST_LAST24H_MIGRATIONS,
+                *QUOTA_NOTICES_MIGRATIONS,
                 *ACTIVATION_FUNNEL_MIGRATIONS,
                 # TG-BROADCAST-STACK-W1 (2026-05-28): broadcast ledger +
                 # paywall flags + unlock state + pro-grants + npm-unlock cols.
@@ -886,6 +906,34 @@ class Database:
             )
             counts = {row[0]: int(row[1]) for row in cur.fetchall()}
         return counts.get("regime", 0), counts.get("call", 0)
+
+    # ── BOT-DIGEST-QUOTA-NOTICES-W1: per-notice log for rolling-24h digest ──
+
+    def record_quota_notice_fired(self, chat_id: int) -> None:
+        """Record one successfully-delivered quota-exhausted notice for the
+        rolling-24h digest line. Called from ``alert_engine`` AFTER the
+        Telegram API returns OK on the quota-exhausted trade-call branch —
+        failed sends are not counted. Distinct from ``record_alert_fired``:
+        these are operator-UX nudges (the watcher is at their 100/mo free
+        cap), NOT signal volume, so they live in their own table and never
+        inflate the regime/call counts. ``fired_at`` defaults to
+        ``datetime('now')`` (UTC) at the DB layer."""
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO quota_notices_fired(chat_id) VALUES (?)",
+                (chat_id,),
+            )
+
+    def count_quota_notices_last_24h(self) -> int:
+        """Return the count of quota-exhausted notices delivered in the
+        rolling-24h window ending now. UTC throughout (SQLite
+        ``datetime('now')`` is UTC), matching the 03:00-UTC digest fire."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM quota_notices_fired "
+                "WHERE fired_at >= datetime('now', '-1 day')"
+            )
+            return int(cur.fetchone()[0])
 
     def update_watch_after_fetch(
         self,

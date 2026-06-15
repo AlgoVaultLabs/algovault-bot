@@ -493,6 +493,13 @@ async def process_one_row(
                     if await _push(bot, row.chat_id, text, db=db):
                         fetched["trade_call"] = "exhausted_alert_sent"
                         db.increment_total_ctas_shown(row.chat_id)
+                        # BOT-DIGEST-QUOTA-NOTICES-W1 (2026-06-15): count the
+                        # delivered quota-exhausted notice for the digest's
+                        # rolling-24h "Quota-exhausted notices" line. Recorded
+                        # ONLY after _push returned True (notice delivered);
+                        # separate table from alerts_fired — UX nudge, not
+                        # signal volume.
+                        db.record_quota_notice_fired(row.chat_id)
                         # ACTIVATION-FUNNEL-AUDIT-W1 (2026-05-28): funnel stage 13.
                         # Q-C Option α: emit to alerts.log JSON-line stream; the
                         # snapshot reader greps for "event": "tg_bot_quota_hit"
