@@ -549,6 +549,103 @@ def handle_call(
     return _format_call_reply(coin, timeframe, exchange, result, charged)
 
 
+# ── /funding — cross-venue funding-rate arbitrage (scan_funding_arb) ──────
+# BOT-FUNDING-SOT-W1: scan_funding_arb was flipped channels.bot=true in the MCP
+# registry (the SOT); this is its bot command. Cross-venue (NO exchange arg) —
+# ranks the largest long/short funding spreads across all 5 venues.
+DEFAULT_FUNDING_LIMIT = 5
+_DEFAULT_FUNDING_MIN_BPS = 5
+
+_USAGE_FUNDING = (
+    "Usage: /funding [TOP_N]\n"
+    "Cross-venue funding-rate arbitrage — biggest long/short spreads across\n"
+    "Binance, Bybit, OKX, Bitget, Hyperliquid (no exchange arg — it scans all).\n"
+    "  /funding        — top 5 spreads\n"
+    "  /funding 10     — top 10\n"
+    "Costs 1 call."
+)
+
+
+def _funding_via_mcp_impl(limit: int, min_spread_bps: int) -> dict:
+    """Real call — fires scan_funding_arb over the internal-bypass MCP edge."""
+    with from_env() as cli:
+        return cli.call_tool(
+            "scan_funding_arb",
+            {"limit": limit, "minSpreadBps": min_spread_bps},
+        )
+
+
+# Test seam.
+def _funding_via_mcp(limit: int, min_spread_bps: int) -> dict:
+    return _funding_via_mcp_impl(limit, min_spread_bps)
+
+
+def _parse_funding_args(args: list[str]) -> int:
+    """Parse the optional [TOP_N] for /funding (1–20, default 5)."""
+    if not args:
+        return DEFAULT_FUNDING_LIMIT
+    if len(args) > 1:
+        raise ValidationError("too many arguments")
+    tok = args[0].strip()
+    if not tok.isdigit():
+        raise ValidationError(f"unrecognized argument {args[0]!r}")
+    n = int(tok)
+    if not 1 <= n <= 20:
+        raise ValidationError("TOP_N must be between 1 and 20")
+    return n
+
+
+def _format_funding_reply(opps: list, limit: int) -> str:
+    header = f"💰 Funding arb — top {limit} cross-venue spreads"
+    if not opps:
+        return f"{header}\n\nNo funding spreads above threshold right now. Charged 1 call."
+    lines = [f"{header} — {min(len(opps), limit)} found:", ""]
+    for o in opps[:limit]:
+        coin = o.get("coin", "?")
+        arb = o.get("bestArb") or {}
+        longv = arb.get("longVenue", "?")
+        shortv = arb.get("shortVenue", "?")
+        bits = []
+        bps = arb.get("spreadBps")
+        if isinstance(bps, (int, float)):
+            bits.append(f"{bps:.1f}bps")
+        apr = arb.get("annualizedPct")
+        if isinstance(apr, (int, float)):
+            bits.append(f"{apr:.0f}% APR")
+        urgency = (arb.get("urgency") or {}).get("label")
+        if urgency:
+            bits.append(str(urgency))
+        suffix = (" · " + " · ".join(bits)) if bits else ""
+        lines.append(f"• {coin}: long {longv} / short {shortv}{suffix}")
+    lines += ["", "Charged 1 call against your monthly quota. Not financial advice."]
+    return "\n".join(lines)
+
+
+def handle_funding(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
+) -> str:
+    """On-demand scan_funding_arb (cross-venue). Per-call quota (like /scan): an
+    exhausted user is asked to upgrade before the scan fires."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    try:
+        limit = _parse_funding_args(list(args))
+    except ValidationError as e:
+        return f"{_USAGE_FUNDING}\n↳ {e}"
+    state = get_quota_state(db, chat_id)
+    if state.exhausted:
+        return (
+            f"You've used all {state.total} free calls this month. "
+            f"Upgrade for more: {messages.signup_url('funding_quota_exhausted')}"
+        )
+    try:
+        result = _funding_via_mcp(limit, _DEFAULT_FUNDING_MIN_BPS)
+    except McpError as e:
+        log.warning(json.dumps({"event": "funding_mcp_failed", "err": str(e)[:200]}))
+        return "⚠️ The funding scanner is temporarily unavailable — please try again shortly."
+    consume_quota(db, chat_id, units=1)
+    return _format_funding_reply(result.get("opportunities") or [], limit)
+
+
 # ── FEATURE-PARITY-CHANNELS-W1 CH4 — /scanwatch (scheduled scan digest → chat) ──
 
 
@@ -979,6 +1076,15 @@ def register_handlers(app: Application, db: Database) -> None:
         reply = handle_call(db, chat_id, username, lang, args)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
+    async def _funding(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        args = ctx.args or []
+        reply = handle_funding(db, chat_id, username, lang, args)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
     async def _watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
@@ -1395,6 +1501,8 @@ def register_handlers(app: Application, db: Database) -> None:
     # get_trade_call (additive surface; recurring side is /watch …regime|calls).
     app.add_handler(CommandHandler("regime", _regime))
     app.add_handler(CommandHandler("call", _call))
+    # BOT-FUNDING-SOT-W1: scan_funding_arb flipped channels.bot=true → /funding.
+    app.add_handler(CommandHandler("funding", _funding))
     # TG-BATCH-WATCHLIST-W1 — batch /watch confirm-nudge + /unwatchall confirm.
     app.add_handler(
         CallbackQueryHandler(_on_batch_watch_callback, pattern=r"^bw:(add|top|cancel):")

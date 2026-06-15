@@ -47,6 +47,7 @@ WELCOME_MESSAGE: Final = (
     "/scan [TOP_N] [TF] [EXCH]    — one-shot scan of top perps\n"
     "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]  — one-shot market regime\n"
     "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]    — one-shot BUY/SELL/HOLD call\n"
+    "/funding [TOP_N]            — cross-venue funding arb\n"
     "/list                       — see your picks\n"
     '/unwatch &lt;COIN&gt; &lt;TF&gt;        — remove one (TF/EXCH can be "all")\n'
     "/unwatchall                 — clear everything\n"
@@ -75,6 +76,7 @@ HELP_MESSAGE: Final = (
     "/unscanwatch [TOP_N] [TF] [EXCHANGE] — stop a scheduled scan digest\n"
     "/regime <COIN> <TF> [EXCHANGE] — one-shot market regime (1h/4h/1d granularity)\n"
     "/call <COIN> <TF> [EXCHANGE] — one-shot BUY/SELL/HOLD trade call for a coin\n"
+    "/funding [TOP_N] — cross-venue funding-rate arbitrage scan (longs vs shorts)\n"
     "/help — this message\n"
     "\n"
     "Examples:\n"

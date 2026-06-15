@@ -160,3 +160,68 @@ def test_regime_and_call_registered(tmp_db: Database) -> None:
         if c:
             cmds |= set(c)
     assert {"regime", "call"} <= cmds
+
+
+# ── /funding (BOT-FUNDING-SOT-W1) ─────────────────────────────
+
+_FUNDING_RESULT = {
+    "opportunities": [
+        {
+            "coin": "BTC",
+            "bestArb": {
+                "longVenue": "BINANCE", "shortVenue": "OKX",
+                "spreadBps": 12.3, "annualizedPct": 45.0,
+                "urgency": {"label": "HIGH"},
+            },
+        },
+        {
+            "coin": "ETH",
+            "bestArb": {
+                "longVenue": "BYBIT", "shortVenue": "HL",
+                "spreadBps": 8.0, "annualizedPct": 29.0,
+                "urgency": {"label": "MEDIUM"},
+            },
+        },
+    ],
+    "scannedPairs": 80,
+}
+
+
+def test_funding_usage_on_bad_arg(tmp_db: Database) -> None:
+    reply = handlers.handle_funding(tmp_db, 1, "u", "en", ["banana"])
+    assert "Usage: /funding" in reply
+
+
+def test_funding_success_renders_and_charges(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handlers, "_funding_via_mcp", lambda limit, bps: _FUNDING_RESULT)
+    reply = handlers.handle_funding(tmp_db, 1, "u", "en", [])
+    assert "Funding arb" in reply
+    assert "BTC: long BINANCE / short OKX" in reply
+    assert "12.3bps" in reply
+    assert "45% APR" in reply
+    assert "HIGH" in reply
+    assert get_quota_state(tmp_db, 1).used == 1
+
+
+def test_funding_empty_still_charges(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handlers, "_funding_via_mcp", lambda limit, bps: {"opportunities": []})
+    reply = handlers.handle_funding(tmp_db, 1, "u", "en", [])
+    assert "No funding spreads" in reply
+    assert get_quota_state(tmp_db, 1).used == 1
+
+
+def test_funding_exhausted_returns_upgrade(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handlers, "_funding_via_mcp", lambda limit, bps: _FUNDING_RESULT)
+    _exhaust(tmp_db, 1)
+    reply = handlers.handle_funding(tmp_db, 1, "u", "en", [])
+    assert "used all" in reply.lower()
+
+
+def test_funding_mcp_error_graceful(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(limit: int, bps: int) -> dict:
+        raise McpError("down")
+
+    monkeypatch.setattr(handlers, "_funding_via_mcp", _boom)
+    reply = handlers.handle_funding(tmp_db, 1, "u", "en", [])
+    assert "temporarily unavailable" in reply
+    assert get_quota_state(tmp_db, 1).used == 0

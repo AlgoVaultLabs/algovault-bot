@@ -17,6 +17,7 @@ def test_welcome_message_consolidated_watch_line() -> None:
     assert "/scan [TOP_N] [TF] [EXCH]" in WELCOME_MESSAGE
     assert "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]" in WELCOME_MESSAGE
     assert "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]" in WELCOME_MESSAGE
+    assert "/funding [TOP_N]" in WELCOME_MESSAGE
     # The removed blocks are gone.
     assert "faster quota burn" not in WELCOME_MESSAGE
     assert "⚡ Add in bulk" not in WELCOME_MESSAGE

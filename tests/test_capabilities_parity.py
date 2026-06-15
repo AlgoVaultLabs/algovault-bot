@@ -43,7 +43,7 @@ def test_committed_snapshot_fully_covered() -> None:
 
 def test_derived_surface_matches_expected() -> None:
     caps = cap._load_fallback_snapshot()
-    assert cap.derive_commands(caps) == {"scan", "scanwatch"}
+    assert cap.derive_commands(caps) == {"scan", "scanwatch", "funding"}
     assert cap.derive_alert_types(caps) == {"calls", "regime"}
 
 
@@ -53,4 +53,4 @@ def test_registered_commands_cover_the_derived_set(tmp_db) -> None:
     # Every derived tool-pull command (scan + scanwatch) is actually registered, and
     # /unscanwatch (the scanwatch inverse) too.
     assert cap.derive_commands(caps) <= registered
-    assert {"scan", "scanwatch", "unscanwatch"} <= registered
+    assert {"scan", "scanwatch", "unscanwatch", "funding"} <= registered

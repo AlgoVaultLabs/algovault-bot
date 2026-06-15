@@ -41,6 +41,9 @@ BOT_TOOL_SURFACE: dict[str, dict[str, Any]] = {
     "get_trade_call": {"kind": "alert", "alert_type": "calls"},
     "get_market_regime": {"kind": "alert", "alert_type": "regime"},
     "scan_trade_calls": {"kind": "command", "commands": ["scan", "scanwatch"]},
+    # BOT-FUNDING-SOT-W1 (2026-06-15): scan_funding_arb flipped channels.bot=true
+    # in the MCP registry → its command surfaces here as /funding.
+    "scan_funding_arb": {"kind": "command", "commands": ["funding"]},
 }
 
 _FALLBACK_PATH = Path(__file__).resolve().parent / "capabilities-fallback.json"
