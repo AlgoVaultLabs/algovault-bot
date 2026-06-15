@@ -11,8 +11,12 @@ from algovault_bot.messages import WELCOME_MESSAGE
 
 def test_welcome_message_consolidated_watch_line() -> None:
     # Single Get-started /watch line (placeholders HTML-escaped) + one Example.
-    assert "/watch &lt;COIN&gt; &lt;Timeframe&gt; &lt;Exchange&gt;" in WELCOME_MESSAGE
-    assert "Example: BTC All Binance / ETH 15m Bybit / XRP 5m All" in WELCOME_MESSAGE
+    assert "/watch &lt;COIN&gt; &lt;TF&gt; &lt;Exch&gt; [regime|calls|both]" in WELCOME_MESSAGE
+    assert "Example: ETH 15m Bybit regime / BTC All Binance / XRP 5m All" in WELCOME_MESSAGE
+    # BOT-ONDEMAND-CMDS-W1: /start now surfaces the one-shot pulls too.
+    assert "/scan [TOP_N] [TF] [EXCH]" in WELCOME_MESSAGE
+    assert "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]" in WELCOME_MESSAGE
+    assert "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]" in WELCOME_MESSAGE
     # The removed blocks are gone.
     assert "faster quota burn" not in WELCOME_MESSAGE
     assert "⚡ Add in bulk" not in WELCOME_MESSAGE

@@ -364,6 +364,191 @@ def handle_scan(
     return _format_scan_reply(result, top_n, timeframe, exchange)
 
 
+# ── ON-DEMAND PER-COIN PULLS — /regime + /call ───────────────────────
+#
+# /scan covers the whole-market scanner (scan_trade_calls); these two add the
+# per-coin one-shot pulls for get_market_regime / get_trade_call. Both tools are
+# channels.bot=true in the feature registry (SOT), so this is ADDITIVE bot
+# surface — no registry change. The recurring side of the same tools is
+# /watch <COIN> <TF> [EXCH] regime|calls|both. Shape mirrors /scan (impl +
+# test-seam + parse + format).
+
+# get_market_regime classifies at 1h/4h/1d only; finer TFs coarse-grain to 1h
+# (same as the alert engine's regime path, alert_engine.py).
+REGIME_TFS = ("1h", "4h", "1d")
+
+_REGIME_GLYPHS = {
+    "TRENDING_UP": "📈",
+    "TRENDING_DOWN": "📉",
+    "RANGING": "↔️",
+    "VOLATILE": "🌪️",
+}
+
+_USAGE_REGIME = (
+    "Usage: /regime <COIN> <TIMEFRAME> [EXCHANGE]\n"
+    "One-shot market regime for a coin (TRENDING_UP/DOWN, RANGING, VOLATILE).\n"
+    "  /regime BTC 1h          — BTC 1h on BINANCE\n"
+    "  /regime ETH 4h BYBIT    — ETH 4h on Bybit\n"
+    "Classified at 1h/4h/1d (finer TFs map to 1h). Costs 1 call."
+)
+_USAGE_CALL = (
+    "Usage: /call <COIN> <TIMEFRAME> [EXCHANGE]\n"
+    "One-shot BUY/SELL/HOLD trade call for a coin.\n"
+    "  /call SOL 15m           — SOL 15m on BINANCE\n"
+    "  /call BTC 1h HL         — BTC 1h on Hyperliquid\n"
+    "HOLD is free; a BUY/SELL costs 1 call. Use /watch for recurring alerts."
+)
+
+
+def _regime_via_mcp_impl(coin: str, timeframe: str, exchange: str) -> dict:
+    """Real call — fires get_market_regime over the internal-bypass MCP edge."""
+    with from_env() as cli:
+        return cli.call_tool(
+            "get_market_regime",
+            {"coin": coin, "timeframe": timeframe, "exchange": exchange},
+        )
+
+
+# Test seam (mirrors _scan_via_mcp): tests monkeypatch THIS alias.
+def _regime_via_mcp(coin: str, timeframe: str, exchange: str) -> dict:
+    return _regime_via_mcp_impl(coin, timeframe, exchange)
+
+
+def _call_via_mcp_impl(coin: str, timeframe: str, exchange: str) -> dict:
+    """Real call — fires get_trade_call (with reasoning) over the bypass edge."""
+    with from_env() as cli:
+        return cli.call_tool(
+            "get_trade_call",
+            {
+                "coin": coin,
+                "timeframe": timeframe,
+                "exchange": exchange,
+                "includeReasoning": True,
+            },
+        )
+
+
+# Test seam.
+def _call_via_mcp(coin: str, timeframe: str, exchange: str) -> dict:
+    return _call_via_mcp_impl(coin, timeframe, exchange)
+
+
+def _parse_coin_tf_exchange(args: list[str]) -> tuple[str, str, str]:
+    """Parse ``<COIN> <TF> [EXCHANGE]`` for the per-coin on-demand commands.
+    COIN + TF required; EXCHANGE defaults to BINANCE. Raises ValidationError."""
+    if len(args) < 2:
+        raise ValidationError("need a coin and a timeframe")
+    if len(args) > 3:
+        raise ValidationError("too many arguments")
+    coin = normalize_coin(args[0])
+    timeframe = normalize_timeframe(args[1])
+    exchange = normalize_exchange(args[2]) if len(args) >= 3 else DEFAULT_EXCHANGE
+    return coin, timeframe, exchange
+
+
+def _format_regime_reply(coin: str, timeframe: str, exchange: str, result: dict) -> str:
+    regime = result.get("regime", "?")
+    conf = result.get("confidence")
+    glyph = _REGIME_GLYPHS.get(str(regime), "📊")
+    conf_str = f" · conf {conf}" if conf is not None else ""
+    lines = [f"📊 Regime — {coin} {timeframe} on {exchange}", "", f"{glyph} {regime}{conf_str}"]
+    suggestion = result.get("suggestion")
+    if suggestion:
+        lines.append(f"💡 {suggestion}")
+    lines += ["", "Charged 1 call against your monthly quota. Not financial advice."]
+    return "\n".join(lines)
+
+
+def handle_regime(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
+) -> str:
+    """On-demand get_market_regime for one coin. Per-call quota (not HOLD-free):
+    an exhausted user is asked to upgrade before the call fires (like /scan)."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    try:
+        coin, timeframe, exchange = _parse_coin_tf_exchange(list(args))
+    except ValidationError as e:
+        return f"{_USAGE_REGIME}\n↳ {e}"
+    state = get_quota_state(db, chat_id)
+    if state.exhausted:
+        return (
+            f"You've used all {state.total} free calls this month. "
+            f"Upgrade for more: {messages.signup_url('regime_quota_exhausted')}"
+        )
+    regime_tf = timeframe if timeframe in REGIME_TFS else "1h"
+    try:
+        result = _regime_via_mcp(coin, regime_tf, exchange)
+    except McpError as e:
+        log.warning(json.dumps({"event": "regime_mcp_failed", "err": str(e)[:200]}))
+        return "⚠️ The regime classifier is temporarily unavailable — please try again shortly."
+    if not result.get("regime"):
+        return messages.symbol_unknown_message(coin, exchange)
+    consume_quota(db, chat_id, units=1)
+    return _format_regime_reply(coin, regime_tf, exchange, result)
+
+
+def _format_call_reply(
+    coin: str, timeframe: str, exchange: str, result: dict, charged: bool
+) -> str:
+    call = (result.get("call") or "HOLD").upper()
+    mark = {"BUY": "🟢", "SELL": "🔴"}.get(call, "⚪")
+    bits = []
+    conf = result.get("confidence")
+    if conf is not None:
+        bits.append(f"conf {conf}")
+    regime = result.get("regime")
+    if regime:
+        bits.append(str(regime))
+    price = result.get("price")
+    if isinstance(price, (int, float)):
+        bits.append(f"${price:,.2f}")
+    lines = [f"{mark} {call}: {coin} {timeframe} on {exchange}"]
+    if bits:
+        lines.append(" · ".join(bits))
+    reasoning = result.get("reasoning")
+    if reasoning:
+        lines += ["", str(reasoning)]
+    lines.append("")
+    lines.append(
+        "Charged 1 call against your monthly quota. Not financial advice."
+        if charged
+        else "HOLD verdicts are free. Not financial advice."
+    )
+    return "\n".join(lines)
+
+
+def handle_call(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
+) -> str:
+    """On-demand get_trade_call for one coin. HOLD-free metering (parity with the
+    watch engine): a HOLD is always shown free; a BUY/SELL costs 1 call and is
+    gated behind the monthly quota."""
+    db.upsert_subscriber(chat_id, username, lang_code)
+    try:
+        coin, timeframe, exchange = _parse_coin_tf_exchange(list(args))
+    except ValidationError as e:
+        return f"{_USAGE_CALL}\n↳ {e}"
+    try:
+        result = _call_via_mcp(coin, timeframe, exchange)
+    except McpError as e:
+        log.warning(json.dumps({"event": "call_mcp_failed", "err": str(e)[:200]}))
+        return "⚠️ The signal engine is temporarily unavailable — please try again shortly."
+    call = (result.get("call") or "").upper()
+    if not call and result.get("price") is None:
+        return messages.symbol_unknown_message(coin, exchange)
+    charged = False
+    if call in ("BUY", "SELL"):
+        state = get_quota_state(db, chat_id)
+        if state.exhausted:
+            return (
+                f"You've used all {state.total} free calls this month. "
+                f"Upgrade for more: {messages.signup_url('call_quota_exhausted')}"
+            )
+        consume_quota(db, chat_id, units=1)
+        charged = True
+    return _format_call_reply(coin, timeframe, exchange, result, charged)
+
+
 # ── FEATURE-PARITY-CHANNELS-W1 CH4 — /scanwatch (scheduled scan digest → chat) ──
 
 
@@ -774,6 +959,24 @@ def register_handlers(app: Application, db: Database) -> None:
         chat_id, username, lang = _user_meta(update)
         args = ctx.args or []
         reply = handle_unscanwatch(db, chat_id, username, lang, args)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _regime(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        args = ctx.args or []
+        reply = handle_regime(db, chat_id, username, lang, args)
+        await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        args = ctx.args or []
+        reply = handle_call(db, chat_id, username, lang, args)
         await update.message.reply_text(reply, disable_web_page_preview=True)
 
     async def _watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1188,6 +1391,10 @@ def register_handlers(app: Application, db: Database) -> None:
     # webhook scan_digest). The alert-engine cron pushes due digests per cadence bucket.
     app.add_handler(CommandHandler("scanwatch", _scanwatch))
     app.add_handler(CommandHandler("unscanwatch", _unscanwatch))
+    # On-demand per-coin pulls for the bot-flagged get_market_regime /
+    # get_trade_call (additive surface; recurring side is /watch …regime|calls).
+    app.add_handler(CommandHandler("regime", _regime))
+    app.add_handler(CommandHandler("call", _call))
     # TG-BATCH-WATCHLIST-W1 — batch /watch confirm-nudge + /unwatchall confirm.
     app.add_handler(
         CallbackQueryHandler(_on_batch_watch_callback, pattern=r"^bw:(add|top|cancel):")
