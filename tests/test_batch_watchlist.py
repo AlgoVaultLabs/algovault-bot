@@ -295,10 +295,13 @@ def test_start_copy_trimmed_with_upgrade_link() -> None:
     assert "/unwatch &lt;COIN&gt; &lt;TF&gt;" in w
     assert "/unwatchall" in w
     assert "/help" in w
-    # preserved explainer + clickable Upgrade (generated, utm-preserved)
+    # preserved explainer + clickable upgrade CTA (generated, utm-preserved)
     assert "the brain layer for AI trading agents" in w
     assert "all 710+ assets" in w
-    assert ">Upgrade</a>" in w
+    # ACTIVATION-NUDGE-W1: anchor text is now "Unlock 3,000 calls/mo →" + the
+    # track-record trust line; utm preserved alongside upgrade_from=tg_start.
+    assert ">Unlock 3,000 calls/mo →</a>" in w
+    assert "on-chain-verified track record" in w
     assert "utm_campaign=start_welcome" in w
 
 

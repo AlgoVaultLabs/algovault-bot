@@ -35,10 +35,21 @@ def test_welcome_message_quota_line() -> None:
 
 def test_welcome_message_upgrade_link_with_utm() -> None:
     # D3-A applied: api.algovault.com/signup?plan=starter (NOT algovault.com/signup
-    # which 404s). Now a clickable HTML <a> "Upgrade" (utm preserved, generated
-    # from signup_url('start_welcome')); the raw URL line is gone.
+    # which 404s). Clickable HTML <a> upgrade CTA (utm preserved, generated from
+    # signup_url('start_welcome')); the raw URL line is gone.
     assert '<a href="https://api.algovault.com/signup?plan=starter' in WELCOME_MESSAGE
     assert "utm_source=tg_bot" in WELCOME_MESSAGE
     assert "utm_campaign=start_welcome" in WELCOME_MESSAGE
-    assert ">Upgrade</a>" in WELCOME_MESSAGE
+    # ACTIVATION-NUDGE-W1: button text is "Unlock 3,000 calls/mo →" + the primary
+    # funnel-attribution param upgrade_from=tg_start (utm preserved alongside, A2).
+    assert ">Unlock 3,000 calls/mo →</a>" in WELCOME_MESSAGE
+    assert "upgrade_from=tg_start" in WELCOME_MESSAGE
     assert "→ api.algovault.com/signup" not in WELCOME_MESSAGE  # no raw URL line
+
+
+def test_welcome_message_track_record_trust_line() -> None:
+    # ACTIVATION-NUDGE-W1: the on-chain-verified track record is surfaced in /start
+    # as the trust→conversion lever (a clickable HTML link, no query to escape).
+    assert "Free tier: 100 calls/month." in WELCOME_MESSAGE
+    assert "on-chain-verified track record" in WELCOME_MESSAGE
+    assert '<a href="https://algovault.com/track-record">algovault.com/track-record</a>' in WELCOME_MESSAGE

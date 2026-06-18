@@ -22,14 +22,23 @@ def signup_url(campaign: str) -> str:
     return f"{SIGNUP_BASE}&utm_source=tg_bot&utm_campaign={campaign}"
 
 
-# TG-START-COPY-TRIM-W1: the /start welcome is sent with parse_mode=HTML so
-# "Upgrade" is a clickable link instead of a raw wrapping URL. The href is
+# TG-START-COPY-TRIM-W1: the /start welcome is sent with parse_mode=HTML so the
+# upgrade CTA is a clickable link instead of a raw wrapping URL. The href is
 # GENERATED from signup_url('start_welcome') (utm attribution byte-identical)
 # with the scheme prepended and `&` HTML-escaped to `&amp;`. The four <…>
 # placeholders are HTML-escaped to &lt;…&gt; so they render literally; every
 # other char in the body is HTML-safe. KEEP this body fully escaped — it is
 # sent as HTML (see handlers._start).
-_UPGRADE_HREF: Final = "https://" + signup_url("start_welcome").replace("&", "&amp;")
+# ACTIVATION-NUDGE-W1 (2026-06-18): `upgrade_from=tg_start` added (utm preserved,
+# A2) so the bot's /start CTA carries the primary funnel-attribution param the
+# /signup handler reads for upgrade_cta_clicked.
+_UPGRADE_HREF: Final = "https://" + (
+    signup_url("start_welcome") + "&upgrade_from=tg_start"
+).replace("&", "&amp;")
+
+# ACTIVATION-NUDGE-W1: the public on-chain-verified track record — the
+# trust→conversion lever surfaced in /start. Plain https link (no query to escape).
+_TRACK_RECORD_HREF: Final = "https://algovault.com/track-record"
 
 WELCOME_MESSAGE: Final = (
     "👋 Welcome to AlgoVault — the brain layer for AI trading agents.\n"
@@ -53,8 +62,11 @@ WELCOME_MESSAGE: Final = (
     "/unwatchall                 — clear everything\n"
     "/help                       — full commands\n"
     "\n"
-    f'Hit the cap? <a href="{_UPGRADE_HREF}">Upgrade</a> to Starter '
-    "($9.99 → 3,000 calls/mo) or pay per call via x402."
+    # ACTIVATION-NUDGE-W1: track-record trust line + the upgrade CTA (button text
+    # "Unlock 3,000 calls/mo →"; upgrade_from=tg_start, utm preserved). HTML-safe.
+    "Free tier: 100 calls/month. See the live, on-chain-verified track record: "
+    f'<a href="{_TRACK_RECORD_HREF}">algovault.com/track-record</a>.\n'
+    f'<a href="{_UPGRADE_HREF}">Unlock 3,000 calls/mo →</a> with Starter ($9.99/mo), or pay per call via x402.'
 )
 
 
