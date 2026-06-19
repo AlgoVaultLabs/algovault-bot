@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # TG-BROADCAST-STACK-W1 CH6 (2026-05-28): cron wrapper for check-npm-unlocks.py.
 # Cadence: every 10 min (per architect Q-C ratification — avoids 5m grid collision).
+#
+# Reads env from /etc/algovault-bot/env (the SAME EnvironmentFile the bot +
+# alert-engine systemd units use) for PUBLIC_BOT_TOKEN (needed by sendDM to
+# deliver the "verified — 30-day Pro" / "expired" DMs).
+# OPS-BOT-NPM-UNLOCK-ENV-PATH-W1 (2026-06-19): FIXED the env path — it used to
+# source /etc/algovault/bot.env which never existed, so the verification cron
+# ran without PUBLIC_BOT_TOKEN and could grant Pro in the DB but never DM the
+# subscriber (silent grant). Mirrors the daily-digest.sh fix in f0115fe.
 
 set -euo pipefail
 
@@ -11,10 +19,10 @@ LOG_FILE="${ALGOVAULT_NPM_UNLOCK_LOG:-/var/log/algovault-bot/check-npm-unlocks.l
 
 mkdir -p "$(dirname "${LOG_FILE}")"
 
-if [ -f /etc/algovault/bot.env ]; then
+if [ -f /etc/algovault-bot/env ]; then
   set -a
   # shellcheck disable=SC1091
-  source /etc/algovault/bot.env
+  source /etc/algovault-bot/env
   set +a
 fi
 

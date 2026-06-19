@@ -14,14 +14,19 @@ Invoked every 10 minutes by Hetzner crontab. Steps:
     matching event AND state set ≥24h ago → mark 'expired' + send DM.
 
 Python3 stdlib only — uses subprocess for psql (production postgres in
-container) + sqlite3 for the local bot DB. No pip deps needed.
+container) + sqlite3 for the local bot DB. No pip deps needed. NOTE: postgres
+is reached via ``docker exec <container> psql`` (NOT the MCP HTTP endpoint),
+so this script needs NO ``ALGOVAULT_MCP_URL`` / ``ALGOVAULT_INTERNAL_BYPASS_KEY``.
 
-Env vars:
+Env vars (sourced from /etc/algovault-bot/env by check-npm-unlocks.sh):
   ALGOVAULT_BOT_DB_PATH       defaults to /var/lib/algovault-bot/state.db
   POSTGRES_CONTAINER          defaults to crypto-quant-signal-mcp-postgres-1
   POSTGRES_DB                 defaults to signal_performance
   POSTGRES_USER               defaults to algovault
-  ALGOVAULT_BOT_TOKEN         needed for outbound DM; if absent, log-only
+  PUBLIC_BOT_TOKEN            needed by sendDM for the verified/expired DM;
+                              if absent, the grant still lands but the DM is
+                              log-only (broadcast._get_bot_token reads this,
+                              falling back to ALGOVAULT_BOT_TOKEN/TELEGRAM_BOT_TOKEN)
 
 CLI:
   check-npm-unlocks.py              # normal cron fire
