@@ -40,7 +40,8 @@ _PKG_PARENT = Path(__file__).resolve().parent.parent / "src"
 if _PKG_PARENT.is_dir() and str(_PKG_PARENT) not in sys.path:
     sys.path.insert(0, str(_PKG_PARENT))
 
-from algovault_bot.broadcast import sendBroadcast  # noqa: E402
+from algovault_bot import adoption  # noqa: E402
+from algovault_bot.broadcast import sendBroadcast, sendDM  # noqa: E402
 from algovault_bot.mcp_client import McpClient, McpClientConfig, McpError  # noqa: E402
 
 
@@ -52,7 +53,9 @@ DEFAULT_DB_PATH = os.environ.get(
     "ALGOVAULT_BOT_DB_PATH", "/var/lib/algovault-bot/state.db"
 )
 MIN_CONFIDENCE = 75
-MAX_DIGEST_CHARS = 500
+# Raised from 500 → 900 for the per-setup /watch CTA lines (R2). Still far
+# under Telegram's 4096 ceiling; inline buttons are separate from body length.
+MAX_DIGEST_CHARS = 900
 DIGEST_BODY_PREFIX = "📊 AlgoVault Daily Digest"
 
 
@@ -94,8 +97,19 @@ def _rank_top_3(setups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ── Body renderers ───────────────────────────────────────────────────────
 
+# TG-WATCH-ADOPTION-BROADCAST-W1: each top-3 setup is watched on this TF by
+# default (funding-arb setups carry no native TF). The one-tap button + the
+# typed-command hint both target this TF for the setup's coin.
+DIGEST_WATCH_TF = "1h"
+
+
 def render_digest_body(top3: list[dict[str, Any]], date_str: str) -> str:
-    """T1-voice body. Outcome-framed; ≤500 chars; ≤2 sentences per line."""
+    """T1-voice body. Outcome-framed; ≤2 sentences per line.
+
+    TG-WATCH-ADOPTION-BROADCAST-W1 (R2): each top-3 setup ends with a one-tap
+    ``/watch {COIN} {TF}`` CTA (the inline button carries the same action with
+    source attribution — see ``adoption.digest_keyboard``). Empty top3 is
+    handled by the caller (A3 suppress-on-empty), not rendered here."""
     if not top3:
         return render_empty_state(date_str)
 
@@ -107,17 +121,18 @@ def render_digest_body(top3: list[dict[str, Any]], date_str: str) -> str:
         spread = float(s.get("spread_bps") or 0)
         venue_pair = s.get("venue_pair") or s.get("venues") or "—"
         spread_str = f"{spread:+.0f} bps"
+        tf = str(s.get("timeframe") or DIGEST_WATCH_TF)
         lines.append(
             f"{i}. {coin} {verdict} {conf}% · {spread_str} ({venue_pair})"
         )
+        # R2 per-setup CTA (approved copy). The button below does the same tap.
+        lines.append(f"   → never miss the next flip: /watch {coin} {tf}")
     lines.append("")
-    lines.append("Live: t.me/algovaultofficialbot — type /watch <COIN> <TF> <EXCHANGE>")
-    lines.append("100 free calls/month. HOLDs never cost.")
+    lines.append("👇 One tap to start watching · 100 free calls/month. HOLDs never cost.")
     body = "\n".join(lines)
-    # Hard cap at MAX_DIGEST_CHARS; truncate body lines (not closing CTA) if needed.
+    # Hard cap; truncate body lines (not closing CTA) if absurdly long.
     if len(body) <= MAX_DIGEST_CHARS:
         return body
-    # Defensive truncation — keep prefix + CTA, drop middle setups if absurdly long.
     return body[: MAX_DIGEST_CHARS - 3] + "..."
 
 
@@ -177,6 +192,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default="",
         help='Restrict cohort (only "mr1-only" supported; for verification-gate use)',
     )
+    p.add_argument(
+        "--preview-operator",
+        action="store_true",
+        help="Send the rendered digest (with buttons) ONLY to BOT_ADMIN_CHAT_IDS "
+        "(operator DRY_RUN preview); does not broadcast or touch the ledger.",
+    )
     p.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help="MCP server URL")
     p.add_argument(
         "--bypass-key",
@@ -197,27 +218,62 @@ def main(argv: list[str] | None = None) -> int:
     raw = fetch_top_setups(args.mcp_url, args.bypass_key)
     filtered = _filter_setups(raw)
     top3 = _rank_top_3(filtered)
+    # TG-WATCH-ADOPTION-BROADCAST-W1 (R2): one-tap watch button per setup.
+    keyboard = adoption.digest_keyboard(top3) if top3 else None
     body = render_digest_body(top3, date_str)
     log.info("digest_body_chars=%d top3_count=%d raw_count=%d", len(body), len(top3), len(raw))
 
+    broadcast_type = f"daily_digest_{date_str}"
+
+    # ── Operator DRY_RUN preview (A1) — send the exact rendered message + buttons
+    # only to BOT_ADMIN_CHAT_IDS, no broadcast, no ledger write. ───────────────
+    if args.preview_operator:
+        ops = adoption.operator_chat_ids()
+        if not ops:
+            print("PREVIEW_ERROR: BOT_ADMIN_CHAT_IDS unset — no operator target")
+            return 2
+        if not top3:
+            note = (
+                f"{DIGEST_BODY_PREFIX} — {date_str}\n\n[PREVIEW] No high-confidence "
+                "setups right now → live mode SUPPRESSES the digest today (A3)."
+            )
+            for chat_id in ops:
+                sendDM(chat_id, note)
+            print(f"PREVIEW: empty (would suppress); notified {len(ops)} operator(s)")
+            return 0
+        sent = sum(1 for chat_id in ops if sendDM(chat_id, body, reply_markup=keyboard))
+        print(f"PREVIEW: sent digest sample to {sent}/{len(ops)} operator(s); buttons={bool(keyboard)}")
+        return 0
+
     if args.cohort_override == "mr1-only":
-        # Verification-gate path — render body, print result, no real send.
-        # Spec literal: `--dry-run --cohort-override=mr1-only` reports
-        # DRY_RUN_BROADCAST: would_send=1.
+        # Legacy verification-gate path — render body, print result, no real send.
         result_payload = {
-            "status": "dry_run",
-            "would_send": 1,
-            "would_skip_blocked": 0,
-            "cohort_override": "mr1-only",
-            "body_chars": len(body),
-            "body": body,
+            "status": "dry_run", "would_send": 1, "would_skip_blocked": 0,
+            "cohort_override": "mr1-only", "body_chars": len(body), "body": body,
         }
         print(f"DRY_RUN_BROADCAST: would_send=1 skipped=0 cohort=mr1-only chars={len(body)}")
         print(json.dumps(result_payload, indent=2))
         return 0
 
-    broadcast_type = f"daily_digest_{date_str}"
-    result = sendBroadcast(body, broadcast_type, dry_run=args.dry_run)
+    # ── A3 suppress-on-empty: a quiet day sends NO message (anti-spam). ────────
+    if not top3:
+        log.info("digest suppressed: no high-confidence setups (top3 empty)")
+        print(json.dumps({"status": "suppressed_empty", "top3_count": 0}))
+        return 0
+
+    if args.dry_run:
+        result = sendBroadcast(body, broadcast_type, dry_run=True, reply_markup=keyboard)
+        log.info("sendBroadcast dry-run result: %s", result)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    # ── A2 go-live gate: real broadcast fires ONLY when the flag is set. ───────
+    if not adoption.adoption_broadcasts_live():
+        log.info("ADOPTION_BROADCASTS_LIVE not set — skipping live digest broadcast")
+        print(json.dumps({"status": "skipped_not_live", "top3_count": len(top3)}))
+        return 0
+
+    result = sendBroadcast(body, broadcast_type, dry_run=False, reply_markup=keyboard)
     log.info("sendBroadcast result: %s", result)
     print(json.dumps(result, indent=2))
     return 0

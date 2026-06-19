@@ -45,7 +45,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import Forbidden, TelegramError
 
 from .db import DEFAULT_DB_PATH, Database
@@ -152,10 +152,15 @@ async def _send_with_retry(
     chat_id: int,
     text: str,
     db: Database | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> tuple[bool, str]:
     """Send a single message with 3-attempt exponential backoff. Returns
     (success, reason_code). Forbidden short-circuits to (False, "blocked")
     and marks the subscriber via db.mark_subscriber_blocked() if db given.
+
+    ``reply_markup`` (TG-WATCH-ADOPTION-BROADCAST-W1) attaches an inline
+    keyboard (the one-tap watch / scan CTAs); None keeps the legacy
+    text-only behavior byte-for-byte.
     """
     last_err: str = "unknown"
     for attempt in range(SEND_MAX_ATTEMPTS):
@@ -166,6 +171,7 @@ async def _send_with_retry(
                     text=text,
                     disable_web_page_preview=True,
                     parse_mode=None,
+                    reply_markup=reply_markup,
                 )
             return True, "sent"
         except Forbidden as e:
@@ -196,6 +202,7 @@ async def send_broadcast_async(
     body: str,
     broadcast_type: str,
     dry_run: bool = False,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> dict[str, Any]:
     """Async core for sendBroadcast — iterate non-blocked subscribers + fire.
 
@@ -242,7 +249,9 @@ async def send_broadcast_async(
     skipped_count = 0
     failed_count = 0
     for chat_id in chat_ids:
-        ok, reason = await _send_with_retry(bot, chat_id, body, db=db)
+        ok, reason = await _send_with_retry(
+            bot, chat_id, body, db=db, reply_markup=reply_markup
+        )
         if ok:
             sent_count += 1
         elif reason == "blocked":
@@ -282,19 +291,33 @@ async def send_dm_async(
     chat_id: int,
     body: str,
     db: Database | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Async core for sendDM — single-subscriber send with retry. Returns
     True on success, False if blocked OR 3 attempts all failed.
     """
-    ok, _reason = await _send_with_retry(bot, chat_id, body, db=db)
+    ok, _reason = await _send_with_retry(
+        bot, chat_id, body, db=db, reply_markup=reply_markup
+    )
     return ok
 
 
 def _get_bot_token() -> str | None:
     """Read the bot token from env. Returns None when unset (CLI scripts
-    should refuse to fire in this case). Mirrors algovault_bot.app shape.
+    should refuse to fire in this case).
+
+    TG-WATCH-ADOPTION-BROADCAST-W1 (2026-06-19): ``PUBLIC_BOT_TOKEN`` is the
+    canonical var the live bot actually runs on (``bot.py`` reads it from
+    ``/etc/algovault-bot/env``). The legacy ``ALGOVAULT_BOT_TOKEN`` /
+    ``TELEGRAM_BOT_TOKEN`` names were never present in that env file, so the
+    daily-digest cron silently fired ``status: no_token`` on every run.
+    Prefer ``PUBLIC_BOT_TOKEN``; keep the legacy names as fallbacks.
     """
-    return os.environ.get("ALGOVAULT_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    return (
+        os.environ.get("PUBLIC_BOT_TOKEN")
+        or os.environ.get("ALGOVAULT_BOT_TOKEN")
+        or os.environ.get("TELEGRAM_BOT_TOKEN")
+    )
 
 
 def sendBroadcast(
@@ -302,6 +325,7 @@ def sendBroadcast(
     broadcast_type: str,
     dry_run: bool = False,
     db_path: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> dict[str, Any]:
     """Sync wrapper around send_broadcast_async — entry for CLI / cron scripts.
 
@@ -323,13 +347,15 @@ def sendBroadcast(
                 body=body,
                 broadcast_type=broadcast_type,
                 dry_run=True,
+                reply_markup=reply_markup,
             )
         )
 
     token = _get_bot_token()
     if not token:
         log.error(
-            "sendBroadcast refused: ALGOVAULT_BOT_TOKEN / TELEGRAM_BOT_TOKEN unset"
+            "sendBroadcast refused: PUBLIC_BOT_TOKEN / ALGOVAULT_BOT_TOKEN / "
+            "TELEGRAM_BOT_TOKEN unset"
         )
         return {
             "status": "no_token",
@@ -346,19 +372,30 @@ def sendBroadcast(
             body=body,
             broadcast_type=broadcast_type,
             dry_run=False,
+            reply_markup=reply_markup,
         )
     )
 
 
-def sendDM(chat_id: int, body: str, db_path: str | None = None) -> bool:
+def sendDM(
+    chat_id: int,
+    body: str,
+    db_path: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
     """Sync wrapper around send_dm_async — entry for CLI / one-off scripts."""
     token = _get_bot_token()
     if not token:
         log.error(
-            "sendDM refused: ALGOVAULT_BOT_TOKEN / TELEGRAM_BOT_TOKEN unset"
+            "sendDM refused: PUBLIC_BOT_TOKEN / ALGOVAULT_BOT_TOKEN / "
+            "TELEGRAM_BOT_TOKEN unset"
         )
         return False
     bot = Bot(token=token)
     resolved_db_path = db_path or DEFAULT_DB_PATH
     db = Database(resolved_db_path)
-    return asyncio.run(send_dm_async(bot=bot, chat_id=chat_id, body=body, db=db))
+    return asyncio.run(
+        send_dm_async(
+            bot=bot, chat_id=chat_id, body=body, db=db, reply_markup=reply_markup
+        )
+    )

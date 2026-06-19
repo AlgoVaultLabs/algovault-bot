@@ -28,7 +28,7 @@ from telegram.ext import (
 
 from datetime import datetime, timezone
 
-from . import asset_universe, batch, messages
+from . import adoption, asset_universe, batch, messages
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
 from .db import Database, PER_USER_WATCHLIST_CAP
@@ -196,7 +196,22 @@ def _commit_watch_combos(
             if err:
                 return err
 
-    db.add_watch_batch(chat_id, combos, alert_type)
+    inserted = db.add_watch_batch(chat_id, combos, alert_type)
+
+    # TG-WATCH-ADOPTION-BROADCAST-W1 (R4): instrument typed-command watch
+    # creation (source=command). The one-tap button path emits its own
+    # source-attributed event in the callback handler; this is the single
+    # signal for the "I typed /watch" path. One event per user action.
+    if inserted > 0:
+        first = combos[0] if combos else ("(batch)", "", "")
+        adoption.emit_watch_created(
+            chat_id,
+            coin=first[0] if len(combos) == 1 else "(batch)",
+            timeframe=first[1] if len(combos) == 1 else "",
+            exchange=first[2] if len(combos) == 1 else "",
+            source=adoption.SOURCE_COMMAND,
+            created=True,
+        )
 
     if len(combos) == 1:
         # Backward-compatible single-add message + coverage nudge.
@@ -701,6 +716,12 @@ def handle_scanwatch(
     except ValidationError as e:
         return _scanwatch_usage(e)
     inserted = db.add_scan_watch(chat_id, top_n, timeframe, exchange, cadence)
+    if inserted:
+        # TG-WATCH-ADOPTION-BROADCAST-W1 (R4): instrument typed `/scanwatch`.
+        adoption.emit_scan_watch_created(
+            chat_id, top_n, timeframe, exchange, cadence,
+            source=adoption.SOURCE_COMMAND, created=True,
+        )
     verb = "Scheduled" if inserted else "Updated"
     return (
         f"{verb} scan digest — top {top_n} perps by OI on {exchange} @ {timeframe}, every {cadence}.\n"
@@ -988,6 +1009,75 @@ def _maybe_fire_first_command_event(db: Database, chat_id: int) -> None:
         logging.warning("tg_bot_first_command emit failed for chat_id=%s: %s", chat_id, e)
 
 
+def should_send_first_watch_nudge(db: Database, chat_id: int) -> bool:
+    """TG-WATCH-ADOPTION-BROADCAST-W1 (R1): a subscriber is eligible for the
+    one-time first-watch onboarding nudge iff they have ZERO engagement
+    (no watch + no scan) AND the nudge has never been sent to them.
+
+    Pure (no env / no network) so the dedup + segment logic is unit-tested
+    directly. The caller separately gates the actual SEND on
+    ``adoption.adoption_broadcasts_live()`` (the go-live flag)."""
+    if db.get_first_watch_nudge_sent_at(chat_id) is not None:
+        return False
+    return not db.has_any_engagement(chat_id)
+
+
+def handle_adoption_watch_tap(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, data: str
+) -> str | None:
+    """Pure logic for a one-tap watch button (TG-WATCH-ADOPTION-BROADCAST-W1).
+    Parses callback_data, creates the watch, emits the source-attributed
+    ``watch_created`` event, pins the onboarding dedup flag on conversion, and
+    returns the confirmation toast (≤200 chars). None on a malformed payload."""
+    parsed = adoption.parse_watch_callback(data)
+    if parsed is None:
+        return None
+    coin, tf, exch, source = parsed
+    db.upsert_subscriber(chat_id, username, lang_code)
+    created = db.add_watch(chat_id, coin, tf, exch, DEFAULT_ALERT_TYPE)
+    adoption.emit_watch_created(chat_id, coin, tf, exch, source, created)
+    if source == adoption.SOURCE_ONBOARDING and db.get_first_watch_nudge_sent_at(chat_id) is None:
+        db.mark_first_watch_nudge_sent(
+            chat_id, datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+    if created:
+        return f"✅ Watching {coin} {tf} on {exch} — I'll ping you when the verdict flips."
+    return f"👁 You're already watching {coin} {tf} on {exch}."
+
+
+def handle_adoption_scanwatch_tap(
+    db: Database, chat_id: int, username: str | None, lang_code: str | None, data: str
+) -> str | None:
+    """Pure logic for the one-tap 'set a standing scan' button. Creates a
+    default scan_watch, emits ``scan_watch_created``, returns the toast."""
+    source = adoption.parse_scanwatch_callback(data)
+    if source is None:
+        return None
+    db.upsert_subscriber(chat_id, username, lang_code)
+    created = db.add_scan_watch(
+        chat_id,
+        adoption.SCANWATCH_DEFAULT_TOP_N,
+        adoption.SCANWATCH_DEFAULT_TF,
+        adoption.SCANWATCH_DEFAULT_EXCHANGE,
+        adoption.SCANWATCH_DEFAULT_CADENCE,
+    )
+    adoption.emit_scan_watch_created(
+        chat_id,
+        adoption.SCANWATCH_DEFAULT_TOP_N,
+        adoption.SCANWATCH_DEFAULT_TF,
+        adoption.SCANWATCH_DEFAULT_EXCHANGE,
+        adoption.SCANWATCH_DEFAULT_CADENCE,
+        source=source,
+        created=created,
+    )
+    if created:
+        return (
+            f"✅ Standing scan set — top {adoption.SCANWATCH_DEFAULT_TOP_N} every "
+            f"{adoption.SCANWATCH_DEFAULT_CADENCE}. See it in /list."
+        )
+    return "📡 You already have this standing scan. See /list."
+
+
 def _user_meta(update: Update) -> tuple[int, str | None, str | None]:
     chat = update.effective_chat
     user = update.effective_user
@@ -1023,6 +1113,31 @@ def register_handlers(app: Application, db: Database) -> None:
             await update.message.reply_text(
                 reply, parse_mode=ParseMode.HTML, disable_web_page_preview=True
             )
+        # TG-WATCH-ADOPTION-BROADCAST-W1 (R1): fire the one-time first-watch
+        # nudge for a 0-engagement sub right after /start. Gated by the go-live
+        # flag; deduped via first_watch_nudge_sent_at (mark only on success).
+        await _maybe_send_first_watch_nudge(update, chat_id)
+
+    async def _maybe_send_first_watch_nudge(update: Update, chat_id: int) -> None:
+        if update.message is None:
+            return
+        if not adoption.adoption_broadcasts_live():
+            return
+        if not should_send_first_watch_nudge(db, chat_id):
+            return
+        try:
+            await update.message.reply_text(
+                adoption.FIRST_WATCH_NUDGE_TEXT,
+                reply_markup=adoption.onboarding_keyboard(),
+                disable_web_page_preview=True,
+            )
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            db.mark_first_watch_nudge_sent(chat_id, now_iso)
+            log_alert_event(
+                "first_watch_nudge_sent", chat_id=chat_id, source="onboarding_start"
+            )
+        except Exception as e:  # noqa: BLE001 — never break /start on a nudge failure
+            log.warning("first-watch nudge send failed chat_id=%s: %s", chat_id, e)
 
     async def _help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1483,6 +1598,40 @@ def register_handlers(app: Application, db: Database) -> None:
                 except Exception:
                     pass
 
+    async def _on_adoption_watch_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A5: one-tap watch button (nudge/digest). Thin shell over the pure
+        ``handle_adoption_watch_tap``; answers with the confirmation toast."""
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        user = query.from_user
+        chat_id = user.id if user else 0
+        _maybe_fire_first_command_event(db, chat_id)
+        toast = handle_adoption_watch_tap(
+            db, chat_id,
+            user.username if user else None,
+            user.language_code if user else None,
+            query.data,
+        )
+        await query.answer(text=toast or "", show_alert=False)
+
+    async def _on_adoption_scanwatch_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A5: one-tap 'set a standing scan' button (scan-showcase). Thin shell
+        over the pure ``handle_adoption_scanwatch_tap``."""
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        user = query.from_user
+        chat_id = user.id if user else 0
+        _maybe_fire_first_command_event(db, chat_id)
+        toast = handle_adoption_scanwatch_tap(
+            db, chat_id,
+            user.username if user else None,
+            user.language_code if user else None,
+            query.data,
+        )
+        await query.answer(text=toast or "", show_alert=False)
+
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("watch", _watch))
@@ -1509,6 +1658,13 @@ def register_handlers(app: Application, db: Database) -> None:
     )
     app.add_handler(
         CallbackQueryHandler(_on_unwatchall_callback, pattern=r"^uwa:(yes|cancel)$")
+    )
+    # TG-WATCH-ADOPTION-BROADCAST-W1 (A5): one-tap watch / scan adoption buttons.
+    app.add_handler(
+        CallbackQueryHandler(_on_adoption_watch_callback, pattern=adoption.WATCH_CB_PATTERN)
+    )
+    app.add_handler(
+        CallbackQueryHandler(_on_adoption_scanwatch_callback, pattern=adoption.SCANWATCH_CB_PATTERN)
     )
     # TG-BROADCAST-STACK-W1 C4 + C5: /unlock_premium_alerts +
     # 2 CallbackQueryHandlers (unlock-path picker + operator approve/reject) +

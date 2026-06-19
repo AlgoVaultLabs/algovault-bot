@@ -2,9 +2,13 @@
 # TG-BROADCAST-STACK-W1 CH2 (2026-05-28): daily-digest cron wrapper.
 #
 # Invoked by Hetzner crontab `3 12 * * * /opt/algovault-bot/scripts/daily-digest.sh`
-# Reads env from /etc/algovault/bot.env (if present) for ALGOVAULT_BOT_TOKEN,
-# MCP_URL, MCP_INTERNAL_BYPASS_KEY. Logs to /var/log/algovault-bot/daily-digest.log
-# (logrotate-managed; weekly/8-rotate/gzip).
+# Reads env from /etc/algovault-bot/env (the SAME EnvironmentFile the bot +
+# alert-engine systemd units use) for PUBLIC_BOT_TOKEN, ALGOVAULT_MCP_URL,
+# ALGOVAULT_INTERNAL_BYPASS_KEY, BOT_ADMIN_CHAT_IDS, ADOPTION_BROADCASTS_LIVE.
+# TG-WATCH-ADOPTION-BROADCAST-W1 (2026-06-19): FIXED the env path — it used to
+# source /etc/algovault/bot.env which never existed, so every fire exited
+# `status: no_token` (the digest never actually sent). Logs to
+# /var/log/algovault-bot/daily-digest.log (logrotate-managed; weekly/8/gzip).
 #
 # Exit codes:
 #   0  — success (broadcast sent OR suppressed_duplicate OR dry-run)
@@ -20,11 +24,12 @@ LOG_FILE="${ALGOVAULT_DIGEST_LOG:-/var/log/algovault-bot/daily-digest.log}"
 
 mkdir -p "$(dirname "${LOG_FILE}")"
 
-# Load env (optional — script defaults to localhost MCP + reads token from env).
-if [ -f /etc/algovault/bot.env ]; then
+# Load env (the bot/alert-engine EnvironmentFile). Without this the cron has no
+# PUBLIC_BOT_TOKEN and sendBroadcast refuses (status: no_token).
+if [ -f /etc/algovault-bot/env ]; then
   set -a
   # shellcheck disable=SC1091
-  source /etc/algovault/bot.env
+  source /etc/algovault-bot/env
   set +a
 fi
 

@@ -251,6 +251,15 @@ SCAN_WATCHES_TABLE_MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS idx_scan_watches_chat ON scan_watches(chat_id)",
 )
 
+# TG-WATCH-ADOPTION-BROADCAST-W1 (2026-06-19): one-time first-watch onboarding
+# nudge dedup flag. NULL = the 0-watch onboarding nudge has never been sent to
+# this subscriber; an ISO timestamp = it fired once (never re-send — anti-spam).
+# Set via ``mark_first_watch_nudge_sent``; the 0-engagement segment query
+# (``list_zero_engagement_unnudged``) excludes any row where this is non-NULL.
+FIRST_WATCH_NUDGE_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN first_watch_nudge_sent_at TIMESTAMP",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -295,6 +304,8 @@ class Database:
                 *PRO_GRANTS_TABLE_MIGRATIONS,
                 *NPM_UNLOCK_MIGRATIONS,
                 *SCAN_WATCHES_TABLE_MIGRATIONS,
+                # TG-WATCH-ADOPTION-BROADCAST-W1 (2026-06-19): first-watch nudge flag.
+                *FIRST_WATCH_NUDGE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -354,6 +365,57 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM subscribers")
             return int(cur.fetchone()[0])
+
+    # ── TG-WATCH-ADOPTION-BROADCAST-W1: first-watch onboarding nudge ──────
+
+    def has_any_engagement(self, chat_id: int) -> bool:
+        """True iff this subscriber has ≥1 watchlist OR ≥1 scan_watch row.
+
+        The first-watch onboarding nudge targets subscribers with ZERO of
+        either (passive subscribers who generate ~0 calls).
+        """
+        with self._cursor() as cur:
+            cur.execute("SELECT 1 FROM watchlists WHERE chat_id = ? LIMIT 1", (chat_id,))
+            if cur.fetchone() is not None:
+                return True
+            cur.execute("SELECT 1 FROM scan_watches WHERE chat_id = ? LIMIT 1", (chat_id,))
+            return cur.fetchone() is not None
+
+    def get_first_watch_nudge_sent_at(self, chat_id: int) -> str | None:
+        """Return the ISO timestamp the first-watch nudge fired for this
+        subscriber, or None if it never has (or the subscriber is absent)."""
+        row = self.get_subscriber(chat_id)
+        if row is None:
+            return None
+        return row["first_watch_nudge_sent_at"]
+
+    def mark_first_watch_nudge_sent(self, chat_id: int, now_iso: str) -> None:
+        """Set the one-time first-watch-nudge dedup flag. Idempotent in spirit —
+        callers MUST check ``get_first_watch_nudge_sent_at(chat_id) is None``
+        before sending so the nudge fires at most once per subscriber, ever."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET first_watch_nudge_sent_at = ? WHERE chat_id = ?",
+                (now_iso, chat_id),
+            )
+
+    def list_zero_engagement_unnudged(self) -> list[int]:
+        """Return chat_ids of REACHABLE subscribers (not bot-blocked) who have
+        ZERO watchlist + ZERO scan_watch rows AND have never been sent the
+        first-watch onboarding nudge. This is the batch-sweep target segment.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.chat_id FROM subscribers s
+                WHERE s.bot_blocked_at IS NULL
+                  AND s.first_watch_nudge_sent_at IS NULL
+                  AND s.chat_id NOT IN (SELECT chat_id FROM watchlists)
+                  AND s.chat_id NOT IN (SELECT chat_id FROM scan_watches)
+                ORDER BY s.created_at ASC
+                """
+            )
+            return [int(r[0]) for r in cur.fetchall()]
 
     # ── watchlists ─────────────────────────────────────────────
 
