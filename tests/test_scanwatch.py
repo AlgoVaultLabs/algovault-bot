@@ -148,3 +148,29 @@ def test_producer_exhausted_owner_skips_push_but_advances_bucket(tmp_db, monkeyp
     # Bucket advanced → not due on the next tick in the same bucket (no re-scan storm).
     c2 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 60))
     assert c2["scan_due"] == 0
+
+
+def test_producer_all_hold_round_suppressed_no_push_no_charge(tmp_db, monkeypatch):
+    """All-HOLD round → silent (parity with /watch): no DM, no charge; bucket advances."""
+    holds = [
+        {"coin": "BTC", "timeframe": "15m", "exchange": "BINANCE", "call": "HOLD", "confidence": 40, "regime": "CHOPPY"},
+        {"coin": "ETH", "timeframe": "15m", "exchange": "BINANCE", "call": "HOLD", "confidence": 30, "regime": "CHOPPY"},
+    ]
+    tmp_db.upsert_subscriber(333, "u", "en")
+    tmp_db.add_scan_watch(333, 20, "15m", "BINANCE", "1h")
+    pushed: list = []
+    _mock_engine(monkeypatch, _result(holds), pushed)
+    now = 1_700_003_600
+
+    counts = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now))
+    assert counts["scan_skipped_empty"] == 1
+    assert counts["scan_fired"] == 0
+    assert pushed == []  # all-HOLD → NO DM
+    assert get_quota_state(tmp_db, 333).used == 0  # NO charge for an empty round
+    # Bucket advanced → not re-due on the next tick in the same bucket (no re-scan storm).
+    c2 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 60))
+    assert c2["scan_due"] == 0
+    # Next bucket with actionable calls → fires normally.
+    _mock_engine(monkeypatch, _result(THREE), pushed)
+    c3 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 3600))
+    assert c3["scan_fired"] == 1 and len(pushed) == 1

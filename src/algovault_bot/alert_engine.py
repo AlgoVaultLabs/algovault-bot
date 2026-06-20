@@ -777,13 +777,15 @@ async def process_scan_digests(
     unchanged. For each scan-digest sub whose CURRENT cadence bucket hasn't fired: run
     scan_trade_calls ONCE per (top_n,tf,exchange) group, push the ranked calls, meter
     max(1, non-HOLD), and advance the bucket (one push per bucket; an exhausted owner is
-    skipped but the bucket still advances — parity with the webhook PAUSE, no re-scan storm)."""
+    skipped but the bucket still advances — parity with the webhook PAUSE, no re-scan storm).
+    An all-HOLD round (no actionable BUY/SELL) is SUPPRESSED — no push, no charge (parity
+    with /watch silent-on-HOLD) — but the bucket still advances so it never re-scans the tick."""
     from .mcp_client import McpClientConfig
     from .scan_digest import cadence_bucket_epoch
 
     db = Database(db_path)
     now = now_epoch if now_epoch is not None else int(time.time())
-    counts: dict[str, int] = {"scan_due": 0, "scan_fired": 0, "scan_skipped_exhausted": 0, "scan_errors": 0}
+    counts: dict[str, int] = {"scan_due": 0, "scan_fired": 0, "scan_skipped_exhausted": 0, "scan_skipped_empty": 0, "scan_errors": 0}
 
     rows = db.list_all_scan_watches()
     due = [r for r in rows if cadence_bucket_epoch(r["cadence"], now) > r["last_fired_bucket"]]
@@ -815,6 +817,19 @@ async def process_scan_digests(
                 calls = result.get("calls") or []
                 non_hold = [c for c in calls if c.get("call") not in (None, "HOLD")]
                 scanned = int(result.get("scanned", 0) or 0)
+                # All-HOLD round → no actionable BUY/SELL. Suppress the digest entirely
+                # (parity with /watch, which is silent on HOLD): NO push + NO charge for
+                # any owner in this group. STILL advance each bucket so the producer does
+                # not re-scan every 1-min tick this bucket (cadence-bucket-marker-advances
+                # -on-skip — no re-scan storm). The one-shot /scan command keeps its own
+                # "nothing actionable" reply (an explicit request deserves a response).
+                if not non_hold:
+                    for r in grp:
+                        counts["scan_skipped_empty"] += 1
+                        db.mark_scan_watch_fired(
+                            r["chat_id"], top_n, tf, exchange, cadence_bucket_epoch(r["cadence"], now)
+                        )
+                    continue
                 for r in grp:
                     chat_id = r["chat_id"]
                     bucket = cadence_bucket_epoch(r["cadence"], now)
