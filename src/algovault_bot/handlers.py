@@ -1320,6 +1320,7 @@ def register_handlers(app: Application, db: Database) -> None:
             format_already_verified_body,
             format_button_labels,
             format_intro_body,
+            x_follow_unlock_enabled,
         )
 
         # If active Pro grant exists, short-circuit with already_verified reply.
@@ -1338,14 +1339,17 @@ def register_handlers(app: Application, db: Database) -> None:
             except Exception:
                 pass
 
-        body = format_intro_body(lang)
+        # REFERRAL-LIGHT-W1 follow-up: the X-follow screenshot unlock is deprecated
+        # (superseded by /referral). By default omit its button + offer npm-install +
+        # the referral program; UNLOCK_X_FOLLOW_ENABLED=1 re-adds it (clean rollback).
+        xf_enabled = x_follow_unlock_enabled()
+        body = format_intro_body(lang, x_follow_enabled=xf_enabled)
         x_label, npm_label = format_button_labels(lang)
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton(x_label, callback_data=CB_UNLOCK_X)],
-                [InlineKeyboardButton(npm_label, callback_data=CB_UNLOCK_NPM)],
-            ]
-        )
+        rows = []
+        if xf_enabled:
+            rows.append([InlineKeyboardButton(x_label, callback_data=CB_UNLOCK_X)])
+        rows.append([InlineKeyboardButton(npm_label, callback_data=CB_UNLOCK_NPM)])
+        keyboard = InlineKeyboardMarkup(rows)
         await update.message.reply_text(
             body,
             reply_markup=keyboard,
@@ -1460,7 +1464,9 @@ def register_handlers(app: Application, db: Database) -> None:
             STATE_PENDING_X,
             format_pending_npm_body,
             format_pending_x_body,
+            format_x_follow_retired_body,
             generate_track_token,
+            x_follow_unlock_enabled,
         )
 
         query = update.callback_query
@@ -1475,6 +1481,15 @@ def register_handlers(app: Application, db: Database) -> None:
         lang = sub["lang_code"] if sub else None
 
         if query.data == CB_UNLOCK_X:
+            # REFERRAL-LIGHT-W1 follow-up: X-follow screenshot unlock DEPRECATED
+            # (superseded by /referral). Default OFF → a stale [Follow X] tap gets the
+            # retired/redirect reply and does NOT open the screenshot flow.
+            if not x_follow_unlock_enabled():
+                body = format_x_follow_retired_body(lang)
+                if isinstance(query.message, Message):
+                    await query.message.reply_text(body, disable_web_page_preview=True)
+                log_alert_event("tg_unlock_x_retired", chat_id=chat_id, lang_code=lang)
+                return
             db.set_unlock_pending(chat_id, STATE_PENDING_X, METHOD_X_FOLLOW)
             body = format_pending_x_body(lang)
             # isinstance narrows MaybeInaccessibleMessage → Message (has

@@ -30,10 +30,13 @@ from algovault_bot.unlock import (
     format_pending_x_body,
     format_rejected_body,
     format_verified_body,
+    format_x_follow_retired_body,
     generate_track_token,
     is_pending_npm_expired,
     is_pending_x_expired,
     normalize_lang,
+    REFERRAL_URL,
+    x_follow_unlock_enabled,
 )
 
 
@@ -303,3 +306,44 @@ def test_db_pro_grant_replace_extends(tmp_db, unlock_subscriber):
 
 def test_db_pro_grant_absent_returns_none(tmp_db, unlock_subscriber):
     assert tmp_db.get_pro_grant(unlock_subscriber) is None
+
+
+# ── REFERRAL-LIGHT-W1 follow-up: X-follow screenshot unlock deprecation ──
+# Superseded by the Stripe-auto-verified referral program. X-follow gated OFF by
+# default (UNLOCK_X_FOLLOW_ENABLED=1 re-enables); npm-install path unaffected.
+
+
+def test_x_follow_unlock_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("UNLOCK_X_FOLLOW_ENABLED", raising=False)
+    assert x_follow_unlock_enabled() is False
+
+
+def test_x_follow_unlock_enabled_only_when_flag_is_1(monkeypatch):
+    monkeypatch.setenv("UNLOCK_X_FOLLOW_ENABLED", "1")
+    assert x_follow_unlock_enabled() is True
+    monkeypatch.setenv("UNLOCK_X_FOLLOW_ENABLED", "0")
+    assert x_follow_unlock_enabled() is False
+    monkeypatch.setenv("UNLOCK_X_FOLLOW_ENABLED", "true")
+    assert x_follow_unlock_enabled() is False  # strict "1" only
+
+
+def test_intro_body_default_still_offers_x_follow_backcompat():
+    # default (enabled) keeps the original 2-path intro — existing callers unaffected
+    body = format_intro_body("en")
+    assert "Follow @AlgoVaultLabs" in body
+    assert "Install AlgoVault MCP" in body
+
+
+def test_intro_body_npm_only_omits_x_follow_and_points_to_referral():
+    for lang in ("en", "id", "zh-hans", "fr"):
+        body = format_intro_body(lang, x_follow_enabled=False)
+        assert "Follow @AlgoVaultLabs" not in body
+        assert "🐦" not in body  # no X-follow line
+        assert REFERRAL_URL in body
+    assert "Install AlgoVault MCP" in format_intro_body("en", x_follow_enabled=False)
+
+
+def test_x_follow_retired_body_trilingual_points_to_referral():
+    for lang in ("en", "id", "zh-hans", None):
+        assert REFERRAL_URL in format_x_follow_retired_body(lang)
+    assert "retired" in format_x_follow_retired_body("en").lower()
