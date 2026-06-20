@@ -55,8 +55,13 @@ def quota_threshold(state: QuotaState) -> str | None:
     """
     if state.is_paid or state.total <= 0:
         return None
-    if state.used >= state.total:
+    # TG-REFERRAL-W1: bonus-aware — only flag "100" when truly out (monthly + the
+    # referee bonus pool), and suppress the 75/90 upgrade nudges while bonus calls
+    # remain (a referee with bonus isn't an upsell moment).
+    if state.remaining <= 0:
         return "100"
+    if state.referral_bonus_remaining > 0:
+        return None
     pct = state.used / state.total
     if pct >= 0.90:
         return "90"
@@ -100,7 +105,7 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
     if threshold == "90":
         if _within_throttle(state.quota_90_last_fired_at, now):
             return ""
-        remaining = max(0, state.total - state.used)
+        remaining = state.remaining
         return (
             f"🔥 Only {remaining} free calls left. Upgrade now to keep getting calls:\n"
             f"→ {signup_url('quota_90')}"

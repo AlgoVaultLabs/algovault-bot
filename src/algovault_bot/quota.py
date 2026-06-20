@@ -64,18 +64,23 @@ class QuotaState:
     # per day. Both are ``None`` until the threshold first fires.
     quota_75_last_fired_at: datetime | None = None
     quota_90_last_fired_at: datetime | None = None
+    # TG-REFERRAL-W1 (C2) — bot-side referee bonus-call pool (persistent; NOT
+    # window-reset). Drawn AFTER the monthly free `total` by consume_quota, and
+    # it extends `remaining`/`exhausted`. 0 for everyone who wasn't referred →
+    # byte-identical behaviour for the existing free/paid base.
+    referral_bonus_remaining: int = 0
 
     @property
     def remaining(self) -> int:
         if self.linked_tier in PAID_TIERS:
             return 10**9  # effectively unlimited; never hit ceiling
-        return max(0, self.total - self.used)
+        return max(0, self.total - self.used) + self.referral_bonus_remaining
 
     @property
     def exhausted(self) -> bool:
         if self.linked_tier in PAID_TIERS:
             return False
-        return self.used >= self.total
+        return self.used >= self.total and self.referral_bonus_remaining <= 0
 
     @property
     def is_paid(self) -> bool:
@@ -118,6 +123,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     linked_tier = row["linked_tier"]
     last_75 = _parse_ts(row["quota_75_last_fired_at"]) if "quota_75_last_fired_at" in row.keys() else None
     last_90 = _parse_ts(row["quota_90_last_fired_at"]) if "quota_90_last_fired_at" in row.keys() else None
+    bonus = int(row["referral_bonus_remaining"] or 0) if "referral_bonus_remaining" in row.keys() else 0
 
     # Window expired → reset counter (still applies to free-tier users; paid
     # users don't tick the counter at all per ``consume_quota`` below).
@@ -140,6 +146,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
         linked_tier=linked_tier,
         quota_75_last_fired_at=last_75,
         quota_90_last_fired_at=last_90,
+        referral_bonus_remaining=bonus,
     )
 
 
@@ -170,24 +177,38 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
     state = get_quota_state(db, chat_id)
     if state.is_paid:
         return state  # no-op for paid tiers
-    new_used = state.used + _clamp_units(units)
+    units = _clamp_units(units)
+    bonus = state.referral_bonus_remaining
+    if bonus > 0:
+        # TG-REFERRAL-W1: fill the monthly free headroom first, then draw any
+        # overflow from the referee bonus pool (persistent; not window-reset).
+        headroom = max(0, FREE_TIER_MONTHLY_QUOTA - state.used)
+        monthly_charge = min(units, headroom)
+        new_used = state.used + monthly_charge
+        new_bonus = max(0, bonus - (units - monthly_charge))
+    else:
+        # byte-identical to the pre-bonus meter for the (today: 100%) bonus-free base
+        new_used = state.used + units
+        new_bonus = 0
     with db._cursor() as cur:
         if state.window_start is None:
             window_start = _now()
             cur.execute(
-                "UPDATE subscribers SET alert_count = ?, alerts_window_start = ? "
-                "WHERE chat_id = ?",
-                (new_used, window_start.isoformat(), chat_id),
+                "UPDATE subscribers SET alert_count = ?, alerts_window_start = ?, "
+                "referral_bonus_remaining = ? WHERE chat_id = ?",
+                (new_used, window_start.isoformat(), new_bonus, chat_id),
             )
         else:
             window_start = state.window_start
             cur.execute(
-                "UPDATE subscribers SET alert_count = ? WHERE chat_id = ?",
-                (new_used, chat_id),
+                "UPDATE subscribers SET alert_count = ?, referral_bonus_remaining = ? "
+                "WHERE chat_id = ?",
+                (new_used, new_bonus, chat_id),
             )
     return QuotaState(
         new_used,
         FREE_TIER_MONTHLY_QUOTA,
         window_start,
         new_used / FREE_TIER_MONTHLY_QUOTA,
+        referral_bonus_remaining=new_bonus,
     )

@@ -260,6 +260,14 @@ FIRST_WATCH_NUDGE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN first_watch_nudge_sent_at TIMESTAMP",
 )
 
+# TG-REFERRAL-W1 (C2): bot-side referee bonus-call pool. A user referred via a
+# ?start=ref_<CODE> deep link gets +N here (N = the engine's SoT bonus_calls);
+# consume_quota draws it AFTER the monthly free 100 (quota.py). Persistent —
+# NOT reset on the 30-day window roll (mirrors the server's referral_bonus pool).
+REFERRAL_BONUS_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN referral_bonus_remaining INTEGER NOT NULL DEFAULT 0",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -306,6 +314,8 @@ class Database:
                 *SCAN_WATCHES_TABLE_MIGRATIONS,
                 # TG-WATCH-ADOPTION-BROADCAST-W1 (2026-06-19): first-watch nudge flag.
                 *FIRST_WATCH_NUDGE_MIGRATIONS,
+                # TG-REFERRAL-W1 (2026-06-20): bot-side referee bonus-call pool.
+                *REFERRAL_BONUS_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -365,6 +375,40 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM subscribers")
             return int(cur.fetchone()[0])
+
+    # ── TG-REFERRAL-W1: bot-side referee bonus-call pool ─────────────────
+
+    def get_referral_bonus(self, chat_id: int) -> int:
+        """Bot-side referee bonus calls remaining (0 if none / row absent)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT referral_bonus_remaining FROM subscribers WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
+    def grant_referral_bonus(self, chat_id: int, calls: int) -> int:
+        """Additively credit `calls` bonus calls to a subscriber; returns the new remaining.
+
+        One-grant-per-referee is enforced UPSTREAM by the engine's attribution
+        UNIQUE — the bot credits here only once the engine confirms a fresh
+        attribution. Clamps negatives to 0 (default-deny). The subscriber row must
+        already exist (the ref-join path upserts first); a missing row is a no-op.
+        """
+        add = max(0, int(calls))
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET referral_bonus_remaining = "
+                "referral_bonus_remaining + ? WHERE chat_id = ?",
+                (add, chat_id),
+            )
+            cur.execute(
+                "SELECT referral_bonus_remaining FROM subscribers WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
 
     # ── TG-WATCH-ADOPTION-BROADCAST-W1: first-watch onboarding nudge ──────
 

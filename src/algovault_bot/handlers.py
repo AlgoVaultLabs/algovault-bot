@@ -28,7 +28,7 @@ from telegram.ext import (
 
 from datetime import datetime, timezone
 
-from . import adoption, asset_universe, batch, messages
+from . import adoption, asset_universe, batch, messages, referral, referral_client
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
 from .db import Database, PER_USER_WATCHLIST_CAP
@@ -122,6 +122,7 @@ def _validate_symbol(coin: str, timeframe: str, exchange: str) -> str | None:
 
 
 _AUTH_PREFIX = "auth_"
+_REF_PREFIX = "ref_"  # TG-REFERRAL-W1: /start ref_<CODE> deep-link referral join
 
 
 # ── TG-BATCH-WATCHLIST-W1 — batch reply + helpers ──────────────
@@ -1106,6 +1107,12 @@ def register_handlers(app: Application, db: Database) -> None:
             reply = handle_link(db, chat_id, username, lang, api_key)
             # Link-confirmation replies are plain text.
             await update.message.reply_text(reply, disable_web_page_preview=True)
+        elif args and isinstance(args[0], str) and args[0].startswith(_REF_PREFIX):
+            # TG-REFERRAL-W1: ?start=ref_<CODE> — record the referral + grant the
+            # referee bonus, then onboard. The engine enforces one-grant-per-tg +
+            # self-referral refusal; this path is fail-soft (a blip never blocks /start).
+            ref_code = args[0][len(_REF_PREFIX):].upper()
+            await _handle_ref_start(update, chat_id, username, lang, ref_code)
         else:
             # TG-START-COPY-TRIM-W1: the welcome carries an <a> "Upgrade" link →
             # send as HTML (body is fully HTML-escaped in messages.WELCOME_MESSAGE).
@@ -1139,6 +1146,38 @@ def register_handlers(app: Application, db: Database) -> None:
         except Exception as e:  # noqa: BLE001 — never break /start on a nudge failure
             log.warning("first-watch nudge send failed chat_id=%s: %s", chat_id, e)
 
+    async def _handle_ref_start(
+        update: Update, chat_id: int, username: str | None, lang: str | None, ref_code: str
+    ) -> None:
+        """TG-REFERRAL-W1: a ?start=ref_<CODE> join — attribute via the engine,
+        grant the referee bonus (engine-confirmed; one-grant-per-tg + self-ref
+        refused server-side), then onboard. Fail-soft: a referral-engine blip never
+        blocks onboarding (the standard welcome always sends)."""
+        if update.message is None:
+            return
+        db.upsert_subscriber(chat_id, username, lang)  # ensure the row for the bonus credit
+        log.info(
+            '{"event": "start_ref_param_received", "chat_id": %d, "ref_code": "%s"}',
+            chat_id,
+            ref_code[:16],  # a referral code is public (shareable); PII-safe
+        )
+        res = referral_client.attribute(ref_code, chat_id)
+        if res and res.get("recorded") and int(res.get("bonus_calls", 0) or 0) > 0:
+            bonus = int(res["bonus_calls"])
+            db.grant_referral_bonus(chat_id, bonus)
+            code_data = referral_client.get_code(chat_id)  # the referee's own terms (+ their link, C3)
+            terms = (code_data or {}).get("terms", {})
+            await update.message.reply_text(
+                referral.format_ref_join_greeting(bonus, terms, lang),
+                disable_web_page_preview=True,
+            )
+            log_alert_event("tg_referral_join", chat_id=chat_id, lang_code=lang)
+        # Onboard everyone (granted or not) with the standard welcome.
+        welcome = handle_start(db, chat_id, username, lang)
+        await update.message.reply_text(
+            welcome, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+
     async def _help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
@@ -1146,6 +1185,31 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         reply = handle_help(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _referral(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """TG-REFERRAL-W1: show the user's referral code, deep link, stats + a
+        one-tap Share button (double-sided framing from the engine SoT terms)."""
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        db.upsert_subscriber(chat_id, username, lang)
+        code_data = referral_client.get_code(chat_id)
+        if code_data is None:
+            await update.message.reply_text(
+                referral.format_referral_unavailable(lang), disable_web_page_preview=True
+            )
+            return
+        body = referral.format_referral_body(code_data, lang)
+        share_text = referral.format_share_text(code_data.get("terms", {}), lang)
+        share_url = referral.build_share_url(str(code_data.get("deep_link", "")), share_text)
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(referral.share_button_label(lang), url=share_url)]]
+        )
+        await update.message.reply_text(
+            body, reply_markup=keyboard, disable_web_page_preview=True
+        )
+        log_alert_event("tg_referral_shown", chat_id=chat_id, lang_code=lang)
 
     async def _scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1649,6 +1713,7 @@ def register_handlers(app: Application, db: Database) -> None:
 
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
+    app.add_handler(CommandHandler("referral", _referral))
     app.add_handler(CommandHandler("watch", _watch))
     app.add_handler(CommandHandler("unwatch", _unwatch))
     app.add_handler(CommandHandler("unwatchall", _unwatchall))
