@@ -19,11 +19,25 @@ Spec reference: ``Prompt/tg-broadcast-stack-w1.md`` Chapter C4.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Final
 
 log = logging.getLogger(__name__)
+
+# REFERRAL-LIGHT-W1 follow-up (2026-06-19): the X-follow screenshot unlock is
+# DEPRECATED — superseded by the Stripe-auto-verified referral program (codes +
+# bonus calls + 30%/12mo commission). Gated OFF by default; set
+# UNLOCK_X_FOLLOW_ENABLED=1 to re-enable (clean rollback). The npm-install unlock
+# path is UNAFFECTED. Referral copy is qualitative (no hardcoded program numbers —
+# the numeric SoT lives in crypto-quant-signal-mcp's REFERRAL_TERMS, not the bot).
+REFERRAL_URL: Final = "https://api.algovault.com/account"
+
+
+def x_follow_unlock_enabled() -> bool:
+    """True iff the deprecated X-follow screenshot unlock is re-enabled (default OFF)."""
+    return os.environ.get("UNLOCK_X_FOLLOW_ENABLED", "") == "1"
 
 # State machine enum (subscribers.unlock_status TEXT column).
 STATE_NOT_STARTED: Final = "not_started"
@@ -96,12 +110,34 @@ def is_pending_npm_expired(pending_since: datetime | None, now: datetime | None 
 # ── Trilingual bodies ───────────────────────────────────────────────────
 
 
-def format_intro_body(lang_code: str | None = None) -> str:
-    """Initial /unlock_premium_alerts reply — 2-button keyboard intro.
-    Body is the message text; the 2 buttons render via InlineKeyboardMarkup
-    in handlers.py.
+def format_intro_body(lang_code: str | None = None, *, x_follow_enabled: bool = True) -> str:
+    """Initial /unlock_premium_alerts reply — keyboard intro.
+    Body is the message text; the buttons render via InlineKeyboardMarkup in
+    handlers.py. When ``x_follow_enabled`` is False (the default state post-
+    deprecation), the X-follow path is omitted and the npm-install path + the
+    referral program are offered instead.
     """
     lang = normalize_lang(lang_code)
+    if not x_follow_enabled:
+        if lang == "id":
+            return (
+                "Dapatkan 30 hari Pro GRATIS:\n\n"
+                "📦 Install AlgoVault MCP di Claude Code / Cursor + buat 1 panggilan (tombol di bawah)\n\n"
+                f"Ingin imbalan berkelanjutan? Ajak teman — mereka dapat panggilan bonus, "
+                f"Anda dapat komisi dari langganan mereka: {REFERRAL_URL}"
+            )
+        if lang == "zh-hans":
+            return (
+                "免费获得 30 天 Pro：\n\n"
+                "📦 在 Claude Code / Cursor 中安装 AlgoVault MCP + 进行 1 次调用（下方按钮）\n\n"
+                f"想要持续奖励？推荐好友——他们获得奖励调用，您从他们的订阅中获得佣金：{REFERRAL_URL}"
+            )
+        return (
+            "Earn 30 days Pro FREE:\n\n"
+            "📦 Install AlgoVault MCP on Claude Code / Cursor + make 1 call (button below)\n\n"
+            f"Want ongoing rewards? Refer friends — they get bonus calls and you earn "
+            f"commission on their subscription: {REFERRAL_URL}"
+        )
     if lang == "id":
         return (
             "Dapatkan 30 hari Pro GRATIS dengan salah satu cara:\n\n"
@@ -121,6 +157,25 @@ def format_intro_body(lang_code: str | None = None) -> str:
         "🐦 Follow @AlgoVaultLabs on X + send screenshot\n"
         "📦 Install AlgoVault MCP on Claude Code / Cursor + make 1 call\n\n"
         "Pick a path below:"
+    )
+
+
+def format_x_follow_retired_body(lang_code: str | None = None) -> str:
+    """Reply when a (stale) [Follow X] tap arrives while the path is deprecated."""
+    lang = normalize_lang(lang_code)
+    if lang == "id":
+        return (
+            "Jalur follow-X sudah tidak berlaku. Anda masih bisa dapat Pro gratis dengan "
+            f"Install AlgoVault MCP, atau ajak teman untuk panggilan bonus + komisi: {REFERRAL_URL}"
+        )
+    if lang == "zh-hans":
+        return (
+            "关注 X 的路径已停用。您仍可通过安装 AlgoVault MCP 免费获得 Pro，"
+            f"或推荐好友以获得奖励调用 + 佣金：{REFERRAL_URL}"
+        )
+    return (
+        "The follow-on-X path is retired. You can still get free Pro by installing "
+        f"AlgoVault MCP, or refer friends for bonus calls + commission: {REFERRAL_URL}"
     )
 
 
