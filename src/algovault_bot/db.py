@@ -268,6 +268,12 @@ REFERRAL_BONUS_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN referral_bonus_remaining INTEGER NOT NULL DEFAULT 0",
 )
 
+# TG-REFERRAL-W1 (C3): value-moment referral-nudge throttle (≤1 per 7d per user;
+# enforced in cta.referral_nudge_text). NULL until the first nudge fires.
+REFERRAL_NUDGE_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN referral_nudge_last_at TIMESTAMP",
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
@@ -316,6 +322,8 @@ class Database:
                 *FIRST_WATCH_NUDGE_MIGRATIONS,
                 # TG-REFERRAL-W1 (2026-06-20): bot-side referee bonus-call pool.
                 *REFERRAL_BONUS_MIGRATIONS,
+                # TG-REFERRAL-W1 C3 (2026-06-20): value-moment nudge throttle.
+                *REFERRAL_NUDGE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -409,6 +417,15 @@ class Database:
             )
             row = cur.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
+
+    def mark_referral_nudge_sent(self, chat_id: int, now_iso: str) -> None:
+        """Stamp the value-moment referral nudge (the 7d throttle lives in
+        cta.referral_nudge_text; this records when it last fired)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET referral_nudge_last_at = ? WHERE chat_id = ?",
+                (now_iso, chat_id),
+            )
 
     # ── TG-WATCH-ADOPTION-BROADCAST-W1: first-watch onboarding nudge ──────
 

@@ -178,3 +178,53 @@ def test_cta_threshold_suppressed_while_bonus_remains():
     assert quota_threshold(QuotaState(100, 100, None, 1.0, referral_bonus_remaining=10)) is None
     # bonus-free 75% → normal "75" (unchanged behaviour)
     assert quota_threshold(QuotaState(75, 100, None, 0.75, referral_bonus_remaining=0)) == "75"
+
+
+# ── C3: value-moment nudge + compounding ──
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from algovault_bot.cta import referral_nudge_text  # noqa: E402
+
+_NOW = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def test_referral_nudge_copy_is_qualitative_and_trilingual():
+    for lang in ("en", "id", "zh-hans"):
+        n = referral.format_referral_nudge(lang)
+        assert "/referral" in n
+        # qualitative — NO hardcoded program numbers (the SoT lives in /referral)
+        assert "500" not in n and "30%" not in n and "12 months" not in n
+
+
+def test_nudge_fires_for_active_free_user_when_due():
+    s = QuotaState(10, 100, None, 0.1, referral_bonus_remaining=0, referral_nudge_last_at=None)
+    assert referral_nudge_text(s, now=_NOW) != ""
+
+
+def test_nudge_suppressed_for_paid_bonus_quota_and_throttle():
+    # paid → ''
+    assert referral_nudge_text(QuotaState(10, 100, None, 0.1, linked_tier="pro"), now=_NOW) == ""
+    # holds bonus → '' (already knows referral)
+    assert referral_nudge_text(QuotaState(10, 100, None, 0.1, referral_bonus_remaining=50), now=_NOW) == ""
+    # a quota CTA owns the slot (75%) → '' (never stack)
+    assert referral_nudge_text(QuotaState(80, 100, None, 0.8, referral_bonus_remaining=0), now=_NOW) == ""
+    # throttled (nudged 1 day ago) → ''
+    recent = _NOW - timedelta(days=1)
+    assert referral_nudge_text(QuotaState(10, 100, None, 0.1, referral_nudge_last_at=recent), now=_NOW) == ""
+    # due again after 8 days → fires
+    old = _NOW - timedelta(days=8)
+    assert referral_nudge_text(QuotaState(10, 100, None, 0.1, referral_nudge_last_at=old), now=_NOW) != ""
+
+
+def test_db_mark_referral_nudge_throttle(tmp_db):
+    tmp_db.upsert_subscriber(920, "u", "en")
+    assert get_quota_state(tmp_db, 920).referral_nudge_last_at is None
+    tmp_db.mark_referral_nudge_sent(920, _NOW.isoformat())
+    assert get_quota_state(tmp_db, 920).referral_nudge_last_at is not None
+
+
+def test_welcome_and_help_mention_referral():
+    from algovault_bot import messages
+    assert "/referral" in messages.WELCOME_MESSAGE
+    assert "/referral" in messages.HELP_MESSAGE

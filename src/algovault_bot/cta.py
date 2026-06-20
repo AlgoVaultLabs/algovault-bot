@@ -26,9 +26,12 @@ from typing import Final
 
 from .messages import signup_url
 from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState
+from .referral import format_referral_nudge
 
 
 THROTTLE_WINDOW: Final = timedelta(hours=24)
+# TG-REFERRAL-W1 (C3): the value-moment referral nudge fires at most once per 7d.
+REFERRAL_NUDGE_THROTTLE: Final = timedelta(days=7)
 
 
 def regime_alert_should_show_cta(total_regime_alerts: int) -> bool:
@@ -119,6 +122,32 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
             "Upgrade to Starter ($9.99 → 3,000 calls/mo):\n"
             f"→ {signup_url('quota_75')}"
         )
+    return ""
+
+
+def _referral_nudge_due(last_at: datetime | None, now: datetime) -> bool:
+    return last_at is None or (now - last_at) >= REFERRAL_NUDGE_THROTTLE
+
+
+def referral_nudge_text(state: QuotaState, *, now: datetime | None = None) -> str:
+    """TG-REFERRAL-W1 / C3 — value-moment referral nudge for a trade-call alert.
+
+    Fires ONLY when there is no quota CTA to show (an active free user who isn't
+    low on quota), the user holds no referee bonus (they already know referral),
+    and the per-user 7d throttle allows. Returns '' otherwise. Paid users never get
+    it (the BOT-W2 '' contract). alert_engine stamps the throttle when it's shown;
+    qualitative copy (no program numbers — /referral shows the live SoT terms)."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if state.is_paid:
+        return ""
+    if quota_threshold(state) is not None:
+        return ""  # a quota CTA owns this slot — never stack two CTAs
+    if state.referral_bonus_remaining > 0:
+        return ""
+    if not _referral_nudge_due(state.referral_nudge_last_at, now):
+        return ""
+    return format_referral_nudge("en")  # alert bodies/CTAs are English
 
     return ""
 

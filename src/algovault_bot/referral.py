@@ -133,3 +133,24 @@ def format_referral_unavailable(lang_code: str | None = None) -> str:
     if lang == "zh-hans":
         return "推荐功能暂时不可用，请稍后再试。"
     return "The referral program is briefly unavailable. Please try again shortly."
+
+
+def format_referral_nudge(lang_code: str | None = None) -> str:
+    """TG-REFERRAL-W1 / C3 — the value-moment nudge appended to a trade-call alert.
+    QUALITATIVE on purpose (no program numbers — /referral shows the live SoT terms),
+    so it never hardcodes / drifts from the engine numbers (numerical-citation LAW)."""
+    lang = normalize_lang(lang_code)
+    if lang == "id":
+        return (
+            "💡 Suka sinyalnya? Ajak teman ke AlgoVault — mereka dapat panggilan bonus "
+            "dan Anda dapat komisi dari langganan mereka. Ketik /referral"
+        )
+    if lang == "zh-hans":
+        return (
+            "💡 觉得信号有用？邀请好友加入 AlgoVault——他们获得奖励调用，"
+            "你可从其订阅中获得佣金。点击 /referral"
+        )
+    return (
+        "💡 Getting value? Invite friends to AlgoVault — they get bonus calls and you "
+        "earn commission on their subscription. Tap /referral"
+    )

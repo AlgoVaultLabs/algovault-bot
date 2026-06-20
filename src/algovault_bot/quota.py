@@ -69,6 +69,9 @@ class QuotaState:
     # it extends `remaining`/`exhausted`. 0 for everyone who wasn't referred →
     # byte-identical behaviour for the existing free/paid base.
     referral_bonus_remaining: int = 0
+    # TG-REFERRAL-W1 (C3) — last value-moment referral-nudge timestamp; the 7d
+    # throttle lives in cta.referral_nudge_text. None until the first nudge fires.
+    referral_nudge_last_at: datetime | None = None
 
     @property
     def remaining(self) -> int:
@@ -124,6 +127,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     last_75 = _parse_ts(row["quota_75_last_fired_at"]) if "quota_75_last_fired_at" in row.keys() else None
     last_90 = _parse_ts(row["quota_90_last_fired_at"]) if "quota_90_last_fired_at" in row.keys() else None
     bonus = int(row["referral_bonus_remaining"] or 0) if "referral_bonus_remaining" in row.keys() else 0
+    nudge_last = _parse_ts(row["referral_nudge_last_at"]) if "referral_nudge_last_at" in row.keys() else None
 
     # Window expired → reset counter (still applies to free-tier users; paid
     # users don't tick the counter at all per ``consume_quota`` below).
@@ -147,6 +151,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
         quota_75_last_fired_at=last_75,
         quota_90_last_fired_at=last_90,
         referral_bonus_remaining=bonus,
+        referral_nudge_last_at=nudge_last,
     )
 
 

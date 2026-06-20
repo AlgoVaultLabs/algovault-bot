@@ -61,6 +61,7 @@ WELCOME_MESSAGE: Final = (
     '/unwatch &lt;COIN&gt; &lt;TF&gt;        — remove one (TF/EXCH can be "all")\n'
     "/unwatchall                 — clear everything\n"
     "/help                       — full commands\n"
+    "/referral                   — invite friends, earn rewards\n"
     "\n"
     # ACTIVATION-NUDGE-W1: track-record trust line + the upgrade CTA (button text
     # "Unlock 3,000 calls/mo →"; upgrade_from=tg_start, utm preserved). HTML-safe.
@@ -90,6 +91,7 @@ HELP_MESSAGE: Final = (
     "/call <COIN> <TF> [EXCHANGE] — one-shot BUY/SELL/HOLD trade call for a coin\n"
     "/funding [TOP_N] — cross-venue funding-rate arbitrage scan (longs vs shorts)\n"
     "/help — this message\n"
+    "/referral — invite friends: they get bonus calls, you earn commission\n"
     "\n"
     "Examples:\n"
     "  /watch BTC 4h                — trade calls only, default BINANCE\n"

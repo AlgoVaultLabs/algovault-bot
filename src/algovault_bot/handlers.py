@@ -1172,6 +1172,10 @@ def register_handlers(app: Application, db: Database) -> None:
                 disable_web_page_preview=True,
             )
             log_alert_event("tg_referral_join", chat_id=chat_id, lang_code=lang)
+            # C3 compounding loop: the referee instantly becomes a referrer — show
+            # THEIR own link + Share so this ring seeds the next (the K-factor loop).
+            if code_data:
+                await _send_referral_card(update.message, code_data, lang)
         # Onboard everyone (granted or not) with the standard welcome.
         welcome = handle_start(db, chat_id, username, lang)
         await update.message.reply_text(
@@ -1185,6 +1189,17 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         reply = handle_help(db, chat_id, username, lang)
         await update.message.reply_text(reply, disable_web_page_preview=True)
+
+    async def _send_referral_card(message: Message, code_data: dict, lang: str | None) -> None:
+        """Render the /referral body + a one-tap Share url-button. Reused by the
+        /referral command and the C3 ref-join compounding prompt (DRY)."""
+        body = referral.format_referral_body(code_data, lang)
+        share_text = referral.format_share_text(code_data.get("terms", {}), lang)
+        share_url = referral.build_share_url(str(code_data.get("deep_link", "")), share_text)
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(referral.share_button_label(lang), url=share_url)]]
+        )
+        await message.reply_text(body, reply_markup=keyboard, disable_web_page_preview=True)
 
     async def _referral(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """TG-REFERRAL-W1: show the user's referral code, deep link, stats + a
@@ -1200,15 +1215,7 @@ def register_handlers(app: Application, db: Database) -> None:
                 referral.format_referral_unavailable(lang), disable_web_page_preview=True
             )
             return
-        body = referral.format_referral_body(code_data, lang)
-        share_text = referral.format_share_text(code_data.get("terms", {}), lang)
-        share_url = referral.build_share_url(str(code_data.get("deep_link", "")), share_text)
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(referral.share_button_label(lang), url=share_url)]]
-        )
-        await update.message.reply_text(
-            body, reply_markup=keyboard, disable_web_page_preview=True
-        )
+        await _send_referral_card(update.message, code_data, lang)
         log_alert_event("tg_referral_shown", chat_id=chat_id, lang_code=lang)
 
     async def _scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

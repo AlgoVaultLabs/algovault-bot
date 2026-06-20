@@ -39,6 +39,7 @@ from .cta import (
     quota_threshold,
     regime_alert_should_show_cta,
     regime_cta_text,
+    referral_nudge_text,
     trade_call_cta_text,
 )
 from .db import Database, DEFAULT_DB_PATH
@@ -519,6 +520,11 @@ async def process_one_row(
                 else:
                     cta = trade_call_cta_text(state, now=now)
                     threshold = quota_threshold(state)
+                    # TG-REFERRAL-W1 (C3): at a value moment with no quota CTA to
+                    # show, maybe append the referral nudge (throttled ≤1/7d; never
+                    # stacks with a quota CTA). Marked below only when shown.
+                    ref_nudge = referral_nudge_text(state, now=now) if not cta else ""
+                    cta = cta or ref_nudge
                     primary_conf = _maybe_int(tc_result.get("confidence"))
                     see_also = _pick_see_also(
                         tc_result.get("also_see"),
@@ -554,6 +560,9 @@ async def process_one_row(
                                 db.mark_quota_cta_fired(
                                     row.chat_id, threshold, now.isoformat()
                                 )
+                            elif ref_nudge:
+                                # TG-REFERRAL-W1 (C3): stamp the 7d referral-nudge throttle.
+                                db.mark_referral_nudge_sent(row.chat_id, now.isoformat())
                         fetched["trade_call"] = "fired"
                         log_alert_event(
                             "trade_call_alert_fired",
