@@ -754,19 +754,116 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     return counts
 
 
+# ── scan-digest verdict rendering (enriched via get_trade_call depth) ──────────
+# Short labels for the get_trade_call _receipts factor names (the digest "drivers"
+# line). Unknown factors fall back to their raw name.
+_FACTOR_LABELS = {
+    "oi_change_pct": "OI",
+    "trend_persistence": "trend persistence",
+    "funding_state": "funding",
+    "funding_24h_avg": "funding",
+    "breakout_pending": "breakout",
+    "volume_24h": "vol",
+}
+_DIR_ARROW = {"bullish": " ↑", "bearish": " ↓"}  # neutral → no arrow
+
+
+def _enrich_scan_call(scan_call: dict[str, Any], depth: dict[str, Any]) -> dict[str, Any]:
+    """Merge a breadth scan call (coin/call/confidence/regime) with its get_trade_call
+    depth (price + top factors + reasoning). Depth is best-effort — a failed depth call
+    leaves those fields absent and the verdict renders bare."""
+    receipts = depth.get("_receipts") or {}
+    return {
+        "coin": scan_call.get("coin"),
+        "call": scan_call.get("call"),
+        "confidence": scan_call.get("confidence"),
+        "regime": scan_call.get("regime") or depth.get("regime"),
+        "price": depth.get("price"),
+        "factors": receipts.get("factors") or [],
+        "reasoning": depth.get("reasoning"),
+    }
+
+
+def _fmt_price(p: Any) -> str:
+    try:
+        v = float(p)
+    except (TypeError, ValueError):
+        return ""
+    if v >= 1000:
+        return f"{v:,.0f}"
+    if v >= 1:
+        return f"{v:,.2f}"
+    return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def _render_drivers(factors: list[dict[str, Any]]) -> str:
+    """Top ≤3 factors → 'OI +1.6% ↑ · trend persistence HIGH · funding normal'."""
+    parts: list[str] = []
+    for f in factors[:3]:
+        name = str(f.get("factor", ""))
+        label = _FACTOR_LABELS.get(name, name)
+        val = f.get("value", "")
+        if name in ("funding_state", "breakout_pending") and isinstance(val, str):
+            val = val.lower()
+        arrow = _DIR_ARROW.get(str(f.get("direction", "")), "")
+        piece = f"{label} {val}{arrow}".strip()
+        if piece:
+            parts.append(piece)
+    return " · ".join(parts)
+
+
+def _trim_reasoning(text: Any, max_len: int = 110) -> str:
+    """First sentence of the engine reasoning, capped — the one-line 'why'."""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    first = text.strip().split(". ")[0].rstrip(".")
+    return first[: max_len - 1].rstrip() + "…" if len(first) > max_len else first
+
+
+def _render_proof(receipts: dict[str, Any] | None) -> str:
+    """Track-record proof line from the scan _receipts (LIVE numbers — never hardcoded)."""
+    tr = (receipts or {}).get("track_record") or {}
+    wr, n = tr.get("pfe_win_rate"), tr.get("n")
+    if wr is None or n is None:
+        return ""
+    uri = str((receipts or {}).get("verification_uri") or "https://algovault.com/track-record")
+    uri = uri.replace("https://", "").replace("http://", "")
+    n_int = int(n)
+    n_str = f"{round(n_int / 1000)}K" if n_int >= 1000 else str(n_int)
+    return f"📈 {float(wr) * 100:.1f}% PFE win-rate · {n_str} verified calls → {uri}"
+
+
 def _format_scan_digest_push(
-    non_hold: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str, scanned: int = 0
+    enriched: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str,
+    *, receipts: dict[str, Any] | None = None,
 ) -> str:
-    header = f"🔁 Scan digest ({cadence}) — top {top_n} perps by OI on {exchange} @ {tf}"
-    if not non_hold:
-        return f"{header}\n\nNo actionable BUY/SELL calls this round ({scanned} scanned)."
-    lines = [f"{header} — {len(non_hold)} actionable:", ""]
-    for c in non_hold:
+    """Enriched scan-digest body: per actionable verdict — call @ price · conviction ·
+    regime, a drivers line, and a one-line 'why' — closed by the live track-record proof
+    line. Only called with ≥1 actionable call (all-HOLD rounds are suppressed upstream)."""
+    header = (
+        f"🔁 Scan digest ({cadence}) — top {top_n} perps by OI on {exchange} @ {tf}"
+        f" — {len(enriched)} actionable:"
+    )
+    lines = [header, ""]
+    for c in enriched:
         mark = "🟢" if c.get("call") == "BUY" else "🔴"
-        lines.append(f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}")
-    lines.append("")
-    lines.append("Not financial advice. Manage with /list · /unscanwatch.")
-    return "\n".join(lines)
+        price = _fmt_price(c.get("price"))
+        price_str = f" @ ${price}" if price else ""
+        lines.append(
+            f"{mark} {c.get('coin')} — {c.get('call')}{price_str} · "
+            f"{c.get('confidence')}% conviction · {c.get('regime')}"
+        )
+        drivers = _render_drivers(c.get("factors") or [])
+        if drivers:
+            lines.append(f"   📊 {drivers}")
+        why = _trim_reasoning(c.get("reasoning"))
+        if why:
+            lines.append(f"   💡 {why}")
+        lines.append("")
+    proof = _render_proof(receipts)
+    if proof:
+        lines.append(proof)
+    return "\n".join(lines).rstrip()
 
 
 async def process_scan_digests(
@@ -816,7 +913,6 @@ async def process_scan_digests(
                     continue
                 calls = result.get("calls") or []
                 non_hold = [c for c in calls if c.get("call") not in (None, "HOLD")]
-                scanned = int(result.get("scanned", 0) or 0)
                 # All-HOLD round → no actionable BUY/SELL. Suppress the digest entirely
                 # (parity with /watch, which is silent on HOLD): NO push + NO charge for
                 # any owner in this group. STILL advance each bucket so the producer does
@@ -830,6 +926,21 @@ async def process_scan_digests(
                             r["chat_id"], top_n, tf, exchange, cadence_bucket_epoch(r["cadence"], now)
                         )
                     continue
+                # Enrich each actionable coin with depth (price + top drivers + reasoning)
+                # via get_trade_call — ONE call per actionable coin, computed ONCE for the
+                # whole group (internal-bypass; no user-quota cost). Fail-soft per coin: a
+                # depth-call error leaves that verdict bare (no price/drivers/why).
+                receipts = result.get("_receipts") or {}
+                enriched: list[dict[str, Any]] = []
+                for c in non_hold:
+                    try:
+                        depth = mcp.call_tool(
+                            "get_trade_call",
+                            {"coin": c.get("coin"), "timeframe": tf, "exchange": exchange},
+                        )
+                    except McpError:
+                        depth = {}
+                    enriched.append(_enrich_scan_call(c, depth))
                 for r in grp:
                     chat_id = r["chat_id"]
                     bucket = cadence_bucket_epoch(r["cadence"], now)
@@ -839,7 +950,7 @@ async def process_scan_digests(
                         counts["scan_skipped_exhausted"] += 1
                         db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
                         continue
-                    text = _format_scan_digest_push(non_hold, top_n, tf, exchange, r["cadence"], scanned=scanned)
+                    text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"], receipts=receipts)
                     ok = await _push(bot, chat_id, text, db)
                     if ok:
                         consume_quota(db, chat_id, units=max(1, len(non_hold)))
