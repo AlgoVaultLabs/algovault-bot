@@ -51,6 +51,7 @@ from .paywall import (
     mark_fired as paywall_mark_fired,
     should_fire_paywall_dm,
 )
+from . import referral_client  # REFERRAL-INPRODUCT-NUDGE-W1 / C2: wall referral link (fail-soft)
 from .quota import QuotaState, consume_quota, get_quota_state
 from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
@@ -460,12 +461,25 @@ async def process_one_row(
                     if fire and level:
                         sub = db.get_subscriber(row.chat_id)
                         lang_code = sub["lang_code"] if sub else None
+                        # REFERRAL-INPRODUCT-NUDGE-W1 / C2: at the WALL (block), lead
+                        # with the user's referral free path (link + SoT bonus from the
+                        # engine). Only fetched for `block` (the limit moment, mirroring
+                        # C1); fail-soft — get_code returns None → existing copy.
+                        referral_link = None
+                        referral_bonus = None
+                        if level == "block":
+                            code_data = referral_client.get_code(row.chat_id)
+                            if code_data:
+                                referral_link = code_data.get("share_url")
+                                referral_bonus = (code_data.get("terms") or {}).get("bonus_calls")
                         paywall_body = format_paywall_body(
                             level,
                             paywall_warning.get("current_usage"),
                             paywall_warning.get("monthly_limit"),
                             paywall_warning.get("suggested_upgrade_url"),
                             lang_code,
+                            referral_link,
+                            referral_bonus,
                         )
                         if await _push(bot, row.chat_id, paywall_body, db=db):
                             paywall_mark_fired(db.path, row.chat_id, level)

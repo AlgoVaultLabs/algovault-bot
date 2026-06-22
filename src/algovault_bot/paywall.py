@@ -97,16 +97,48 @@ def format_paywall_body(
     monthly_limit: int | None,
     suggested_upgrade_url: str | None,
     lang_code: str | None = None,
+    referral_link: str | None = None,
+    bonus_calls: int | None = None,
 ) -> str:
     """Render the T1-voice paywall DM body (≤300 chars per spec).
 
     Trilingual surface: en (default), id, zh-hans. Other lang_codes → en.
     Falls back to safe defaults when usage/limit/url are absent.
+
+    REFERRAL-INPRODUCT-NUDGE-W1 / C2: at the WALL (``block`` level) — the limit
+    moment, mirroring the MCP C1 — when ``referral_link`` + ``bonus_calls`` are
+    present (the caller fetched them from the engine SoT for this user), the body
+    leads with the referral free path (refer a friend → you both get N bonus
+    calls) and retains the upgrade path (North Star: acquisition > revenue).
+    Fail-soft: absent referral args → the existing block copy verbatim. The
+    soft/hard pre-wall warnings are unchanged (mirrors C1 leaving 80% soft alone).
+    ``bonus_calls`` is the engine SoT number (never hardcoded in the bot).
     """
     used = current_usage if current_usage is not None else "?"
     total = monthly_limit if monthly_limit is not None else 100
     url = suggested_upgrade_url or "https://api.algovault.com/signup?plan=starter&upgrade_from=tg_quota"
     lang = (lang_code or "en").lower().replace("_", "-")
+
+    if level == "block" and referral_link and bonus_calls:
+        # The wall, referral-PROMINENT (lead) + upgrade-RETAINED + the existing
+        # /unlock free path kept (mirrors MCP C1 limit-keyed; ≤300 chars).
+        if lang.startswith("id"):
+            return (
+                f"Quota habis ({used}/{total}) bulan ini. "
+                f"Tetap gratis: ajak teman — kalian berdua dapat {bonus_calls} panggilan bonus → {referral_link}. "
+                f"Atau /unlock_premium_alerts, atau upgrade: {url}"
+            )
+        if lang.startswith("zh"):
+            return (
+                f"本月额度已用完（{used}/{total}）。"
+                f"继续免费：邀请好友——你们都获得 {bonus_calls} 次奖励调用 → {referral_link}。"
+                f"或 /unlock_premium_alerts，或升级：{url}"
+            )
+        return (
+            f"Out of verdicts ({used}/{total}) this month. "
+            f"Keep going free: refer a friend — you both get {bonus_calls} bonus calls → {referral_link}. "
+            f"Or /unlock_premium_alerts, or upgrade: {url}"
+        )
 
     if level == "soft":
         if lang.startswith("id"):

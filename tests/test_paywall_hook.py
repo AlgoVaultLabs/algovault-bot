@@ -117,6 +117,53 @@ def test_format_paywall_body_invalid_level_raises():
         format_paywall_body("INVALID", 50, 100, "https://example.com", "en")
 
 
+# ── REFERRAL-INPRODUCT-NUDGE-W1 / C2 — referral at the wall (block) ──────
+
+_REF_LINK = "https://algovault.com/join?ref=ABCD1234"
+_UPGRADE = "https://api.algovault.com/signup?plan=starter&upgrade_from=tg_quota"
+
+
+def test_block_referral_en_prominent_upgrade_retained():
+    body = format_paywall_body("block", 100, 100, _UPGRADE, "en", _REF_LINK, 500)
+    assert "refer a friend" in body.lower()          # referral leads (prominent)
+    assert "500 bonus calls" in body                  # SoT number (passed, not hardcoded)
+    assert _REF_LINK in body                          # the user's own give-get link
+    assert "upgrade" in body.lower() and _UPGRADE in body  # upgrade retained
+    assert "/unlock_premium_alerts" in body           # existing free path kept (no removal)
+    assert len(body) <= 300
+
+
+def test_block_referral_trilingual_id_zh():
+    body_id = format_paywall_body("block", 100, 100, _UPGRADE, "id", _REF_LINK, 500)
+    assert "ajak teman" in body_id and "500 panggilan bonus" in body_id and _REF_LINK in body_id
+    assert len(body_id) <= 300
+    body_zh = format_paywall_body("block", 100, 100, _UPGRADE, "zh-hans", _REF_LINK, 500)
+    assert "邀请好友" in body_zh and "500 次奖励调用" in body_zh and _REF_LINK in body_zh
+    assert len(body_zh) <= 300
+
+
+def test_block_failsoft_to_existing_copy_without_referral_args():
+    # No referral_link / bonus_calls (engine fetch failed) → the existing block copy.
+    body = format_paywall_body("block", 100, 100, _UPGRADE, "en")
+    assert "refer a friend" not in body.lower()
+    assert "/unlock_premium_alerts" in body            # existing copy intact
+    assert len(body) <= 300
+
+
+def test_soft_and_hard_ignore_referral_args():
+    # Only the WALL (block) gets the referral arm — pre-wall warnings unchanged.
+    for level in ("soft", "hard"):
+        body = format_paywall_body(level, 80, 100, _UPGRADE, "en", _REF_LINK, 500)
+        assert _REF_LINK not in body
+        assert "refer a friend" not in body.lower()
+
+
+def test_block_referral_no_outcome_leak():
+    body = format_paywall_body("block", 100, 100, _UPGRADE, "en", _REF_LINK, 500)
+    low = body.lower()
+    assert "outcome_return_pct" not in low and "outcome_price" not in low and "profit" not in low
+
+
 # ── has_fired_this_month + mark_fired ───────────────────────────────────
 
 
