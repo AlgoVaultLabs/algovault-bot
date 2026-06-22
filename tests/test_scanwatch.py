@@ -220,6 +220,7 @@ def test_producer_enriches_verdict_with_price_drivers_reasoning_proof(tmp_db, mo
     assert "OI +1.6% ↑" in text  # drivers from get_trade_call _receipts.factors
     assert "trend persistence HIGH" in text and "funding normal" in text
     assert "💡 Trending up, momentum building" in text  # one-line why (first sentence)
-    assert "91.6% PFE win-rate · 259K verified calls" in text  # LIVE proof line
+    assert text.startswith("🚀")  # rocket header (was 🔁)
+    assert "PFE win-rate" not in text and "track-record" not in text  # proof line removed
     assert "Not financial advice" not in text  # disclaimer removed
     assert "/unscanwatch" not in text  # in-digest management hint removed (now in /start + /help)
