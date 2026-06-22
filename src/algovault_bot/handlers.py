@@ -1215,8 +1215,32 @@ def register_handlers(app: Application, db: Database) -> None:
                 referral.format_referral_unavailable(lang), disable_web_page_preview=True
             )
             return
+        # REFERRAL-PARITY-NOTIFS-W1 / C2: cache code→chat_id so the notification drain
+        # can resolve a pending TG row (keyed by code) to this chat locally.
+        ref_code = code_data.get("code")
+        if isinstance(ref_code, str) and ref_code:
+            db.set_referral_code(chat_id, ref_code)
         await _send_referral_card(update.message, code_data, lang)
         log_alert_event("tg_referral_shown", chat_id=chat_id, lang_code=lang)
+
+    async def _notifications(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """REFERRAL-PARITY-NOTIFS-W1 / C2: toggle referral join/earnings notifications
+        (default-ON). `/notifications off | on`; no arg → usage. Writes the engine's
+        notify_opt_out (the single source of truth across TG + email)."""
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        _maybe_fire_first_command_event(db, chat_id)
+        db.upsert_subscriber(chat_id, username, lang)
+        arg = ctx.args[0].lower() if ctx.args else ""
+        if arg in ("off", "stop", "mute"):
+            referral_client.set_notify_pref(chat_id, True)
+            await update.message.reply_text(referral.format_notifications_toggle(True, lang))
+        elif arg in ("on", "start", "resume"):
+            referral_client.set_notify_pref(chat_id, False)
+            await update.message.reply_text(referral.format_notifications_toggle(False, lang))
+        else:
+            await update.message.reply_text(referral.format_notifications_toggle(None, lang))
 
     async def _scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1721,6 +1745,7 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("referral", _referral))
+    app.add_handler(CommandHandler("notifications", _notifications))
     app.add_handler(CommandHandler("watch", _watch))
     app.add_handler(CommandHandler("unwatch", _unwatch))
     app.add_handler(CommandHandler("unwatchall", _unwatchall))

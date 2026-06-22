@@ -228,3 +228,92 @@ def test_welcome_and_help_mention_referral():
     from algovault_bot import messages
     assert "/referral" in messages.WELCOME_MESSAGE
     assert "/referral" in messages.HELP_MESSAGE
+
+
+# ── REFERRAL-PARITY-NOTIFS-W1 / C2 — earnings parity + notifications ──
+
+_DATA_EARN = {
+    **_DATA,
+    "terms": {**_TERMS, "usdc_min_payout_usd": 50},
+    "stats": {"signups": 3, "conversions": 1, "accrued_usd_e2": 1234,
+              "credited_usd_e2": 0, "usdc_pending_usd_e2": 1234, "usdc_paid_usd_e2": 600},
+}
+
+
+def test_referral_body_shows_earnings_parity():
+    body = referral.format_referral_body(_DATA_EARN, "en")
+    assert "$12.34" in body                  # accrued (1234 e2)
+    assert "$6.00" in body                   # paid (600 e2)
+    assert "from your $50 payout" in body    # gap cue (min $50 - pending $12.34)
+    assert "$37.66" in body                  # the gap amount
+
+
+def test_referral_body_earnings_ready_when_pending_over_min():
+    data = {**_DATA_EARN, "stats": {**_DATA_EARN["stats"], "usdc_pending_usd_e2": 6000}}
+    assert "Ready for payout" in referral.format_referral_body(data, "en")
+
+
+def test_referral_body_earnings_trilingual():
+    for lang in ("en", "id", "zh-hans"):
+        assert "$12.34" in referral.format_referral_body(_DATA_EARN, lang)
+
+
+def test_format_notification_friend_joined_trilingual():
+    p = {"commission_pct": 30, "commission_months": 12}
+    for lang in ("en", "id", "zh-hans"):
+        m = referral.format_notification("friend_joined", p, lang)
+        assert "/referral" in m and "30" in m and "12" in m
+
+
+def test_format_notification_commission_earned_no_outcome_leak():
+    p = {"amount_usd_e2": 600, "pending_usd_e2": 1200, "usdc_min_payout_usd": 50, "commission_pct": 30, "commission_months": 12}
+    m = referral.format_notification("commission_earned", p, "en")
+    assert "$6.00" in m and "$12.00" in m and "$50" in m and "/referral" in m
+    assert "outcome_" not in m
+
+
+def test_notifications_toggle_states():
+    assert "OFF" in referral.format_notifications_toggle(True, "en")
+    assert "ON" in referral.format_notifications_toggle(False, "en")
+    usage = referral.format_notifications_toggle(None, "en")
+    assert "/notifications off" in usage and "/notifications on" in usage
+
+
+def test_client_get_notifications(monkeypatch):
+    monkeypatch.setenv("ALGOVAULT_INTERNAL_BYPASS_KEY", "k" * 32)
+    monkeypatch.setattr(referral_client.httpx, "get",
+                        lambda *a, **k: _FakeResp({"ok": True, "notifications": [{"id": 1, "code": "ABCD12", "event": "friend_joined", "payload": {}}]}))
+    out = referral_client.get_notifications()
+    assert len(out) == 1 and out[0]["code"] == "ABCD12"
+
+
+def test_client_mark_delivered_and_set_pref(monkeypatch):
+    monkeypatch.setenv("ALGOVAULT_INTERNAL_BYPASS_KEY", "k" * 32)
+    monkeypatch.setattr(referral_client.httpx, "post", lambda *a, **k: _FakeResp({"ok": True}))
+    assert referral_client.mark_delivered(1) is True
+    assert referral_client.set_notify_pref(123, True) is True
+
+
+def test_db_referral_code_map(tmp_db):
+    tmp_db.upsert_subscriber(700, "u", "en")
+    tmp_db.set_referral_code(700, "ABCD12")
+    assert tmp_db.chat_ids_for_referral_code("ABCD12") == [700]
+    assert tmp_db.chat_ids_for_referral_code("NOPE99") == []
+
+
+def test_drain_delivers_dry_run(tmp_db, monkeypatch):
+    from algovault_bot import referral_drain
+    tmp_db.upsert_subscriber(700, "u", "en")
+    tmp_db.set_referral_code(700, "ABCD12")
+    monkeypatch.setattr(referral_client, "get_notifications",
+                        lambda *a, **k: [{"id": 5, "code": "ABCD12", "event": "friend_joined", "payload": {"commission_pct": 30, "commission_months": 12}}])
+    res = referral_drain.drain_referral_notifications(db_path=tmp_db.path, dry_run=True)
+    assert res["sent"] == 1 and res["skipped_uncached"] == 0
+
+
+def test_drain_skips_uncached_referrer(tmp_db, monkeypatch):
+    from algovault_bot import referral_drain
+    monkeypatch.setattr(referral_client, "get_notifications",
+                        lambda *a, **k: [{"id": 6, "code": "UNCACHED1", "event": "friend_joined", "payload": {}}])
+    res = referral_drain.drain_referral_notifications(db_path=tmp_db.path, dry_run=True)
+    assert res["skipped_uncached"] == 1 and res["sent"] == 0

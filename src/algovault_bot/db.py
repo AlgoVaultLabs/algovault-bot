@@ -207,6 +207,11 @@ UNLOCK_STATE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN unlock_verified_at TIMESTAMP",
     "ALTER TABLE subscribers ADD COLUMN unlock_method TEXT",
     "ALTER TABLE subscribers ADD COLUMN unlock_screenshot_path TEXT",
+    # REFERRAL-PARITY-NOTIFS-W1 / C2: cache the engine's referral CODE for this
+    # chat (set when the user runs /referral) so the notification drain can map a
+    # pending TG row (keyed by code) → chat_id locally — no engine chat_id, no
+    # cross-repo HMAC.
+    "ALTER TABLE subscribers ADD COLUMN referral_code TEXT",
 )
 
 # TG-BROADCAST-STACK-W1 C4 (2026-05-28): NEW tg_pro_grants table — separate
@@ -383,6 +388,21 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM subscribers")
             return int(cur.fetchone()[0])
+
+    # ── REFERRAL-PARITY-NOTIFS-W1 / C2: referral-code ↔ chat_id mapping ──
+    def set_referral_code(self, chat_id: int, code: str) -> None:
+        """Cache the engine's referral code for this chat (idempotent, set on /referral)."""
+        with self._cursor() as cur:
+            cur.execute("UPDATE subscribers SET referral_code = ? WHERE chat_id = ?", (code, chat_id))
+
+    def chat_ids_for_referral_code(self, code: str) -> list[int]:
+        """Non-blocked chat_ids whose cached referral_code matches (the drain's local map)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT chat_id FROM subscribers WHERE referral_code = ? AND bot_blocked_at IS NULL",
+                (code,),
+            )
+            return [int(r[0]) for r in cur.fetchall()]
 
     # ── TG-REFERRAL-W1: bot-side referee bonus-call pool ─────────────────
 

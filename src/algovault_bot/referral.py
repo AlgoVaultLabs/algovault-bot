@@ -38,6 +38,33 @@ def _terms(data_terms: dict[str, Any]) -> tuple[int, int, int]:
     )
 
 
+def _usd(e2: Any) -> str:
+    """Render integer e2-cents (USD x 100) as $X.YY (the engine's money encoding)."""
+    cents = int(e2 or 0)
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    return f"{sign}${cents // 100}.{cents % 100:02d}"
+
+
+def _earnings_line(stats: dict[str, Any], terms: dict[str, Any], lang: str) -> str:
+    """REFERRAL-PARITY-NOTIFS-W1 / C2 — the commission earnings line for /referral,
+    matching the web /account. All figures from the engine payload (SoT); never hardcoded."""
+    accrued = _usd(stats.get("accrued_usd_e2", 0))
+    pending_e2 = int(stats.get("usdc_pending_usd_e2", 0))
+    pending = _usd(pending_e2)
+    paid = _usd(stats.get("usdc_paid_usd_e2", 0))
+    min_usd = int(terms.get("usdc_min_payout_usd", 0))
+    gap_e2 = max(0, min_usd * 100 - pending_e2)
+    if lang == "id":
+        tail = f"Anda kurang {_usd(gap_e2)} dari payout ${min_usd}." if gap_e2 > 0 else "Siap untuk payout."
+        return f"💰 Pendapatan: {accrued} · tertunda {pending} · dibayar {paid}. {tail}"
+    if lang == "zh-hans":
+        tail = f"距离 ${min_usd} 提现还差 {_usd(gap_e2)}。" if gap_e2 > 0 else "可以提现了。"
+        return f"💰 收益：{accrued} · 待付 {pending} · 已付 {paid}。{tail}"
+    tail = f"You're {_usd(gap_e2)} from your ${min_usd} payout." if gap_e2 > 0 else "Ready for payout."
+    return f"💰 Earned: {accrued} · pending {pending} · paid {paid}. {tail}"
+
+
 def format_share_text(terms: dict[str, Any], lang_code: str | None = None) -> str:
     """Friend-facing text pre-filled in the share sheet (the referee will read it)."""
     bonus, _pct, _months = _terms(terms)
@@ -67,6 +94,7 @@ def format_referral_body(data: dict[str, Any], lang_code: str | None = None) -> 
     stats = data.get("stats", {}) or {}
     signups = int(stats.get("signups", 0))
     conversions = int(stats.get("conversions", 0))
+    earnings = _earnings_line(stats, data.get("terms", {}) or {}, lang)
 
     if lang == "id":
         return (
@@ -75,7 +103,8 @@ def format_referral_body(data: dict[str, Any], lang_code: str | None = None) -> 
             f"• mendapat {bonus} panggilan bonus, dan\n"
             f"• Anda dapat {pct}% dari langganan mereka selama {months} bulan.\n\n"
             f"Link referral Anda:\n{deep_link}\n\n"
-            f"📊 Diajak: {signups} · Berlangganan: {conversions}\n\n"
+            f"📊 Diajak: {signups} · Berlangganan: {conversions}\n"
+            f"{earnings}\n\n"
             "Ketuk tombol di bawah untuk berbagi."
         )
     if lang == "zh-hans":
@@ -85,7 +114,8 @@ def format_referral_body(data: dict[str, Any], lang_code: str | None = None) -> 
             f"• 获得 {bonus} 次奖励调用，且\n"
             f"• 你可从其订阅中获得 {pct}% 佣金，持续 {months} 个月。\n\n"
             f"你的推荐链接：\n{deep_link}\n\n"
-            f"📊 已推荐：{signups} · 已订阅：{conversions}\n\n"
+            f"📊 已推荐：{signups} · 已订阅：{conversions}\n"
+            f"{earnings}\n\n"
             "点击下方按钮分享。"
         )
     return (
@@ -94,7 +124,8 @@ def format_referral_body(data: dict[str, Any], lang_code: str | None = None) -> 
         f"• gets {bonus} bonus calls, and\n"
         f"• you earn {pct}% of their subscription for {months} months.\n\n"
         f"Your referral link:\n{deep_link}\n\n"
-        f"📊 Referred: {signups} · Subscribed: {conversions}\n\n"
+        f"📊 Referred: {signups} · Subscribed: {conversions}\n"
+        f"{earnings}\n\n"
         "Tap the button below to share."
     )
 
@@ -154,3 +185,69 @@ def format_referral_nudge(lang_code: str | None = None) -> str:
         "💡 Getting value? Invite friends to AlgoVault — they get bonus calls and you "
         "earn commission on their subscription. Tap /referral"
     )
+
+
+# ── REFERRAL-PARITY-NOTIFS-W1 / C2 — auto-notification rendering + opt-out ──
+
+def format_notification(event: str, payload: dict[str, Any] | None, lang_code: str | None = None) -> str:
+    """Render a referrer notification (friend_joined | commission_earned) from the
+    engine payload (SoT numbers embedded by the engine; never hardcoded here)."""
+    lang = normalize_lang(lang_code)
+    p = payload or {}
+    pct = int(p.get("commission_pct", 0))
+    months = int(p.get("commission_months", 0))
+    if event == "friend_joined":
+        if lang == "id":
+            return (
+                f"👋 Teman baru bergabung lewat link Anda! Jika mereka berlangganan, "
+                f"Anda dapat {pct}% dari paket mereka selama {months} bulan. Bagikan lagi → /referral"
+            )
+        if lang == "zh-hans":
+            return (
+                f"👋 有好友通过你的链接加入了！若其订阅，你可获得其套餐 {pct}% 佣金，"
+                f"持续 {months} 个月。再分享 → /referral"
+            )
+        return (
+            f"👋 A friend just joined with your link! If they subscribe, you earn "
+            f"{pct}% of their plan for {months} months. Share again → /referral"
+        )
+    # commission_earned
+    amount = _usd(p.get("amount_usd_e2", 0))
+    pending = _usd(p.get("pending_usd_e2", 0))
+    min_usd = int(p.get("usdc_min_payout_usd", 0))
+    if lang == "id":
+        return (
+            f"💸 Anda dapat {amount} — teman yang Anda ajak berlangganan. Tertunda: {pending} "
+            f"(dibayar pada ${min_usd}, sebelum tanggal 10 bulan berikutnya). Lihat pendapatan → /referral"
+        )
+    if lang == "zh-hans":
+        return (
+            f"💸 你赚得 {amount}——你推荐的好友订阅了。待付：{pending}"
+            f"（满 ${min_usd} 后于次月 10 日前支付）。查看收益 → /referral"
+        )
+    return (
+        f"💸 You earned {amount} — a friend you referred subscribed. Pending payout: {pending} "
+        f"(paid at ${min_usd}, by the 10th of next month). See your earnings → /referral"
+    )
+
+
+def format_notifications_toggle(opt_out: bool | None, lang_code: str | None = None) -> str:
+    """/notifications copy. opt_out None → usage; True → turned off; False → turned on."""
+    lang = normalize_lang(lang_code)
+    if opt_out is True:
+        if lang == "id":
+            return "🔕 Notifikasi referral DIMATIKAN. Aktifkan lagi → /notifications on"
+        if lang == "zh-hans":
+            return "🔕 推荐通知已关闭。重新开启 → /notifications on"
+        return "🔕 Referral notifications are OFF. Turn back on → /notifications on"
+    if opt_out is False:
+        if lang == "id":
+            return "🔔 Notifikasi referral DIAKTIFKAN — Anda akan diberi tahu saat teman bergabung atau Anda dapat komisi."
+        if lang == "zh-hans":
+            return "🔔 推荐通知已开启——好友加入或你获得佣金时会通知你。"
+        return "🔔 Referral notifications are ON — you'll hear when a friend joins or you earn."
+    if lang == "id":
+        return "🔔 Notifikasi join + pendapatan referral aktif. Matikan → /notifications off · Aktifkan → /notifications on"
+    if lang == "zh-hans":
+        return "🔔 推荐加入与收益通知已开启。关闭 → /notifications off · 开启 → /notifications on"
+    return "🔔 Referral join + earnings alerts are on. Turn off → /notifications off · on → /notifications on"

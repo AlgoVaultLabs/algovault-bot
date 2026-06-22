@@ -91,3 +91,70 @@ def attribute(ref_code: str, chat_id: int) -> dict[str, Any] | None:
     except (httpx.HTTPError, ValueError) as e:
         log.warning('{"event": "referral_attribute_failed", "err": "%s"}', str(e)[:160])
     return None
+
+
+# ── REFERRAL-PARITY-NOTIFS-W1 / C2: notification queue (drain + opt-out) ──
+
+def get_notifications(limit: int = 100) -> list[dict[str, Any]]:
+    """Pull pending TG-channel notifications (the bot drains them). Each row is
+    ``{id, code, event, payload}`` (keyed by CODE — the bot maps code→chat_id
+    locally). Returns [] on any failure (fail-soft)."""
+    headers = _headers()
+    if headers is None:
+        return []
+    try:
+        resp = httpx.get(
+            f"{_referral_base()}/api/referral/notifications",
+            params={"status": "pending", "channel": "tg", "limit": str(limit)},
+            headers=headers,
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and data.get("ok") and isinstance(data.get("notifications"), list):
+            return data["notifications"]
+        log.warning('{"event": "referral_get_notifications_bad_shape"}')
+    except (httpx.HTTPError, ValueError) as e:
+        log.warning('{"event": "referral_get_notifications_failed", "err": "%s"}', str(e)[:160])
+    return []
+
+
+def mark_delivered(notif_id: int) -> bool:
+    """Mark a notification row delivered after a successful Bot-API send. Fail-soft."""
+    headers = _headers()
+    if headers is None:
+        return False
+    try:
+        resp = httpx.post(
+            f"{_referral_base()}/api/referral/notifications/{int(notif_id)}/delivered",
+            json={},
+            headers=headers,
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return bool(isinstance(data, dict) and data.get("ok"))
+    except (httpx.HTTPError, ValueError) as e:
+        log.warning('{"event": "referral_mark_delivered_failed", "err": "%s"}', str(e)[:160])
+    return False
+
+
+def set_notify_pref(chat_id: int, opt_out: bool) -> bool:
+    """Write the referrer's notify opt-out pref (single-derivation: same engine
+    column as the email unsubscribe link). Fail-soft."""
+    headers = _headers()
+    if headers is None:
+        return False
+    try:
+        resp = httpx.post(
+            f"{_referral_base()}/api/referral/notify-pref",
+            json={"tg": str(chat_id), "opt_out": bool(opt_out)},
+            headers=headers,
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return bool(isinstance(data, dict) and data.get("ok"))
+    except (httpx.HTTPError, ValueError) as e:
+        log.warning('{"event": "referral_set_notify_pref_failed", "err": "%s"}', str(e)[:160])
+    return False
