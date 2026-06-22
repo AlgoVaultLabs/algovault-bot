@@ -820,28 +820,14 @@ def _trim_reasoning(text: Any, max_len: int = 110) -> str:
     return first[: max_len - 1].rstrip() + "…" if len(first) > max_len else first
 
 
-def _render_proof(receipts: dict[str, Any] | None) -> str:
-    """Track-record proof line from the scan _receipts (LIVE numbers — never hardcoded)."""
-    tr = (receipts or {}).get("track_record") or {}
-    wr, n = tr.get("pfe_win_rate"), tr.get("n")
-    if wr is None or n is None:
-        return ""
-    uri = str((receipts or {}).get("verification_uri") or "https://algovault.com/track-record")
-    uri = uri.replace("https://", "").replace("http://", "")
-    n_int = int(n)
-    n_str = f"{round(n_int / 1000)}K" if n_int >= 1000 else str(n_int)
-    return f"📈 {float(wr) * 100:.1f}% PFE win-rate · {n_str} verified calls → {uri}"
-
-
 def _format_scan_digest_push(
     enriched: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str,
-    *, receipts: dict[str, Any] | None = None,
 ) -> str:
     """Enriched scan-digest body: per actionable verdict — call @ price · conviction ·
-    regime, a drivers line, and a one-line 'why' — closed by the live track-record proof
-    line. Only called with ≥1 actionable call (all-HOLD rounds are suppressed upstream)."""
+    regime, a drivers line, and a one-line 'why'. Only called with ≥1 actionable call
+    (all-HOLD rounds are suppressed upstream)."""
     header = (
-        f"🔁 Scan digest ({cadence}) — top {top_n} perps by OI on {exchange} @ {tf}"
+        f"🚀Scan digest ({cadence}) — top {top_n} perps by OI on {exchange} @ {tf}"
         f" — {len(enriched)} actionable:"
     )
     lines = [header, ""]
@@ -860,9 +846,6 @@ def _format_scan_digest_push(
         if why:
             lines.append(f"   💡 {why}")
         lines.append("")
-    proof = _render_proof(receipts)
-    if proof:
-        lines.append(proof)
     return "\n".join(lines).rstrip()
 
 
@@ -930,7 +913,6 @@ async def process_scan_digests(
                 # via get_trade_call — ONE call per actionable coin, computed ONCE for the
                 # whole group (internal-bypass; no user-quota cost). Fail-soft per coin: a
                 # depth-call error leaves that verdict bare (no price/drivers/why).
-                receipts = result.get("_receipts") or {}
                 enriched: list[dict[str, Any]] = []
                 for c in non_hold:
                     try:
@@ -950,7 +932,7 @@ async def process_scan_digests(
                         counts["scan_skipped_exhausted"] += 1
                         db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
                         continue
-                    text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"], receipts=receipts)
+                    text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"])
                     ok = await _push(bot, chat_id, text, db)
                     if ok:
                         consume_quota(db, chat_id, units=max(1, len(non_hold)))
