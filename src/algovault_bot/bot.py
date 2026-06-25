@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.ext import Application, ApplicationBuilder
 
 from .db import Database, DEFAULT_DB_PATH
-from .handlers import register_handlers
+from .handlers import post_init, register_handlers
 from .messages import WELCOME_MESSAGE  # noqa: F401 — re-exported for tests/import paths
 
 
@@ -29,7 +29,8 @@ def _setup_logging(level: str = "INFO") -> None:
 
 
 def build_application(token: str, db_path: str = DEFAULT_DB_PATH) -> Application:
-    app: Application = ApplicationBuilder().token(token).build()
+    # TG-BUTTON-UX-W1: post_init populates the Menu button / autocomplete on boot.
+    app: Application = ApplicationBuilder().token(token).post_init(post_init).build()
     db = Database(db_path)
     register_handlers(app, db)
     return app

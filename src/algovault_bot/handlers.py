@@ -15,7 +15,7 @@ import os
 import secrets
 from typing import Sequence
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -125,6 +125,34 @@ _AUTH_PREFIX = "auth_"
 _REF_PREFIX = "ref_"  # TG-REFERRAL-W1: /start ref_<CODE> deep-link referral join
 
 
+# TG-BUTTON-UX-W1: curated Menu-button + `/` autocomplete list, set on boot via
+# post_init → app.bot.set_my_commands (the Menu button is empty by default).
+CURATED_COMMANDS: list[BotCommand] = [
+    BotCommand("watch", "Recurring BUY/SELL + regime alerts for a coin"),
+    BotCommand("scan", "One-shot scan of the top perps for actionable calls"),
+    BotCommand("scanwatch", "Standing scan digest (BUY/SELL only)"),
+    BotCommand("regime", "One-shot market regime for a coin"),
+    BotCommand("call", "One-shot BUY/SELL/HOLD call for a coin"),
+    BotCommand("funding", "Cross-venue funding-rate arbitrage scan"),
+    BotCommand("list", "Show your watches + scan digests"),
+    BotCommand("unwatch", "Remove a watch"),
+    BotCommand("unwatchall", "Clear your entire watchlist"),
+    BotCommand("unscanwatch", "Stop a scan digest"),
+    BotCommand("referral", "Invite friends — they get bonus calls, you earn"),
+    BotCommand("help", "Full command list"),
+]
+
+
+async def post_init(app: Application) -> None:
+    """Populate Telegram's Menu button + `/` autocomplete on startup (TG-BUTTON-UX-W1).
+    Best-effort — never block the polling loop on a transient Bot-API error."""
+    try:
+        await app.bot.set_my_commands(CURATED_COMMANDS)
+        log.info('{"event": "set_my_commands_ok", "n": %d}', len(CURATED_COMMANDS))
+    except Exception as e:  # noqa: BLE001
+        log.warning('{"event": "set_my_commands_failed", "err": "%s"}', str(e)[:160])
+
+
 # ── TG-BATCH-WATCHLIST-W1 — batch reply + helpers ──────────────
 
 
@@ -215,9 +243,11 @@ def _commit_watch_combos(
         )
 
     if len(combos) == 1:
-        # Backward-compatible single-add message + coverage nudge.
+        # TG-BUTTON-UX-W1: persistent confirmation card (shared renderer) + coverage nudge.
         coin, tf, exch = combos[0]
-        base = messages.watch_added_message(coin, tf, exch, alert_type)
+        base = messages.format_subscription_confirmation(
+            "watch", coin=coin, tf=tf, exchange=exch, mode=alert_type
+        )
         try:
             est = compute_coverage_estimate(coin, tf, exch)
             return base + format_nudge(coin, tf, exch, est)
@@ -723,12 +753,13 @@ def handle_scanwatch(
             chat_id, top_n, timeframe, exchange, cadence,
             source=adoption.SOURCE_COMMAND, created=True,
         )
-    verb = "Scheduled" if inserted else "Updated"
-    return (
-        f"{verb} scan digest — top {top_n} perps by OI on {exchange} @ {timeframe}, every {cadence}.\n"
-        f"{scan_digest_reminder(cadence, timeframe)}\n"
-        f"See it in /list · remove with /unscanwatch {top_n} {timeframe} {exchange}."
+    # TG-BUTTON-UX-W1: persistent standing-scan confirmation card (shared renderer)
+    # + the cadence-vs-timeframe reminder (preserves the faster-than-TF heads-up).
+    card = messages.format_subscription_confirmation(
+        "scanwatch", top_n=top_n, tf=timeframe, exchange=exchange, cadence=cadence
     )
+    reminder = scan_digest_reminder(cadence, timeframe)
+    return f"{card}\n{reminder}" if reminder else card
 
 
 def handle_unscanwatch(

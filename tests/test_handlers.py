@@ -29,21 +29,22 @@ def test_help_full_command_list(tmp_db: Database) -> None:
 def test_watch_default_exchange_and_type(tmp_db: Database) -> None:
     # AC2.1 with D8 (BINANCE default) + 2026-05-08 default TYPE=calls
     reply = handle_watch(tmp_db, 1, "u", "en", ["BTC", "4h"])
-    assert "✅ Watching BTC 4h on BINANCE (trade calls only)" in reply
+    # TG-BUTTON-UX-W1: single-watch confirmation is now the shared card.
+    assert "You're now watching" in reply and "BTC · 4h · BINANCE · Trade calls" in reply
     assert tmp_db.count_watches(1) == 1
 
 
 def test_watch_explicit_exchange_and_regime_only(tmp_db: Database) -> None:
     # AC2.2 — alert_type='regime' stored
     reply = handle_watch(tmp_db, 1, "u", "en", ["ETH", "1h", "binance", "regime"])
-    assert "✅ Watching ETH 1h on BINANCE (regime only)" in reply
+    assert "ETH · 1h · BINANCE · Regime" in reply
     rows = tmp_db.list_watches(1)
     assert rows[0]["alert_type"] == "regime"
 
 
 def test_watch_calls_only_on_hl(tmp_db: Database) -> None:
     reply = handle_watch(tmp_db, 1, "u", "en", ["SOL", "15m", "HL", "calls"])
-    assert "✅ Watching SOL 15m on HL (trade calls only)" in reply
+    assert "SOL · 15m · HL · Trade calls" in reply
 
 
 def test_watch_invalid_coin(tmp_db: Database) -> None:

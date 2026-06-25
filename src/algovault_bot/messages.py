@@ -130,6 +130,50 @@ def watch_added_message(coin: str, timeframe: str, exchange: str, alert_type: st
     return f"✅ Watching {coin} {timeframe} on {exchange} ({types[alert_type]})."
 
 
+# TG-BUTTON-UX-W1 — the single persistent subscription-confirmation card. ONE
+# renderer projected by the typed /watch + /scanwatch paths AND the Watch + Scan
+# wizards (single-derivation). Plain text (no HTML special chars) so it renders
+# identically via sendMessage and edit_message_text regardless of parse_mode.
+# Used ONLY for RECURRING subscribes (/watch, /scanwatch) — never one-shot /scan,
+# /call (their verdict IS the result). `lang` is reserved for forward-compat
+# (the watch/scan surface is English today, matching watch_added_message).
+_CONFIRM_MODE_LABELS: Final[dict[str, str]] = {
+    "regime": "Regime",
+    "calls": "Trade calls",
+    "both": "Regime + Calls",
+}
+
+
+def format_subscription_confirmation(
+    kind: str,
+    *,
+    coin: str | None = None,
+    top_n: int | None = None,
+    tf: str,
+    exchange: str,
+    mode: str | None = None,
+    cadence: str | None = None,
+    lang: str = "en",
+) -> str:
+    """Persistent confirmation card for a recurring subscribe. `kind` ∈ {watch, scanwatch}."""
+    exch = exchange  # uppercase (BINANCE/HL/OKX…) — matches the typed convention
+    if kind == "watch":
+        mode_label = _CONFIRM_MODE_LABELS.get(mode or "calls", "Trade calls")
+        return (
+            "✅ You're now watching\n"
+            f"{coin} · {tf} · {exch} · {mode_label}\n"
+            "📊 Regime shifts — free · 📈 BUY/SELL count toward your 100/mo\n"
+            "Manage: /list · /unwatch"
+        )
+    if kind == "scanwatch":
+        return (
+            f"✅ Standing scan: top {top_n} · {tf} · {exch} (every {cadence})\n"
+            "🚀 You'll get a digest only on actionable BUY/SELL — HOLD rounds stay silent + free.\n"
+            "📈 Actionable digests count toward your 100/mo. Manage: /list · /unscanwatch"
+        )
+    raise ValueError(f"unknown subscription kind: {kind!r}")
+
+
 def watch_removed_message(coin: str, timeframe: str, exchange: str) -> str:
     return f"🗑️ No longer watching {coin} {timeframe} on {exchange}."
 
