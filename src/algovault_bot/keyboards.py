@@ -117,3 +117,19 @@ def confirm_followup_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton("➕ Add another", callback_data="mnu:watch"),
         InlineKeyboardButton("📋 My list", callback_data="mnu:list"),
     ]])
+
+
+# ── Scan wizard (C3) — kind picker + top-N grid ──
+def scan_kind_kb() -> InlineKeyboardMarkup:
+    """One-shot scan vs a standing (recurring) scan digest."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ One-shot scan", callback_data="scn:kind:oneshot")],
+        [InlineKeyboardButton("🔔 Standing digest", callback_data="scn:kind:standing")],
+        [InlineKeyboardButton("✖️ Cancel", callback_data="scn:cancel")],
+    ])
+
+
+def topn_grid_kb(prefix: str = "scn") -> InlineKeyboardMarkup:
+    """How many top perps (by OI) to scan."""
+    btns = [InlineKeyboardButton(f"Top {n}", callback_data=f"{prefix}:n:{n}") for n in (5, 10, 20)]
+    return InlineKeyboardMarkup([btns, _nav_row(prefix)])

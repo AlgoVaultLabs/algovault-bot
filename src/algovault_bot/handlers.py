@@ -1793,12 +1793,21 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("unwatchall", _unwatchall))
     app.add_handler(CommandHandler("list", _list))
     app.add_handler(CommandHandler("stats", _stats))
-    # FEATURE-PARITY-CHANNELS-W1 CH3: /scan (pull the market scanner). scan_trade_calls
-    # is bot-flagged in the registry → its command surfaces here (capabilities.BOT_TOOL_SURFACE).
-    app.add_handler(CommandHandler("scan", _scan))
-    # FEATURE-PARITY-CHANNELS-W1 CH4: scheduled scan digests (the bot twin of the
-    # webhook scan_digest). The alert-engine cron pushes due digests per cadence bucket.
-    app.add_handler(CommandHandler("scanwatch", _scanwatch))
+    # FEATURE-PARITY-CHANNELS-W1 CH3/CH4 + TG-BUTTON-UX-W1 (C3): the Scan wizard's
+    # ConversationHandler IS the /scan (one-shot) + /scanwatch (standing) entry — args →
+    # typed _scan/_scanwatch verbatim; no-args → tap wizard; also entered via mnu:scan (C4).
+    # Reuses handle_scan / handle_scanwatch (no forked scan logic, normal quota).
+    app.add_handler(wizard.build_scan_conversation(
+        db,
+        typed_scan=_scan,
+        typed_scanwatch=_scanwatch,
+        run_scan=lambda chat_id, username, lang, top_n, tf, exch: handle_scan(
+            db, chat_id, username, lang, [str(top_n), tf, exch]
+        ),
+        commit_scanwatch=lambda chat_id, username, lang, top_n, tf, exch: handle_scanwatch(
+            db, chat_id, username, lang, [str(top_n), tf, exch]
+        ),
+    ))
     app.add_handler(CommandHandler("unscanwatch", _unscanwatch))
     # On-demand per-coin pulls for the bot-flagged get_market_regime /
     # get_trade_call (additive surface; recurring side is /watch …regime|calls).

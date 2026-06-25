@@ -35,6 +35,10 @@ W_COIN, W_TF, W_EXCHANGE, W_MODE = range(4)
 _UD = "wz_watch"  # context.user_data key for the in-flight pick
 POPULAR_N = 9  # coins in the shortlist grid (3×3)
 
+# Scan wizard states (separate ConversationHandler → independent state space).
+S_KIND, S_TOPN, S_TF, S_EXCHANGE = range(4)
+_SUD = "wz_scan"
+
 
 def build_watch_conversation(
     db: Any,
@@ -233,4 +237,170 @@ def build_watch_conversation(
         return ConversationHandler(
             entry_points=entry, states=states, fallbacks=fallbacks,
             per_message=False, name="watch_wizard",
+        )
+
+
+def build_scan_conversation(
+    db: Any,
+    *,
+    typed_scan: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
+    typed_scanwatch: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
+    run_scan: Callable[[int, str | None, str | None, int, str, str], str],
+    commit_scanwatch: Callable[[int, str | None, str | None, int, str, str], str],
+) -> ConversationHandler:
+    """Scan wizard: KIND (one-shot vs standing) → TOP_N → TF → EXCHANGE → result/card.
+    One-shot reuses the typed /scan (verdict IS the result — NO card); standing reuses
+    the typed /scanwatch (→ confirmation card). Reuses the C2 TF/exchange grids."""
+
+    def _pick(ctx: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+        if ctx.user_data is None:  # pragma: no cover
+            return {}
+        return ctx.user_data.setdefault(_SUD, {})
+
+    async def _send_topn(send: Callable[..., Awaitable[Any]], kind: str, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        _pick(ctx)["kind"] = kind
+        label = "One-shot scan" if kind == "oneshot" else "Standing digest"
+        await send(f"🔍 {label} — how many top perps?", reply_markup=keyboards.topn_grid_kb("scn"))
+        return S_TOPN
+
+    async def _entry_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        if update.message is None:
+            return ConversationHandler.END
+        if ctx.args:
+            await typed_scan(update, ctx)
+            return ConversationHandler.END
+        _pick(ctx).clear()
+        return await _send_topn(update.message.reply_text, "oneshot", ctx)
+
+    async def _entry_scanwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        if update.message is None:
+            return ConversationHandler.END
+        if ctx.args:
+            await typed_scanwatch(update, ctx)
+            return ConversationHandler.END
+        _pick(ctx).clear()
+        return await _send_topn(update.message.reply_text, "standing", ctx)
+
+    async def _entry_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None or q.message is None:
+            return ConversationHandler.END
+        await q.answer()
+        _pick(ctx).clear()
+        await q.edit_message_text(
+            "🔍 Scan — one-shot, or a standing digest?", reply_markup=keyboards.scan_kind_kb()
+        )
+        return S_KIND
+
+    async def _pick_kind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None or q.data is None:
+            return S_KIND
+        await q.answer()
+        return await _send_topn(q.edit_message_text, q.data.split(":", 2)[2], ctx)
+
+    async def _pick_topn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None or q.data is None:
+            return S_TOPN
+        await q.answer()
+        _pick(ctx)["top_n"] = int(q.data.split(":", 2)[2])
+        await q.edit_message_text("🔍 Pick a timeframe:", reply_markup=keyboards.tf_grid_kb("scn"))
+        return S_TF
+
+    async def _pick_tf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None or q.data is None:
+            return S_TF
+        await q.answer()
+        _pick(ctx)["tf"] = q.data.split(":", 2)[2]
+        await q.edit_message_text("🔍 Pick an exchange:", reply_markup=keyboards.exchange_grid_kb("scn"))
+        return S_EXCHANGE
+
+    async def _pick_exchange(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None or q.data is None or q.from_user is None:
+            return S_EXCHANGE
+        pick = _pick(ctx)
+        pick["exchange"] = q.data.split(":", 2)[2]
+        u = q.from_user
+        top_n, tf, exch = int(pick["top_n"]), str(pick["tf"]), str(pick["exchange"])
+        if pick.get("kind") == "standing":
+            await q.answer("Scheduled ✓")
+            card = commit_scanwatch(u.id, u.username, u.language_code, top_n, tf, exch)
+            await q.edit_message_text(card, reply_markup=keyboards.confirm_followup_kb())
+        else:
+            await q.answer("Scanning…")
+            await q.edit_message_text("🔍 Scanning the top perps…")
+            result = run_scan(u.id, u.username, u.language_code, top_n, tf, exch)
+            # One-shot: the verdict IS the result — NO "subscribed" card.
+            await q.edit_message_text(result, disable_web_page_preview=True)
+        pick.clear()
+        return ConversationHandler.END
+
+    async def _back_to_kind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None:
+            return S_TOPN
+        await q.answer()
+        await q.edit_message_text(
+            "🔍 Scan — one-shot, or a standing digest?", reply_markup=keyboards.scan_kind_kb()
+        )
+        return S_KIND
+
+    async def _back_to_topn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None:
+            return S_TF
+        await q.answer()
+        return await _send_topn(q.edit_message_text, str(_pick(ctx).get("kind", "oneshot")), ctx)
+
+    async def _back_to_tf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        if q is None:
+            return S_EXCHANGE
+        await q.answer()
+        await q.edit_message_text("🔍 Pick a timeframe:", reply_markup=keyboards.tf_grid_kb("scn"))
+        return S_TF
+
+    async def _cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        q = update.callback_query
+        _pick(ctx).clear()
+        if q is not None:
+            await q.answer()
+            await q.edit_message_text("✖️ Cancelled. Send /scan or /scanwatch to start again.")
+        elif update.message is not None:
+            await update.message.reply_text("✖️ Cancelled.")
+        return ConversationHandler.END
+
+    _cancel_h: BaseHandler[Update, Any, object] = CallbackQueryHandler(_cancel, pattern=r"^scn:cancel$")
+    entry: list[BaseHandler[Update, Any, object]] = [
+        CommandHandler("scan", _entry_scan),
+        CommandHandler("scanwatch", _entry_scanwatch),
+        CallbackQueryHandler(_entry_menu, pattern=r"^mnu:scan$"),
+    ]
+    states: dict[object, list[BaseHandler[Update, Any, object]]] = {
+        S_KIND: [CallbackQueryHandler(_pick_kind, pattern=r"^scn:kind:"), _cancel_h],
+        S_TOPN: [
+            CallbackQueryHandler(_pick_topn, pattern=r"^scn:n:"),
+            CallbackQueryHandler(_back_to_kind, pattern=r"^scn:back$"),
+            _cancel_h,
+        ],
+        S_TF: [
+            CallbackQueryHandler(_pick_tf, pattern=r"^scn:tf:"),
+            CallbackQueryHandler(_back_to_topn, pattern=r"^scn:back$"),
+            _cancel_h,
+        ],
+        S_EXCHANGE: [
+            CallbackQueryHandler(_pick_exchange, pattern=r"^scn:ex:"),
+            CallbackQueryHandler(_back_to_tf, pattern=r"^scn:back$"),
+            _cancel_h,
+        ],
+    }
+    fallbacks: list[BaseHandler[Update, Any, object]] = [_cancel_h, CommandHandler("cancel", _cancel)]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=PTBUserWarning)
+        return ConversationHandler(
+            entry_points=entry, states=states, fallbacks=fallbacks,
+            per_message=False, name="scan_wizard",
         )

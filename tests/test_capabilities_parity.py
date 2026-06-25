@@ -25,8 +25,13 @@ class _CapturingApp:
 def _registered_commands(db) -> set[str]:  # noqa: ANN001
     app = _CapturingApp()
     register_handlers(app, db)
-    cmds: set[str] = set()
+    # TG-BUTTON-UX-W1: /watch /scan /scanwatch are now CommandHandler entry_points
+    # INSIDE ConversationHandlers (the wizards) — descend into entry_points too.
+    handlers = list(app.captured)
     for h in app.captured:
+        handlers.extend(getattr(h, "entry_points", None) or [])
+    cmds: set[str] = set()
+    for h in handlers:
         c = getattr(h, "commands", None)  # only CommandHandler has .commands
         if c:
             cmds |= set(c)
