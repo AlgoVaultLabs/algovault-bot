@@ -58,7 +58,7 @@ def build_watch_conversation(
     async def _send_coin_grid(send: Callable[..., Awaitable[Any]]) -> int:
         coins = get_popular_coins() or list(keyboards.FALLBACK_POPULAR_COINS)
         await send(
-            "📈 Watch a coin — tap one or type a ticker:",
+            "📈 Watch a coin or TradFi asset — tap one, or 🔤 type any ticker:",
             reply_markup=keyboards.coin_grid_kb(coins, "wz"),
         )
         return W_COIN

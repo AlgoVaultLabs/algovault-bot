@@ -22,21 +22,21 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .messages import signup_url
 from .validators import EXCHANGES, TF_SECONDS, TIMEFRAMES
 
-# Wizard TF grid: the typed path accepts all 11 TIMEFRAMES (incl. 1m), but the
-# tap-grid curates to a 3m floor — 1m alerts are latency-noisy and a poor default
-# for a one-tap subscribe. NOTE: there is no HIDE_TFS constant in the bot; this
-# curation is wizard-grid-only — typed `/watch BTC 1m` is unchanged.
-WIZARD_TIMEFRAMES: tuple[str, ...] = tuple(
-    tf for tf in sorted(TIMEFRAMES, key=lambda t: TF_SECONDS[t]) if tf != "1m"
-)
+# Wizard TF grid — the FULL supported set (1m–1d), ordered shortest→longest, in
+# exact parity with the typed `/watch` path (no floor). Shared by both wizards.
+WIZARD_TIMEFRAMES: tuple[str, ...] = tuple(sorted(TIMEFRAMES, key=lambda t: TF_SECONDS[t]))
 
 # Stable display order (the EXCHANGES frozenset is unordered); BINANCE first (default).
 _EXCHANGE_ORDER: tuple[str, ...] = ("BINANCE", "BYBIT", "OKX", "BITGET", "HL")
 EXCHANGE_DISPLAY: tuple[str, ...] = tuple(e for e in _EXCHANGE_ORDER if e in EXCHANGES)
 
-# Fallback shortlist ONLY if the live top-OI fetch (asset_universe.get_top_assets)
-# returns nothing — never the primary source.
-FALLBACK_POPULAR_COINS: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE")
+# Watch-wizard quick-picks — a curated crypto + TradFi showcase (the bot watches BOTH:
+# the live universe carries 900+ perps incl. XAU/gold, QQQ, and US-equity perps). A
+# quick-pick tap commits DIRECTLY (skip_preflight), so EVERY entry MUST be a live-universe
+# symbol — these were probed 2026-06-25. Any other symbol is reachable via 🔤 Type ticker.
+WATCH_QUICKPICKS: tuple[str, ...] = ("BTC", "ETH", "SOL", "SPCX", "QQQ", "XAU")
+# Fallback ONLY if the injected popular-coins source returns nothing — never primary.
+FALLBACK_POPULAR_COINS: tuple[str, ...] = WATCH_QUICKPICKS
 
 _MODE_LABELS: dict[str, str] = {
     "calls": "📈 Trade calls",
@@ -73,7 +73,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 
 
 def coin_grid_kb(coins: list[str], prefix: str = "wz", *, back: bool = False) -> InlineKeyboardMarkup:
-    """Popular-coin shortlist (caller passes get_top_assets result) + 🔤 Type ticker."""
+    """Quick-pick shortlist (caller passes the curated WATCH_QUICKPICKS) + 🔤 Type ticker."""
     btns = [InlineKeyboardButton(c, callback_data=f"{prefix}:coin:{c}") for c in coins]
     rows = _rows(btns, 3)
     rows.append([InlineKeyboardButton("🔤 Type ticker", callback_data=f"{prefix}:type")])
@@ -82,7 +82,7 @@ def coin_grid_kb(coins: list[str], prefix: str = "wz", *, back: bool = False) ->
 
 
 def tf_grid_kb(prefix: str = "wz") -> InlineKeyboardMarkup:
-    """Timeframe grid — 3m–1d (WIZARD_TIMEFRAMES; 1m excluded). Shared by both wizards."""
+    """Timeframe grid — 1m–1d (WIZARD_TIMEFRAMES; full parity with typed /watch). Shared by both wizards."""
     btns = [InlineKeyboardButton(tf, callback_data=f"{prefix}:tf:{tf}") for tf in WIZARD_TIMEFRAMES]
     rows = _rows(btns, 4)
     rows.append(_nav_row(prefix))

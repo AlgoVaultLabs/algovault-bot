@@ -33,13 +33,22 @@ def test_keyboard_main_menu_shape_and_callbacks():
     assert all(len(row) <= 3 for row in kb.inline_keyboard)
 
 
-def test_keyboard_tf_grid_excludes_1m_and_has_nav():
+def test_keyboard_tf_grid_full_parity_and_has_nav():
     kb = k.tf_grid_kb("wz")
     _assert_cb_valid(kb)
     cbs = [b.callback_data for b in _buttons(kb)]
-    assert "wz:tf:1m" not in cbs  # wizard 3m floor — 1m excluded
+    assert "wz:tf:1m" in cbs  # full parity with typed /watch — no floor
     assert "wz:tf:3m" in cbs and "wz:tf:1d" in cbs
     assert "wz:back" in cbs and "wz:cancel" in cbs
+
+
+def test_watch_quickpicks_showcase_crypto_and_tradfi():
+    # curated quick-picks mix crypto majors + TradFi (XAU/QQQ/SPCX) — all live-universe perps
+    assert k.WATCH_QUICKPICKS == ("BTC", "ETH", "SOL", "SPCX", "QQQ", "XAU")
+    cbs = [b.callback_data for b in _buttons(k.coin_grid_kb(list(k.WATCH_QUICKPICKS), "wz"))]
+    for sym in ("BTC", "XAU", "QQQ", "SPCX"):
+        assert f"wz:coin:{sym}" in cbs
+    assert "wz:type" in cbs  # Type-ticker still reaches the full universe
 
 
 def test_keyboard_grids_reuse_prefix_for_both_wizards():

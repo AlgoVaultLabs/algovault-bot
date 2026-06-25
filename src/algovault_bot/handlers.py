@@ -1827,7 +1827,7 @@ def register_handlers(app: Application, db: Database) -> None:
         commit_watch=lambda chat_id, coin, tf, exch, mode: _commit_watch_combos(
             db, chat_id, [(coin, tf, exch)], 1, 1, 1, mode, skip_preflight=True
         ),
-        get_popular_coins=lambda: asset_universe.get_top_assets(wizard.POPULAR_N),
+        get_popular_coins=lambda: list(keyboards.WATCH_QUICKPICKS),
         get_universe=asset_universe.get_asset_universe,
     ))
     app.add_handler(CommandHandler("unwatch", _unwatch))
