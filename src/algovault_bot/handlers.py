@@ -28,7 +28,7 @@ from telegram.ext import (
 
 from datetime import datetime, timezone
 
-from . import adoption, asset_universe, batch, messages, referral, referral_client
+from . import adoption, asset_universe, batch, messages, referral, referral_client, wizard
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
 from .db import Database, PER_USER_WATCHLIST_CAP
@@ -1777,7 +1777,18 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("referral", _referral))
     app.add_handler(CommandHandler("notifications", _notifications))
-    app.add_handler(CommandHandler("watch", _watch))
+    # TG-BUTTON-UX-W1 (C2): the Watch wizard's ConversationHandler IS the /watch entry —
+    # args → typed _watch (verbatim), no-args → tap wizard; also entered via mnu:watch (C4).
+    # Terminal reuses _commit_watch_combos (the typed path's persist) — no fork, normal quota.
+    app.add_handler(wizard.build_watch_conversation(
+        db,
+        typed_watch=_watch,
+        commit_watch=lambda chat_id, coin, tf, exch, mode: _commit_watch_combos(
+            db, chat_id, [(coin, tf, exch)], 1, 1, 1, mode, skip_preflight=True
+        ),
+        get_popular_coins=lambda: asset_universe.get_top_assets(wizard.POPULAR_N),
+        get_universe=asset_universe.get_asset_universe,
+    ))
     app.add_handler(CommandHandler("unwatch", _unwatch))
     app.add_handler(CommandHandler("unwatchall", _unwatchall))
     app.add_handler(CommandHandler("list", _list))
