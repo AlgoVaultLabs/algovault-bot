@@ -23,7 +23,7 @@ def test_help_full_command_list(tmp_db: Database) -> None:
     reply = handle_help(tmp_db, 1, "u", "en")
     for cmd in ("/start", "/watch", "/unwatch", "/list", "/help"):
         assert cmd in reply
-    assert "[TYPE]" in reply  # AC2.4 — type-flag mentioned
+    assert "[regime|calls|both]" in reply  # type-flag mentioned (compact form)
 
 
 def test_watch_default_exchange_and_type(tmp_db: Database) -> None:

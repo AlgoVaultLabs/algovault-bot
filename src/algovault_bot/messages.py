@@ -48,7 +48,7 @@ WELCOME_MESSAGE: Final = (
     "📈 Trade calls (BUY/SELL) — count toward your free 100 calls/month\n"
     "HOLD verdicts are silent + free.\n"
     "\n"
-    "Free tier covers all 710+ assets and all 11 timeframes (1m–1d). YOU choose what to watch.\n"
+    "Free tier covers all 900+ assets — crypto + TradFi (gold, stocks, pre-IPO) — and all 11 timeframes (1m–1d). YOU choose what to watch.\n"
     "\n"
     "Get started:\n"
     "/watch &lt;COIN&gt; &lt;TF&gt; &lt;Exch&gt; [regime|calls|both] — recurring alerts\n"
@@ -76,40 +76,36 @@ WELCOME_MESSAGE: Final = (
 HELP_MESSAGE: Final = (
     "AlgoVault Bot — full command list\n"
     "\n"
-    "/start — show welcome message\n"
-    "/watch <COIN> <TF> [EXCHANGE] [TYPE] — add to watchlist\n"
-    "    COIN:     BTC, ETH, SOL, etc. (uppercase, 2–10 chars)\n"
-    "    TF:       1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d\n"
-    "    EXCHANGE: HL BINANCE BYBIT OKX BITGET (default: BINANCE)\n"
-    "    TYPE:     regime | calls | both (default: calls)\n"
-    '    Bulk:     any of COIN/TF/EXCHANGE can be "all" or a comma-list (BTC,ETH,SOL)\n'
-    "/unwatch <COIN> <TF> [EXCHANGE] — remove from watchlist (TF/EXCHANGE can be \"all\")\n"
-    "/unwatchall — clear your entire watchlist\n"
-    "/list — show your watchlist\n"
-    "/scan [TOP_N] [TF] [EXCHANGE] — scan the top-N perps by OI for actionable calls\n"
-    "/scanwatch [TOP_N] [TF] [EXCHANGE] [CADENCE] — schedule a recurring scan digest\n"
-    "/unscanwatch [TOP_N] [TF] [EXCHANGE] — stop a scheduled scan digest\n"
-    "/regime <COIN> <TF> [EXCHANGE] — one-shot market regime (1h/4h/1d granularity)\n"
-    "/call <COIN> <TF> [EXCHANGE] — one-shot BUY/SELL/HOLD trade call for a coin\n"
-    "/funding [TOP_N] — cross-venue funding-rate arbitrage scan (longs vs shorts)\n"
+    "Args are positional: COIN TF EXCH (space-separated). EXCH optional, default BINANCE.\n"
+    "\n"
+    "/start — welcome + tap menu\n"
+    "/watch <COIN> <TF> <Exch> [regime|calls|both] — recurring alerts (default calls)\n"
+    "/scan [TOP_N] [TF] [EXCH] — one-shot scan of top perps by OI\n"
+    "/scanwatch [TOP_N] [TF] [EXCH] — recurring scan digest (BUY/SELL only)\n"
+    "/regime <COIN> <TF> [EXCH] — one-shot market regime (1h/4h/1d)\n"
+    "/call <COIN> <TF> [EXCH] — one-shot BUY/SELL/HOLD call\n"
+    "/funding [TOP_N] — cross-venue funding arb\n"
+    "/list — see your picks\n"
+    '/unwatch <COIN> <TF> — remove one (TF/EXCH can be "all")\n'
+    "/unwatchall — clear everything\n"
+    "/unscanwatch [TOP_N] [TF] [EXCH] — stop a scan digest\n"
+    "/referral — invite friends, earn rewards\n"
     "/help — this message\n"
-    "/referral — invite friends: they get bonus calls, you earn commission\n"
+    "\n"
+    "Values:\n"
+    "  COIN — BTC ETH SOL … + TradFi (XAU QQQ TSLA SPCX)\n"
+    "  TF   — 1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d\n"
+    "  EXCH — HL BINANCE BYBIT OKX BITGET\n"
     "\n"
     "Examples:\n"
-    "  /watch BTC 4h                — trade calls only, default BINANCE\n"
-    "  /watch ETH 1h HL regime      — regime-only on Hyperliquid\n"
-    "  /watch SOL 15m BYBIT both    — regime + trade calls on Bybit\n"
-    "  /watch BTC all               — BTC on every timeframe\n"
+    "  /watch ETH 15m Bybit regime  — regime alerts, ETH 15m on Bybit\n"
+    "  /watch BTC all               — BTC, every timeframe\n"
     "  /watch BTC,ETH,SOL 15m       — 3 coins, one timeframe\n"
-    "  /unwatch BTC 4h              — remove BTC 4h\n"
     "  /unwatch BTC all             — remove every BTC watch\n"
     "\n"
-    "Quota:\n"
-    "📊 Regime shifts — count toward your free 100 calls/month\n"
-    "📈 Trade calls (BUY/SELL) — count toward your free 100 calls/month\n"
-    "HOLD verdicts are silent + free.\n"
-    "\n"
-    f"Upgrade: → {signup_url('help_message')}"
+    "Free tier: 100 calls/month — regime shifts + BUY/SELL count; HOLD is silent + free.\n"
+    "Informational analytics, not financial advice.\n"
+    f"Upgrade → {signup_url('help_message')}"
 )
 
 
@@ -305,17 +301,18 @@ def unwatchall_done_message(n: int) -> str:
 
 def usage_watch_message() -> str:
     return (
-        "Usage: /watch <COIN> <TIMEFRAME> [EXCHANGE] [TYPE]\n"
+        "Usage: /watch <COIN> <TF> <Exch> [regime|calls|both]\n"
+        "Coin · TimeFrame · Exchange (space-separated). EXCH optional, default Binance.\n"
         "Examples:\n"
         "  /watch BTC 4h\n"
-        "  /watch ETH 1h binance regime\n"
+        "  /watch ETH 1h Bybit regime\n"
         "Type /help for the full command reference."
     )
 
 
 def usage_unwatch_message() -> str:
     return (
-        "Usage: /unwatch <COIN> <TIMEFRAME> [EXCHANGE]\n"
+        "Usage: /unwatch <COIN> <TF> [EXCH]   (TF/EXCH can be \"all\")\n"
         "Example: /unwatch BTC 4h"
     )
 

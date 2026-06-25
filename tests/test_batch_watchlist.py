@@ -297,7 +297,7 @@ def test_start_copy_trimmed_with_upgrade_link() -> None:
     assert "/help" in w
     # preserved explainer + clickable upgrade CTA (generated, utm-preserved)
     assert "the brain layer for AI trading agents" in w
-    assert "all 710+ assets" in w
+    assert "all 900+ assets" in w
     # ACTIVATION-NUDGE-W1: anchor text is now "Unlock 3,000 calls/mo →" + the
     # track-record trust line; utm preserved alongside upgrade_from=tg_start.
     assert ">Unlock 3,000 calls/mo →</a>" in w
@@ -309,4 +309,4 @@ def test_help_copy_has_batch_and_unwatchall() -> None:
     h = messages.HELP_MESSAGE
     assert "/unwatchall" in h
     assert "all" in h  # batch syntax hint
-    assert "[TYPE]" in h
+    assert "[regime|calls|both]" in h

@@ -365,13 +365,11 @@ def _format_scan_reply(result: dict, top_n: int, timeframe: str, exchange: str) 
     scanned = result.get("scanned", 0)
     header = f"🔍 Scan — top {top_n} perps by OI on {exchange} @ {timeframe}"
     if not non_hold:
-        return f"{header}\n\nNo actionable BUY/SELL calls right now ({scanned} scanned). Charged 1 call."
+        return f"{header}\n\nNo actionable BUY/SELL calls right now ({scanned} scanned)."
     lines = [f"{header} — {len(non_hold)} actionable:", ""]
     for c in non_hold:
         mark = "🟢" if c.get("call") == "BUY" else "🔴"
         lines.append(f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}")
-    lines.append("")
-    lines.append(f"Charged {len(non_hold)} call(s) against your monthly quota. Not financial advice.")
     return "\n".join(lines)
 
 
@@ -385,7 +383,7 @@ def handle_scan(
         top_n, timeframe, exchange = _parse_scan_args(list(args))
     except ValidationError as e:
         return (
-            "Usage: /scan [TOP_N] [TIMEFRAME] [EXCHANGE]\n"
+            "Usage: /scan [TOP_N] [TF] [EXCH]\n"
             "Ranks the top-N perps by open interest for actionable (BUY/SELL) calls.\n"
             "  /scan            — top 20 on BINANCE @ 15m\n"
             "  /scan 25 1h      — top 25 @ 1h\n"
@@ -431,18 +429,18 @@ _REGIME_GLYPHS = {
 }
 
 _USAGE_REGIME = (
-    "Usage: /regime <COIN> <TIMEFRAME> [EXCHANGE]\n"
+    "Usage: /regime <COIN> <TF> [EXCH]\n"
     "One-shot market regime for a coin (TRENDING_UP/DOWN, RANGING, VOLATILE).\n"
     "  /regime BTC 1h          — BTC 1h on BINANCE\n"
     "  /regime ETH 4h BYBIT    — ETH 4h on Bybit\n"
-    "Classified at 1h/4h/1d (finer TFs map to 1h). Costs 1 call."
+    "Classified at 1h/4h/1d (finer TFs map to 1h)."
 )
 _USAGE_CALL = (
-    "Usage: /call <COIN> <TIMEFRAME> [EXCHANGE]\n"
+    "Usage: /call <COIN> <TF> [EXCH]\n"
     "One-shot BUY/SELL/HOLD trade call for a coin.\n"
     "  /call SOL 15m           — SOL 15m on BINANCE\n"
     "  /call BTC 1h HL         — BTC 1h on Hyperliquid\n"
-    "HOLD is free; a BUY/SELL costs 1 call. Use /watch for recurring alerts."
+    "Use /watch for recurring alerts."
 )
 
 
@@ -501,7 +499,6 @@ def _format_regime_reply(coin: str, timeframe: str, exchange: str, result: dict)
     suggestion = result.get("suggestion")
     if suggestion:
         lines.append(f"💡 {suggestion}")
-    lines += ["", "Charged 1 call against your monthly quota. Not financial advice."]
     return "\n".join(lines)
 
 
@@ -534,7 +531,7 @@ def handle_regime(
 
 
 def _format_call_reply(
-    coin: str, timeframe: str, exchange: str, result: dict, charged: bool
+    coin: str, timeframe: str, exchange: str, result: dict
 ) -> str:
     call = (result.get("call") or "HOLD").upper()
     mark = {"BUY": "🟢", "SELL": "🔴"}.get(call, "⚪")
@@ -554,12 +551,6 @@ def _format_call_reply(
     reasoning = result.get("reasoning")
     if reasoning:
         lines += ["", str(reasoning)]
-    lines.append("")
-    lines.append(
-        "Charged 1 call against your monthly quota. Not financial advice."
-        if charged
-        else "HOLD verdicts are free. Not financial advice."
-    )
     return "\n".join(lines)
 
 
@@ -582,7 +573,6 @@ def handle_call(
     call = (result.get("call") or "").upper()
     if not call and result.get("price") is None:
         return messages.symbol_unknown_message(coin, exchange)
-    charged = False
     if call in ("BUY", "SELL"):
         state = get_quota_state(db, chat_id)
         if state.exhausted:
@@ -591,8 +581,7 @@ def handle_call(
                 f"Upgrade for more: {messages.signup_url('call_quota_exhausted')}"
             )
         consume_quota(db, chat_id, units=1)
-        charged = True
-    return _format_call_reply(coin, timeframe, exchange, result, charged)
+    return _format_call_reply(coin, timeframe, exchange, result)
 
 
 # ── /funding — cross-venue funding-rate arbitrage (scan_funding_arb) ──────
@@ -607,8 +596,7 @@ _USAGE_FUNDING = (
     "Cross-venue funding-rate arbitrage — biggest long/short spreads across\n"
     "Binance, Bybit, OKX, Bitget, Hyperliquid (no exchange arg — it scans all).\n"
     "  /funding        — top 5 spreads\n"
-    "  /funding 10     — top 10\n"
-    "Costs 1 call."
+    "  /funding 10     — top 10"
 )
 
 
@@ -644,7 +632,7 @@ def _parse_funding_args(args: list[str]) -> int:
 def _format_funding_reply(opps: list, limit: int) -> str:
     header = f"💰 Funding arb — top {limit} cross-venue spreads"
     if not opps:
-        return f"{header}\n\nNo funding spreads above threshold right now. Charged 1 call."
+        return f"{header}\n\nNo funding spreads above threshold right now."
     lines = [f"{header} — {min(len(opps), limit)} found:", ""]
     for o in opps[:limit]:
         coin = o.get("coin", "?")
@@ -663,7 +651,6 @@ def _format_funding_reply(opps: list, limit: int) -> str:
             bits.append(str(urgency))
         suffix = (" · " + " · ".join(bits)) if bits else ""
         lines.append(f"• {coin}: long {longv} / short {shortv}{suffix}")
-    lines += ["", "Charged 1 call against your monthly quota. Not financial advice."]
     return "\n".join(lines)
 
 
@@ -727,7 +714,7 @@ def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str]:
 
 def _scanwatch_usage(err: object) -> str:
     return (
-        "Usage: /scanwatch [TOP_N] [TIMEFRAME] [EXCHANGE] [CADENCE]\n"
+        "Usage: /scanwatch [TOP_N] [TF] [EXCH]\n"
         "Schedules a recurring whole-market scan digest pushed to this chat.\n"
         "  /scanwatch              — top 20 on BINANCE @ 15m, every 1h\n"
         "  /scanwatch 25 1h        — top 25 @ 1h, cadence auto (1h)\n"

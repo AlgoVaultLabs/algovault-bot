@@ -91,8 +91,7 @@ def test_call_hold_is_free(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) ->
     )
     reply = handle_call(tmp_db, 1, "u", "en", ["BTC", "1h"])
     assert "HOLD" in reply
-    assert "free" in reply.lower()
-    assert get_quota_state(tmp_db, 1).used == 0
+    assert get_quota_state(tmp_db, 1).used == 0  # HOLD consumes no quota (the real "free")
 
 
 def test_call_buy_consumes_one(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
