@@ -28,7 +28,7 @@ from telegram.ext import (
 
 from datetime import datetime, timezone
 
-from . import adoption, asset_universe, batch, messages, referral, referral_client, wizard
+from . import adoption, asset_universe, batch, keyboards, messages, referral, referral_client, wizard
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
 from .db import Database, PER_USER_WATCHLIST_CAP
@@ -1148,8 +1148,10 @@ def register_handlers(app: Application, db: Database) -> None:
             # TG-START-COPY-TRIM-W1: the welcome carries an <a> "Upgrade" link →
             # send as HTML (body is fully HTML-escaped in messages.WELCOME_MESSAGE).
             reply = handle_start(db, chat_id, username, lang)
+            # TG-BUTTON-UX-W1 (C4): append the inline button menu (prose unchanged).
             await update.message.reply_text(
-                reply, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+                reply, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                reply_markup=keyboards.main_menu_kb(),
             )
         # TG-WATCH-ADOPTION-BROADCAST-W1 (R1): fire the one-time first-watch
         # nudge for a 0-engagement sub right after /start. Gated by the go-live
@@ -1253,6 +1255,41 @@ def register_handlers(app: Application, db: Database) -> None:
             db.set_referral_code(chat_id, ref_code)
         await _send_referral_card(update.message, code_data, lang)
         log_alert_event("tg_referral_shown", chat_id=chat_id, lang_code=lang)
+
+    async def _menu(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """TG-BUTTON-UX-W1 (C4): re-render the inline button menu on demand."""
+        if update.message is None:
+            return
+        await update.message.reply_text(
+            "📋 AlgoVault — tap to act:", reply_markup=keyboards.main_menu_kb()
+        )
+
+    async def _on_menu_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Main-menu buttons that map to existing handlers (Watch/Scan are the wizards'
+        OWN entry_points; Upgrade is a url button). mnu:regime/call need a coin → the
+        handler's no-arg usage reply guides the user to type it."""
+        q = update.callback_query
+        if q is None or q.data is None or q.from_user is None:
+            return
+        await q.answer()
+        u = q.from_user
+        cid, un, lg = u.id, u.username, u.language_code
+        _maybe_fire_first_command_event(db, cid)
+        action = q.data.split(":", 1)[1]
+        if action == "list":
+            text = handle_list(db, cid, un, lg)
+        elif action == "help":
+            text = handle_help(db, cid, un, lg)
+        elif action == "funding":
+            text = handle_funding(db, cid, un, lg, [])
+        elif action == "regime":
+            text = handle_regime(db, cid, un, lg, [])
+        elif action == "call":
+            text = handle_call(db, cid, un, lg, [])
+        else:
+            return
+        if isinstance(q.message, Message):
+            await q.message.reply_text(text, disable_web_page_preview=True)
 
     async def _notifications(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """REFERRAL-PARITY-NOTIFS-W1 / C2: toggle referral join/earnings notifications
@@ -1776,6 +1813,10 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("referral", _referral))
+    # TG-BUTTON-UX-W1 (C4): /menu re-renders the inline menu; the mnu:* router serves the
+    # menu buttons mapping to existing handlers (Watch/Scan are the wizards' own entry_points).
+    app.add_handler(CommandHandler("menu", _menu))
+    app.add_handler(CallbackQueryHandler(_on_menu_callback, pattern=r"^mnu:(regime|call|funding|list|help)$"))
     app.add_handler(CommandHandler("notifications", _notifications))
     # TG-BUTTON-UX-W1 (C2): the Watch wizard's ConversationHandler IS the /watch entry —
     # args → typed _watch (verbatim), no-args → tap wizard; also entered via mnu:watch (C4).
