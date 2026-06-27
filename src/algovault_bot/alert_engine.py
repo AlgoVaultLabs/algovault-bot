@@ -52,7 +52,12 @@ from .paywall import (
     should_fire_paywall_dm,
 )
 from . import referral_client  # REFERRAL-INPRODUCT-NUDGE-W1 / C2: wall referral link (fail-soft)
-from .quota import QuotaState, consume_quota, get_quota_state
+from .quota import (
+    QuotaState,
+    get_quota_state,
+    record_call_delivered,
+    record_regime_delivered,
+)
 from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
 
@@ -409,11 +414,11 @@ async def process_one_row(
                         # parity with signal-MCP, which meters get_market_regime.
                         # Only HOLD *trade calls* stay free. Paid-linked users are
                         # a no-op inside consume_quota (PAID_TIERS bypass).
-                        consume_quota(db, row.chat_id)
-                        # BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h
-                        # digest count. Recorded ONLY after _push returned True,
-                        # so failed-send rows don't inflate the 24h count.
-                        db.record_alert_fired(row.chat_id, "regime")
+                        # BOT-DIGEST-COUNT-ALL-CALLS-W1: ONE delivery seam —
+                        # alerts_fired INSERT + consume_quota together (recorded
+                        # only after _push returned True, so failed sends don't
+                        # inflate the 24h count). source='watch'.
+                        record_regime_delivered(db, row.chat_id, "watch")
                         if cta:
                             db.increment_total_ctas_shown(row.chat_id)
                         log_alert_event(
@@ -559,13 +564,12 @@ async def process_one_row(
                     )
                     caption = compose_caption(verdict_line, cta or None)
                     if await _push_photo(bot, row.chat_id, photo_bytes, caption, db=db):
-                        consume_quota(db, row.chat_id)
+                        # BOT-DIGEST-COUNT-ALL-CALLS-W1: ONE delivery seam (alerts_fired
+                        # INSERT + consume_quota), recorded only after _push_photo
+                        # returned True; quota-exhausted notices (handled above) are
+                        # operator UX nudges and are NOT recorded. source='watch'.
+                        record_call_delivered(db, row.chat_id, "watch")
                         db.increment_total_call_alerts(row.chat_id)
-                        # BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h
-                        # digest count. Recorded ONLY after _push_photo
-                        # returned True; quota-exhausted notices (handled above)
-                        # are operator UX nudges and are NOT recorded.
-                        db.record_alert_fired(row.chat_id, "call")
                         if cta:
                             db.increment_total_ctas_shown(row.chat_id)
                             # 24h-per-threshold throttle for the soft/urgent
@@ -949,7 +953,13 @@ async def process_scan_digests(
                     text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"])
                     ok = await _push(bot, chat_id, text, db)
                     if ok:
-                        consume_quota(db, chat_id, units=max(1, len(non_hold)))
+                        # BOT-DIGEST-COUNT-ALL-CALLS-W1: one recorder call per actionable
+                        # call delivered in this digest (alerts_fired + quota together).
+                        # K = len(non_hold) ≥ 1 here (all-HOLD rounds suppressed above), so
+                        # K×consume_quota(1) == the prior consume_quota(units=K) — quota
+                        # unchanged, but now every scanwatch call is logged for the digest.
+                        for _ in non_hold:
+                            record_call_delivered(db, chat_id, "scanwatch")
                         counts["scan_fired"] += 1
                     db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
     except McpError as e:

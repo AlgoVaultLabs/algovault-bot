@@ -135,6 +135,21 @@ DIGEST_LAST24H_MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS idx_alerts_fired_kind_at ON alerts_fired(kind, fired_at)",
 )
 
+# BOT-DIGEST-COUNT-ALL-CALLS-W1 (2026-06-25) — discriminate which delivery path wrote
+# each alerts_fired row so the daily digest can break out 📈 Calls by source (watch push
+# vs scanwatch digest vs on-demand scan). DEFAULT 'watch' backfills every historical row
+# to the only path that ever wrote alerts_fired before this wave — no separate UPDATE.
+# SQLite has no ADD COLUMN IF NOT EXISTS, so the shared _init_schema try/except (swallows
+# "duplicate column name") makes this idempotent on every init.
+DIGEST_SOURCE_MIGRATIONS = (
+    "ALTER TABLE alerts_fired ADD COLUMN source TEXT NOT NULL DEFAULT 'watch'",
+)
+
+# Allowed alerts_fired.source values (BOT-DIGEST-COUNT-ALL-CALLS-W1). 'watch'|'scanwatch'|
+# 'scan' are wired this wave; 'webhook'|'batch' are reserved for forward delivery paths
+# (webhook top:N, batch tools) so they record correctly the day they ship.
+ALLOWED_ALERT_SOURCES = frozenset({"watch", "scanwatch", "scan", "webhook", "batch"})
+
 # BOT-DIGEST-QUOTA-NOTICES-W1 (2026-06-15) — per-notice log for quota-exhausted
 # trade-call notices, so the daily digest + admin /stats can surface a rolling
 # 24h count of "BUY/SELL signals a watcher would have received but for the
@@ -329,6 +344,9 @@ class Database:
                 *REFERRAL_BONUS_MIGRATIONS,
                 # TG-REFERRAL-W1 C3 (2026-06-20): value-moment nudge throttle.
                 *REFERRAL_NUDGE_MIGRATIONS,
+                # BOT-DIGEST-COUNT-ALL-CALLS-W1 (2026-06-25): alerts_fired.source
+                # discriminator (runs after DIGEST_LAST24H_MIGRATIONS creates the table).
+                *DIGEST_SOURCE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1022,19 +1040,26 @@ class Database:
 
     # ── BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h digest ──
 
-    def record_alert_fired(self, chat_id: int, kind: str) -> None:
+    def record_alert_fired(self, chat_id: int, kind: str, source: str = "watch") -> None:
         """Record one successful Telegram alert delivery for the rolling-24h
-        digest count. Called from ``alert_engine._push`` /
-        ``_push_photo`` AFTER the Telegram API returns OK — failed sends are
-        not counted. ``kind`` ∈ {'regime', 'call'}; quota-exhausted notices
-        are operator UX nudges, not signal volume, so they are NOT recorded.
-        ``fired_at`` defaults to ``datetime('now')`` (UTC) at the DB layer."""
+        digest count. ``kind`` ∈ {'regime', 'call'}; ``source`` ∈
+        ALLOWED_ALERT_SOURCES discriminates the delivery path (watch push /
+        scanwatch digest / on-demand scan; webhook+batch reserved). Quota-
+        exhausted notices are operator UX nudges, not signal volume, so they are
+        NOT recorded. ``fired_at`` defaults to ``datetime('now')`` (UTC).
+        Prefer the ``quota.record_call_delivered`` / ``record_regime_delivered``
+        recorders (BOT-DIGEST-COUNT-ALL-CALLS-W1) so every delivery both logs
+        here AND meters quota from ONE seam — do not call this raw on a new path."""
         if kind not in ("regime", "call"):
             raise ValueError(f"alerts_fired.kind must be 'regime' or 'call', got {kind!r}")
+        if source not in ALLOWED_ALERT_SOURCES:
+            raise ValueError(
+                f"alerts_fired.source must be one of {sorted(ALLOWED_ALERT_SOURCES)}, got {source!r}"
+            )
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO alerts_fired(chat_id, kind) VALUES (?, ?)",
-                (chat_id, kind),
+                "INSERT INTO alerts_fired(chat_id, kind, source) VALUES (?, ?, ?)",
+                (chat_id, kind, source),
             )
 
     def count_alerts_fired_last_24h(self) -> tuple[int, int]:

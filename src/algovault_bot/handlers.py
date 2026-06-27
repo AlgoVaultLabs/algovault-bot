@@ -46,7 +46,7 @@ from .validators import (
     normalize_exchange,
     normalize_timeframe,
 )
-from .quota import consume_quota, get_quota_state
+from .quota import consume_quota, get_quota_state, record_call_delivered
 from .scan_digest import cadence_for_timeframe, is_valid_cadence, scan_digest_reminder
 
 log = logging.getLogger(__name__)
@@ -404,7 +404,14 @@ def handle_scan(
         return "⚠️ The scanner is temporarily unavailable — please try again shortly."
     calls = result.get("calls") or []
     non_hold = sum(1 for c in calls if c.get("call") not in (None, "HOLD"))
-    consume_quota(db, chat_id, units=max(1, non_hold))
+    # BOT-DIGEST-COUNT-ALL-CALLS-W1: record + meter one per actionable call returned
+    # (alerts_fired + quota via the shared recorder) so /scan calls show in the digest.
+    # K≥1 → K units == the prior max(1, K). An all-HOLD scan (K=0) delivers no call to
+    # record but still charges the 1-unit request floor (unchanged /scan billing).
+    for _ in range(non_hold):
+        record_call_delivered(db, chat_id, "scan")
+    if non_hold == 0:
+        consume_quota(db, chat_id)
     return _format_scan_reply(result, top_n, timeframe, exchange)
 
 

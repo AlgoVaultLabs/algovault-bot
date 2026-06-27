@@ -60,7 +60,19 @@ def render_digest(db: Database) -> str:
         )
         kind_counts = {row[0]: int(row[1]) for row in cur.fetchall()}
         regime_24h = kind_counts.get("regime", 0)
-        calls_24h = kind_counts.get("call", 0)
+        # BOT-DIGEST-COUNT-ALL-CALLS-W1: break 📈 Calls out by delivery source so a
+        # silently-zeroed path is visible at a glance (the bug this fixed: scanwatch +
+        # scan delivered calls but never logged → Calls undercounted). C = w + sw + sc.
+        cur.execute(
+            "SELECT source, COUNT(*) FROM alerts_fired "
+            "WHERE kind='call' AND fired_at >= datetime('now', '-1 day') "
+            "GROUP BY source"
+        )
+        src_counts = {row[0]: int(row[1]) for row in cur.fetchall()}
+        calls_watch = src_counts.get("watch", 0)
+        calls_scanwatch = src_counts.get("scanwatch", 0)
+        calls_scan = src_counts.get("scan", 0)
+        calls_24h = calls_watch + calls_scanwatch + calls_scan
 
         # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: exclude watchlist rows owned
         # by bot-blocked subscribers — they can never receive an alert, so
@@ -99,7 +111,8 @@ def render_digest(db: Database) -> str:
         "",
         "Last 24h Alerts:",
         f"  📊 Regime: {regime_24h}",
-        f"  📈 Calls: {calls_24h}",
+        f"  📈 Calls: {calls_24h}  "
+        f"(👁 Watch {calls_watch} · 🔭 Scanwatch {calls_scanwatch} · 🔎 Scan {calls_scan})",
         f"  🔒 Quota-exhausted notices: {quota_notices_24h}",
         "",
     ])

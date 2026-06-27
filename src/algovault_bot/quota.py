@@ -217,3 +217,29 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
         new_used / FREE_TIER_MONTHLY_QUOTA,
         referral_bonus_remaining=new_bonus,
     )
+
+
+# ── BOT-DIGEST-COUNT-ALL-CALLS-W1: the single delivery seam ──────────────────
+# Every bot delivery path routes one actionable item through one of these recorders,
+# which BOTH log the row for the digest AND meter quota — so alerts_fired can never
+# again drift from the quota meter (the bug this wave fixes: scanwatch + scan charged
+# quota but never wrote alerts_fired, so the digest undercounted). Future delivery
+# paths (webhook top:N, batch tools) inherit correct telemetry by calling these.
+
+
+def record_call_delivered(db: Database, chat_id: int, source: str) -> None:
+    """Record + meter ONE delivered actionable trade call. ``alerts_fired`` INSERT
+    ALWAYS (even paid tiers — the digest is delivery volume, not billing); quota
+    ``consume_quota`` is a no-op for paid tiers. Call exactly once per non-HOLD call
+    delivered (HOLD verdicts stay silent + free and never reach here). ``source`` ∈
+    {'watch','scanwatch','scan',...} per ALLOWED_ALERT_SOURCES."""
+    db.record_alert_fired(chat_id, "call", source)
+    consume_quota(db, chat_id)
+
+
+def record_regime_delivered(db: Database, chat_id: int, source: str) -> None:
+    """Record + meter ONE delivered regime-shift alert — same insert+meter contract
+    as ``record_call_delivered`` (regime alerts count toward quota since
+    QUOTA-CONSISTENCY-COUNT-ALL-W1). Bot regime pushes are ``source='watch'``."""
+    db.record_alert_fired(chat_id, "regime", source)
+    consume_quota(db, chat_id)
