@@ -47,6 +47,7 @@ from .validators import (
     normalize_timeframe,
 )
 from .quota import consume_quota, get_quota_state, record_call_delivered
+from .capabilities import rank_label, rank_lens_help, recognized_rank_tokens
 from .scan_digest import cadence_for_timeframe, is_valid_cadence, scan_digest_reminder
 
 log = logging.getLogger(__name__)
@@ -323,26 +324,31 @@ DEFAULT_SCAN_TOP_N = 20
 DEFAULT_SCAN_TF = "15m"
 
 
-def _scan_via_mcp_impl(top_n: int, timeframe: str, exchange: str) -> dict:
-    """Real scan call — fires scan_trade_calls over the internal-bypass MCP edge."""
+def _scan_via_mcp_impl(top_n: int, timeframe: str, exchange: str, rank_by: str | None = None) -> dict:
+    """Real scan call — fires scan_trade_calls over the internal-bypass MCP edge. The RAW
+    rank token is forwarded as `rankBy` (the MCP resolves the alias); omitted ⇒ default oi
+    (byte-identical to the historical /scan call)."""
+    payload: dict = {"topN": top_n, "timeframe": timeframe, "exchange": exchange}
+    if rank_by is not None:
+        payload["rankBy"] = rank_by
     with from_env() as cli:
-        return cli.call_tool(
-            "scan_trade_calls",
-            {"topN": top_n, "timeframe": timeframe, "exchange": exchange},
-        )
+        return cli.call_tool("scan_trade_calls", payload)
 
 
 # Test seam (mirrors _validate_symbol): tests monkeypatch THIS alias to return a
 # fixture result without a live MCP server.
-def _scan_via_mcp(top_n: int, timeframe: str, exchange: str) -> dict:
-    return _scan_via_mcp_impl(top_n, timeframe, exchange)
+def _scan_via_mcp(top_n: int, timeframe: str, exchange: str, rank_by: str | None = None) -> dict:
+    return _scan_via_mcp_impl(top_n, timeframe, exchange, rank_by)
 
 
-def _parse_scan_args(args: list[str]) -> tuple[int, str, str]:
-    """Tolerant positional parse of [TOP_N] [TIMEFRAME] [EXCHANGE] (any order). The
-    scanner ranks the top-N perps by OI — it takes no coin list (use /watch for
-    specific coins). Raises ValidationError on an unrecognized token."""
+def _parse_scan_args(args: list[str]) -> tuple[int, str, str, str | None]:
+    """Tolerant positional parse of [RANK] [TOP_N] [TIMEFRAME] [EXCHANGE] (any order).
+    The scanner ranks the top-N perps by the chosen lens (default OI) — it takes no coin
+    list (use /watch for specific coins). A RANK token is recognized against the
+    /capabilities-advertised set and forwarded RAW (the MCP resolves the alias). Raises
+    ValidationError on an unrecognized token (lens tokens are disjoint from TF/EXCHANGE/digits)."""
     top_n, timeframe, exchange = DEFAULT_SCAN_TOP_N, DEFAULT_SCAN_TF, DEFAULT_EXCHANGE
+    rank: str | None = None
     for raw in args:
         tok = raw.strip()
         if tok.isdigit():
@@ -354,22 +360,43 @@ def _parse_scan_args(args: list[str]) -> tuple[int, str, str]:
             timeframe = tok.lower()
         elif tok.upper() in EXCHANGES:
             exchange = tok.upper()
+        elif tok.lower() in recognized_rank_tokens():
+            rank = tok.lower()
         else:
-            raise ValidationError(f"unrecognized argument {raw!r}")
-    return top_n, timeframe, exchange
+            raise ValidationError(f"unrecognized argument {raw!r}. {rank_lens_help()}")
+    return top_n, timeframe, exchange, rank
 
 
-def _format_scan_reply(result: dict, top_n: int, timeframe: str, exchange: str) -> str:
+def _rank_metric_suffix(call: dict) -> str:
+    """Trailing ' · <metric>' echoing the MCP's per-call rank value (non-oi lens only;
+    oi calls carry no rank fields → empty → byte-identical line)."""
+    if call.get("change_24h_pct") is not None:
+        return f" · {call['change_24h_pct']:+.2f}%"
+    if call.get("funding_rate") is not None:
+        apr = call.get("funding_apr")
+        apr_s = f", {apr * 100:+.1f}% APR" if isinstance(apr, (int, float)) else ""
+        return f" · funding {call['funding_rate'] * 100:+.4f}%{apr_s}"
+    if call.get("volume_24h") is not None:
+        return f" · ${call['volume_24h'] / 1e6:,.1f}M vol"
+    return ""
+
+
+def _format_scan_reply(
+    result: dict, top_n: int, timeframe: str, exchange: str, rank: str | None = None
+) -> str:
     calls = result.get("calls") or []
     non_hold = [c for c in calls if c.get("call") not in (None, "HOLD")]
     scanned = result.get("scanned", 0)
-    header = f"🔍 Scan — top {top_n} perps by OI on {exchange} @ {timeframe}"
+    header = f"🔍 Scan — top {top_n} perps by {rank_label(rank)} on {exchange} @ {timeframe}"
     if not non_hold:
         return f"{header}\n\nNo actionable BUY/SELL calls right now ({scanned} scanned)."
     lines = [f"{header} — {len(non_hold)} actionable:", ""]
     for c in non_hold:
         mark = "🟢" if c.get("call") == "BUY" else "🔴"
-        lines.append(f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}")
+        lines.append(
+            f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}"
+            f"{_rank_metric_suffix(c)}"
+        )
     return "\n".join(lines)
 
 
@@ -380,14 +407,15 @@ def handle_scan(
     user's monthly quota (HOLD-only scan = 1; paid tiers = no-op via consume_quota)."""
     db.upsert_subscriber(chat_id, username, lang_code)
     try:
-        top_n, timeframe, exchange = _parse_scan_args(list(args))
+        top_n, timeframe, exchange, rank = _parse_scan_args(list(args))
     except ValidationError as e:
         return (
-            "Usage: /scan [TOP_N] [TF] [EXCH]\n"
-            "Ranks the top-N perps by open interest for actionable (BUY/SELL) calls.\n"
-            "  /scan            — top 20 on BINANCE @ 15m\n"
-            "  /scan 25 1h      — top 25 @ 1h\n"
-            "  /scan 1h BYBIT   — top 20 on BYBIT @ 1h\n"
+            "Usage: /scan [RANK] [TOP_N] [TF] [EXCH]\n"
+            "Ranks the top-N perps by the chosen lens for actionable (BUY/SELL) calls.\n"
+            "  /scan            — top 20 by OI on BINANCE @ 15m\n"
+            "  /scan nfr 20     — most-negative funding (crowded shorts)\n"
+            "  /scan gain 1h    — top 24h gainers @ 1h\n"
+            f"{rank_lens_help()}\n"
             "(For specific coins use /watch — the scanner takes no coin list.)\n"
             f"↳ {e}"
         )
@@ -398,7 +426,7 @@ def handle_scan(
             f"Upgrade for more: {messages.signup_url('scan_quota_exhausted')}"
         )
     try:
-        result = _scan_via_mcp(top_n, timeframe, exchange)
+        result = _scan_via_mcp(top_n, timeframe, exchange, rank)
     except McpError as e:
         log.warning(json.dumps({"event": "scan_mcp_failed", "err": str(e)[:200]}))
         return "⚠️ The scanner is temporarily unavailable — please try again shortly."
@@ -412,7 +440,7 @@ def handle_scan(
         record_call_delivered(db, chat_id, "scan")
     if non_hold == 0:
         consume_quota(db, chat_id)
-    return _format_scan_reply(result, top_n, timeframe, exchange)
+    return _format_scan_reply(result, top_n, timeframe, exchange, rank)
 
 
 # ── ON-DEMAND PER-COIN PULLS — /regime + /call ───────────────────────
@@ -689,11 +717,14 @@ def handle_funding(
 # ── FEATURE-PARITY-CHANNELS-W1 CH4 — /scanwatch (scheduled scan digest → chat) ──
 
 
-def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str]:
-    """Positional-ish [TOP_N] [TF] [EXCHANGE] [CADENCE]. Cadence values (1h/4h/1d)
-    are also valid timeframes, so the FIRST time-token is the TF and the SECOND is
-    the cadence. Cadence defaults to cadence_for_timeframe(tf) when omitted."""
+def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str, str | None]:
+    """Positional-ish [RANK] [TOP_N] [TF] [EXCHANGE] [CADENCE]. Cadence values (1h/4h/1d)
+    are also valid timeframes, so the FIRST time-token is the TF and the SECOND is the
+    cadence. A RANK token (lens, forwarded raw) is recognized against the /capabilities
+    set — disjoint from TF/cadence/exchange/digits. Cadence defaults to
+    cadence_for_timeframe(tf); rank defaults None (→ 'oi')."""
     top_n, timeframe, exchange, cadence = DEFAULT_SCAN_TOP_N, DEFAULT_SCAN_TF, DEFAULT_EXCHANGE, None
+    rank: str | None = None
     seen_tf = False
     for raw in args:
         tok = raw.strip()
@@ -712,21 +743,24 @@ def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str]:
                 cadence = tok.lower()
             else:
                 raise ValidationError(f"cadence must be one of 1h/4h/1d, got {raw!r}")
+        elif tok.lower() in recognized_rank_tokens():
+            rank = tok.lower()
         else:
-            raise ValidationError(f"unrecognized argument {raw!r}")
+            raise ValidationError(f"unrecognized argument {raw!r}. {rank_lens_help()}")
     if cadence is None:
         cadence = cadence_for_timeframe(timeframe)
-    return top_n, timeframe, exchange, cadence
+    return top_n, timeframe, exchange, cadence, rank
 
 
 def _scanwatch_usage(err: object) -> str:
     return (
-        "Usage: /scanwatch [TOP_N] [TF] [EXCH]\n"
+        "Usage: /scanwatch [RANK] [TOP_N] [TF] [EXCH]\n"
         "Schedules a recurring whole-market scan digest pushed to this chat.\n"
-        "  /scanwatch              — top 20 on BINANCE @ 15m, every 1h\n"
-        "  /scanwatch 25 1h        — top 25 @ 1h, cadence auto (1h)\n"
+        "  /scanwatch              — top 20 by OI on BINANCE @ 15m, every 1h\n"
+        "  /scanwatch nfr 4h       — most-negative funding @ 4h (crowded shorts)\n"
         "  /scanwatch 4h 1d BYBIT  — top 20 @ 4h on BYBIT, every 1d\n"
         "Cadence ∈ {1h, 4h, 1d}; defaults from your timeframe (floor 1h).\n"
+        f"{rank_lens_help()}\n"
         f"↳ {err}"
     )
 
@@ -737,10 +771,11 @@ def handle_scanwatch(
     """Create/update a scheduled scan-digest subscription (the alert-engine cron pushes it)."""
     db.upsert_subscriber(chat_id, username, lang_code)
     try:
-        top_n, timeframe, exchange, cadence = _parse_scanwatch_args(list(args))
+        top_n, timeframe, exchange, cadence, rank = _parse_scanwatch_args(list(args))
     except ValidationError as e:
         return _scanwatch_usage(e)
-    inserted = db.add_scan_watch(chat_id, top_n, timeframe, exchange, cadence)
+    rank_by = rank or "oi"
+    inserted = db.add_scan_watch(chat_id, top_n, timeframe, exchange, cadence, rank_by)
     if inserted:
         # TG-WATCH-ADOPTION-BROADCAST-W1 (R4): instrument typed `/scanwatch`.
         adoption.emit_scan_watch_created(
@@ -752,6 +787,9 @@ def handle_scanwatch(
     card = messages.format_subscription_confirmation(
         "scanwatch", top_n=top_n, tf=timeframe, exchange=exchange, cadence=cadence
     )
+    # SCAN-RANKBY-W1: surface the lens on the confirmation when it's not the default oi.
+    if rank_by != "oi":
+        card = f"{card}\nLens: {rank_label(rank_by)}."
     reminder = scan_digest_reminder(cadence, timeframe)
     return f"{card}\n{reminder}" if reminder else card
 
@@ -762,13 +800,15 @@ def handle_unscanwatch(
     """Remove a scheduled scan-digest subscription (matched by TOP_N/TF/EXCHANGE)."""
     db.upsert_subscriber(chat_id, username, lang_code)
     try:
-        top_n, timeframe, exchange, _ = _parse_scanwatch_args(list(args))
+        top_n, timeframe, exchange, _, rank = _parse_scanwatch_args(list(args))
     except ValidationError as e:
         return _scanwatch_usage(e)
-    removed = db.remove_scan_watch(chat_id, top_n, timeframe, exchange)
+    rank_by = rank or "oi"
+    removed = db.remove_scan_watch(chat_id, top_n, timeframe, exchange, rank_by)
+    lens = "" if rank_by == "oi" else f" [{rank_label(rank_by)}]"
     if removed:
-        return f"Removed scan digest — top {top_n} on {exchange} @ {timeframe}."
-    return f"No scan digest found for top {top_n} on {exchange} @ {timeframe}. See /list."
+        return f"Removed scan digest — top {top_n} on {exchange} @ {timeframe}{lens}."
+    return f"No scan digest found for top {top_n} on {exchange} @ {timeframe}{lens}. See /list."
 
 
 def _format_scan_watch_section(scan_rows: list) -> str:

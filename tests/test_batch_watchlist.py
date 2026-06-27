@@ -288,7 +288,7 @@ def test_start_copy_trimmed_with_upgrade_link() -> None:
     assert "/watch &lt;COIN&gt; &lt;TF&gt; &lt;Exch&gt; [regime|calls|both]" in w
     assert "Example: ETH 15m Bybit regime / BTC All Binance" in w
     # BOT-ONDEMAND-CMDS-W1: one-shot pulls surfaced in /start.
-    assert "/scan [TOP_N] [TF] [EXCH]" in w
+    assert "/scan [RANK] [TOP_N] [TF] [EXCH]" in w
     assert "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]" in w
     assert "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]" in w
     assert "/list" in w

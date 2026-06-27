@@ -256,7 +256,11 @@ NPM_UNLOCK_MIGRATIONS = (
 # the TG-bot twin of the webhook scan_digest. One row per (chat, top_n, tf, exchange)
 # scan filter; `cadence` is timeframe-derived by default (floor 1h); `last_fired_bucket`
 # is the epoch of the last cadence bucket pushed → at most one digest per bucket.
-SCAN_WATCHES_TABLE_MIGRATIONS = (
+# SCAN-RANKBY-W1 (2026-06-27): `rank_by` is part of the watch IDENTITY — a chat can
+# hold both an `oi` and an `nfr` standing scan for the same (top_n,tf,exchange), so it
+# joins the PRIMARY KEY. Fresh DBs get this shape directly; EXISTING DBs are migrated
+# by the row-preserving table-recreate in `_migrate_scan_watches_rank_by` (idempotent).
+SCAN_WATCHES_CREATE_SQL = (
     "CREATE TABLE IF NOT EXISTS scan_watches ("
     "  chat_id           INTEGER NOT NULL,"
     "  top_n             INTEGER NOT NULL DEFAULT 20,"
@@ -265,9 +269,13 @@ SCAN_WATCHES_TABLE_MIGRATIONS = (
     "  cadence           TEXT NOT NULL DEFAULT '1h' CHECK (cadence IN ('1h','4h','1d')),"
     "  last_fired_bucket INTEGER NOT NULL DEFAULT 0,"
     "  added_at          TIMESTAMP NOT NULL DEFAULT (datetime('now')),"
-    "  PRIMARY KEY (chat_id, top_n, timeframe, exchange),"
+    "  rank_by           TEXT NOT NULL DEFAULT 'oi',"
+    "  PRIMARY KEY (chat_id, top_n, timeframe, exchange, rank_by),"
     "  FOREIGN KEY (chat_id) REFERENCES subscribers(chat_id) ON DELETE CASCADE"
-    ")",
+    ")"
+)
+SCAN_WATCHES_TABLE_MIGRATIONS = (
+    SCAN_WATCHES_CREATE_SQL,
     "CREATE INDEX IF NOT EXISTS idx_scan_watches_chat ON scan_watches(chat_id)",
 )
 
@@ -293,6 +301,55 @@ REFERRAL_BONUS_MIGRATIONS = (
 REFERRAL_NUDGE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN referral_nudge_last_at TIMESTAMP",
 )
+
+
+def _migrate_scan_watches_rank_by(cur: sqlite3.Cursor) -> None:
+    """SCAN-RANKBY-W1: widen the scan_watches PRIMARY KEY to include ``rank_by`` on an
+    EXISTING DB. SQLite can't ALTER a PK → recreate-and-copy. Guardrails (ratified):
+      • IDEMPOTENT — PRAGMA table_info pre-check; no-op when rank_by already present
+        (fresh DBs already have the new shape) or the table doesn't exist yet.
+      • BACKED UP — snapshot `scan_watches_backup_rankby` before any structural change.
+      • ATOMIC — the whole recreate runs in one BEGIN IMMEDIATE … COMMIT (ROLLBACK on error;
+        the connection is autocommit, so the transaction is explicit).
+      • ROW-PRESERVING — assert COUNT(*) pre == post; existing rows backfill rank_by='oi'
+        (byte-unchanged behavior for current subscribers).
+    quota.py / 100-mo / PAID_TIERS / units are untouched.
+    """
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(scan_watches)").fetchall()]
+    if not cols or "rank_by" in cols:
+        return  # table absent (CREATE handles it) OR already migrated → no-op
+    pre = cur.execute("SELECT COUNT(*) FROM scan_watches").fetchone()[0]
+    # Official SQLite recreate procedure: foreign_keys OFF for the duration (cannot toggle
+    # inside a txn), so an orphan row (chat_id not in subscribers — data drift) is PRESERVED
+    # rather than crashing boot. The new table still DECLARES the FK for future writes.
+    fk_was_on = bool(cur.execute("PRAGMA foreign_keys").fetchone()[0])
+    if fk_was_on:
+        cur.execute("PRAGMA foreign_keys=OFF")
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            cur.execute("DROP TABLE IF EXISTS scan_watches_backup_rankby")
+            cur.execute("CREATE TABLE scan_watches_backup_rankby AS SELECT * FROM scan_watches")
+            cur.execute("ALTER TABLE scan_watches RENAME TO scan_watches_pre_rankby")
+            cur.execute(SCAN_WATCHES_CREATE_SQL)
+            cur.execute(
+                "INSERT INTO scan_watches "
+                "(chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, added_at, rank_by) "
+                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, added_at, 'oi' "
+                "FROM scan_watches_pre_rankby"
+            )
+            post = cur.execute("SELECT COUNT(*) FROM scan_watches").fetchone()[0]
+            if post != pre:
+                raise RuntimeError(f"scan_watches rank_by migration row-count mismatch: pre={pre} post={post}")
+            cur.execute("DROP TABLE scan_watches_pre_rankby")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_watches_chat ON scan_watches(chat_id)")
+            cur.execute("COMMIT")
+        except Exception:
+            cur.execute("ROLLBACK")
+            raise
+    finally:
+        if fk_was_on:
+            cur.execute("PRAGMA foreign_keys=ON")
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -357,6 +414,9 @@ class Database:
                         and "already exists" not in msg
                     ):
                         raise
+            # SCAN-RANKBY-W1: widen scan_watches PK to include rank_by on EXISTING DBs.
+            # Row-preserving + atomic + backed-up; idempotent (no-op once rank_by present).
+            _migrate_scan_watches_rank_by(cur)
 
     def _enforce_mode_660(self) -> None:
         # Spec C2 line 180: state.db mode 660 owner algovault-bot:algovault-bot.
@@ -639,41 +699,46 @@ class Database:
     # ── FEATURE-PARITY-CHANNELS-W1 CH4 — scan_watches (scheduled scan-digest subs) ──
 
     def add_scan_watch(
-        self, chat_id: int, top_n: int, timeframe: str, exchange: str, cadence: str
+        self, chat_id: int, top_n: int, timeframe: str, exchange: str, cadence: str,
+        rank_by: str = "oi",
     ) -> bool:
-        """Insert a scan-digest subscription. Returns True on insert, False if it
-        already existed (updates the cadence in that case)."""
+        """Insert a scan-digest subscription. Returns True on insert, False if it already
+        existed (updates the cadence in that case). SCAN-RANKBY-W1: `rank_by` is part of
+        the watch identity (PK) — a chat can hold several lenses for one (top_n,tf,exchange);
+        omitted ⇒ 'oi' (back-compat for the wizard / showcase / typed-no-lens callers)."""
         with self._cursor() as cur:
             try:
                 cur.execute(
-                    "INSERT INTO scan_watches(chat_id, top_n, timeframe, exchange, cadence) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (chat_id, top_n, timeframe, exchange, cadence),
+                    "INSERT INTO scan_watches(chat_id, top_n, timeframe, exchange, cadence, rank_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (chat_id, top_n, timeframe, exchange, cadence, rank_by),
                 )
                 return True
             except sqlite3.IntegrityError as e:
                 if "UNIQUE" in str(e) or "PRIMARY KEY" in str(e):
                     cur.execute(
                         "UPDATE scan_watches SET cadence = ? "
-                        "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ?",
-                        (cadence, chat_id, top_n, timeframe, exchange),
+                        "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ? AND rank_by = ?",
+                        (cadence, chat_id, top_n, timeframe, exchange, rank_by),
                     )
                     return False
                 raise
 
-    def remove_scan_watch(self, chat_id: int, top_n: int, timeframe: str, exchange: str) -> bool:
+    def remove_scan_watch(
+        self, chat_id: int, top_n: int, timeframe: str, exchange: str, rank_by: str = "oi"
+    ) -> bool:
         with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM scan_watches "
-                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ?",
-                (chat_id, top_n, timeframe, exchange),
+                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ? AND rank_by = ?",
+                (chat_id, top_n, timeframe, exchange, rank_by),
             )
             return cur.rowcount > 0
 
     def list_scan_watches(self, chat_id: int) -> list[sqlite3.Row]:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, added_at "
+                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, added_at, rank_by "
                 "FROM scan_watches WHERE chat_id = ? ORDER BY added_at ASC",
                 (chat_id,),
             )
@@ -684,19 +749,20 @@ class Database:
         Python via cadence_bucket_epoch since the bucket period depends on per-row cadence)."""
         with self._cursor() as cur:
             cur.execute(
-                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket "
+                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, rank_by "
                 "FROM scan_watches ORDER BY chat_id ASC"
             )
             return list(cur.fetchall())
 
     def mark_scan_watch_fired(
-        self, chat_id: int, top_n: int, timeframe: str, exchange: str, bucket: int
+        self, chat_id: int, top_n: int, timeframe: str, exchange: str, bucket: int,
+        rank_by: str = "oi",
     ) -> None:
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE scan_watches SET last_fired_bucket = ? "
-                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ?",
-                (bucket, chat_id, top_n, timeframe, exchange),
+                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ? AND rank_by = ?",
+                (bucket, chat_id, top_n, timeframe, exchange, rank_by),
             )
 
     def list_due_watches(self, now_epoch_seconds: int, tf_seconds: dict[str, int]) -> list[sqlite3.Row]:

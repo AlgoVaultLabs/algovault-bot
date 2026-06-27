@@ -14,7 +14,7 @@ def test_welcome_message_consolidated_watch_line() -> None:
     assert "/watch &lt;COIN&gt; &lt;TF&gt; &lt;Exch&gt; [regime|calls|both]" in WELCOME_MESSAGE
     assert "Example: ETH 15m Bybit regime / BTC All Binance / XRP 5m All" in WELCOME_MESSAGE
     # BOT-ONDEMAND-CMDS-W1: /start now surfaces the one-shot pulls too.
-    assert "/scan [TOP_N] [TF] [EXCH]" in WELCOME_MESSAGE
+    assert "/scan [RANK] [TOP_N] [TF] [EXCH]" in WELCOME_MESSAGE
     assert "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]" in WELCOME_MESSAGE
     assert "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]" in WELCOME_MESSAGE
     assert "/funding [TOP_N]" in WELCOME_MESSAGE

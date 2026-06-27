@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -133,3 +134,86 @@ def derive_commands(caps: dict[str, Any]) -> set[str]:
         if s and s.get("kind") == "command":
             cmds.update(s.get("commands", []))
     return cmds
+
+
+# ── SCAN-RANKBY-W1: the scan_trade_calls rankBy lens set, DERIVED from /capabilities
+#    (the bot forwards the RAW token; the MCP resolves the alias). The bot never
+#    hardcodes the set — it reads the MCP advertisement, with the same 3-tier fail-open
+#    as the surface fetch. The Tier-3 fallback (the bot's own knowledge) keeps /scan +
+#    /scanwatch parsing working even if /capabilities + the snapshot are unavailable. ──
+_FALLBACK_RANK_LENSES: dict[str, Any] = {
+    "param": "rankBy",
+    "values": ["oi", "volume", "gainers", "losers", "movers", "funding_positive", "funding_negative"],
+    "aliases": {"oi": "oi", "vol": "volume", "gain": "gainers", "lose": "losers",
+                "move": "movers", "pfr": "funding_positive", "nfr": "funding_negative"},
+    "default": "oi",
+}
+_RANK_LENSES_TTL = 300.0
+_rank_lenses_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def derive_rank_lenses(caps: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract scan_trade_calls' advertised rankBy lens set, or None if not present."""
+    for t in caps.get("tools", []):
+        if isinstance(t, dict) and t.get("name") == "scan_trade_calls" and isinstance(t.get("lenses"), dict):
+            return t["lenses"]
+    return None
+
+
+def rank_lenses(*, force: bool = False) -> dict[str, Any]:
+    """Cached scan_trade_calls rankBy lens set {param, values, aliases, default},
+    derived from /capabilities (Tier 1/2) with a hardcoded Tier-3 fallback. Never empty."""
+    global _rank_lenses_cache
+    now = time.monotonic()
+    if not force and _rank_lenses_cache and now - _rank_lenses_cache[0] < _RANK_LENSES_TTL:
+        return _rank_lenses_cache[1]
+    lenses = derive_rank_lenses(fetch_capabilities())
+    if lenses is None or not lenses.get("values"):
+        log.warning(json.dumps({"event": "rank_lenses_using_hardcoded_fallback"}))
+        lenses = _FALLBACK_RANK_LENSES
+    _rank_lenses_cache = (now, lenses)
+    return lenses
+
+
+def _reset_rank_lenses_cache() -> None:
+    """Test seam — clear the rank-lenses cache between cases."""
+    global _rank_lenses_cache
+    _rank_lenses_cache = None
+
+
+def recognized_rank_tokens() -> set[str]:
+    """All accepted rankBy tokens (canonical values ∪ alias keys), lowercased — the set
+    the /scan + /scanwatch parsers use to RECOGNIZE a lens token (forwarded raw)."""
+    L = rank_lenses()
+    return {str(v).lower() for v in L.get("values", [])} | {str(a).lower() for a in L.get("aliases", {})}
+
+
+def rank_lens_help() -> str:
+    """A short, derived 'valid lenses' line for command help + the friendly error."""
+    L = rank_lenses()
+    vals = " ".join(str(v) for v in L.get("values", []))
+    return f"Lenses: {vals} (default {L.get('default', 'oi')}; aliases vol/gain/lose/move/pfr/nfr)."
+
+
+# Human DISPLAY labels for a lens (UX copy — the canonical SET is derived above; these
+# only label it). `oi` keeps the legacy "OI" string so default /scan + /scanwatch copy
+# stays byte-identical. Single source for both the /scan reply + the scan-digest header.
+RANK_LABELS: dict[str, str] = {
+    "oi": "OI",
+    "volume": "24h volume",
+    "gainers": "24h gainers",
+    "losers": "24h losers",
+    "movers": "24h movers",
+    "funding_positive": "funding (most positive)",
+    "funding_negative": "funding (most negative)",
+}
+
+
+def rank_label(token: str | None) -> str:
+    """Human display label for a RAW lens token. None/oi → 'OI' (byte-identical default);
+    a raw alias (nfr/pfr/…) resolves to its canonical label."""
+    if not token:
+        return "OI"
+    t = token.lower()
+    canonical = t if t in RANK_LABELS else rank_lenses().get("aliases", {}).get(t, t)
+    return RANK_LABELS.get(canonical, canonical)

@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 
 from . import fetch_budget
 from .alert_image import SeeAlsoCell, TradeCallView, render_trade_call_card
+from .capabilities import rank_label  # SCAN-RANKBY-W1: shared lens display label
 from .caption import compose_caption, format_verdict_caption_line
 from .cta import (
     quota_exhausted_message,
@@ -840,12 +841,14 @@ def _trim_reasoning(text: Any, max_len: int = 110) -> str:
 
 def _format_scan_digest_push(
     enriched: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str,
+    rank_by: str = "oi",
 ) -> str:
     """Enriched scan-digest body: per actionable verdict — call @ price · conviction ·
     regime, a drivers line, and a one-line 'why'. Only called with ≥1 actionable call
-    (all-HOLD rounds are suppressed upstream)."""
+    (all-HOLD rounds are suppressed upstream). SCAN-RANKBY-W1: the header reflects the
+    lens (oi ⇒ 'OI', byte-identical to the pre-wave digest)."""
     header = (
-        f"🚀Scan digest ({cadence}) — top {top_n} perps by OI on {exchange} @ {tf}"
+        f"🚀Scan digest ({cadence}) — top {top_n} perps by {rank_label(rank_by)} on {exchange} @ {tf}"
         f" — {len(enriched)} actionable:"
     )
     lines = [header, ""]
@@ -894,21 +897,26 @@ async def process_scan_digests(
     bot = Bot(token=token)
     cfg = McpClientConfig(url=mcp_url or "http://127.0.0.1:3000/mcp", internal_bypass_key=bypass_key)
 
-    groups: dict[tuple[int, str, str], list[Any]] = {}
+    # SCAN-RANKBY-W1: rank_by joins the group key — each lens scans + pushes + dedups
+    # independently (a chat's oi and nfr standing scans never collide on the bucket marker).
+    groups: dict[tuple[int, str, str, str], list[Any]] = {}
     for r in due:
-        groups.setdefault((r["top_n"], r["timeframe"], r["exchange"]), []).append(r)
+        groups.setdefault((r["top_n"], r["timeframe"], r["exchange"], r["rank_by"]), []).append(r)
 
     try:
         with McpClient(cfg) as mcp:
-            for (top_n, tf, exchange), grp in groups.items():
+            for (top_n, tf, exchange, rank_by), grp in groups.items():
                 try:
+                    # Forward the stored lens (the MCP resolves; 'oi' is byte-identical to
+                    # omitting → existing oi watches push the same digest as before).
                     result = mcp.call_tool(
-                        "scan_trade_calls", {"topN": top_n, "timeframe": tf, "exchange": exchange}
+                        "scan_trade_calls",
+                        {"topN": top_n, "timeframe": tf, "exchange": exchange, "rankBy": rank_by},
                     )
                 except McpError as e:
                     log.warning(json.dumps({
                         "event": "scan_digest_mcp_failed", "top_n": top_n,
-                        "tf": tf, "exchange": exchange, "err": str(e)[:200],
+                        "tf": tf, "exchange": exchange, "rank_by": rank_by, "err": str(e)[:200],
                     }))
                     counts["scan_errors"] += len(grp)
                     continue
@@ -924,7 +932,8 @@ async def process_scan_digests(
                     for r in grp:
                         counts["scan_skipped_empty"] += 1
                         db.mark_scan_watch_fired(
-                            r["chat_id"], top_n, tf, exchange, cadence_bucket_epoch(r["cadence"], now)
+                            r["chat_id"], top_n, tf, exchange,
+                            cadence_bucket_epoch(r["cadence"], now), rank_by,
                         )
                     continue
                 # Enrich each actionable coin with depth (price + top drivers + reasoning)
@@ -948,9 +957,9 @@ async def process_scan_digests(
                     # (one attempt per bucket; mirrors the webhook PAUSE; no re-scan storm).
                     if get_quota_state(db, chat_id).exhausted:
                         counts["scan_skipped_exhausted"] += 1
-                        db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
+                        db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
                         continue
-                    text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"])
+                    text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"], rank_by)
                     ok = await _push(bot, chat_id, text, db)
                     if ok:
                         # BOT-DIGEST-COUNT-ALL-CALLS-W1: one recorder call per actionable
@@ -961,7 +970,7 @@ async def process_scan_digests(
                         for _ in non_hold:
                             record_call_delivered(db, chat_id, "scanwatch")
                         counts["scan_fired"] += 1
-                    db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket)
+                    db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
     except McpError as e:
         log.error("scan-digest mcp client init failed: %s", e)
         counts["scan_errors"] += len(due)

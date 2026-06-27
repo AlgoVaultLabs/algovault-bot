@@ -40,21 +40,22 @@ def test_hold_only_or_empty_scan_charges_one(tmp_db, monkeypatch):
 def test_scan_passes_parsed_args_to_mcp(tmp_db, monkeypatch):
     captured: dict = {}
 
-    def fake(top_n, tf, exchange):
-        captured.update(top_n=top_n, tf=tf, exchange=exchange)
+    def fake(top_n, tf, exchange, rank=None):
+        captured.update(top_n=top_n, tf=tf, exchange=exchange, rank=rank)
         return _result(THREE)
 
     monkeypatch.setattr(handlers, "_scan_via_mcp", fake)
     handlers.handle_scan(tmp_db, 333, "u", "en", ["25", "1h", "BYBIT"])
-    assert captured == {"top_n": 25, "tf": "1h", "exchange": "BYBIT"}
+    # SCAN-RANKBY-W1: no rank token → rank None (byte-identical forwarding; MCP defaults oi).
+    assert captured == {"top_n": 25, "tf": "1h", "exchange": "BYBIT", "rank": None}
 
 
 def test_scan_defaults_when_no_args(tmp_db, monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(handlers, "_scan_via_mcp",
-                        lambda t, f, e: (captured.update(t=t, f=f, e=e), _result(THREE))[1])
+                        lambda t, f, e, r=None: (captured.update(t=t, f=f, e=e, r=r), _result(THREE))[1])
     handlers.handle_scan(tmp_db, 334, "u", "en", [])
-    assert captured == {"t": 20, "f": "15m", "e": "BINANCE"}
+    assert captured == {"t": 20, "f": "15m", "e": "BINANCE", "r": None}
 
 
 def test_paid_user_not_charged(tmp_db, monkeypatch):
