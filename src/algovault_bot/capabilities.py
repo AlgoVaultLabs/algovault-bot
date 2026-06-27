@@ -143,9 +143,11 @@ def derive_commands(caps: dict[str, Any]) -> set[str]:
 #    /scanwatch parsing working even if /capabilities + the snapshot are unavailable. ──
 _FALLBACK_RANK_LENSES: dict[str, Any] = {
     "param": "rankBy",
-    "values": ["oi", "volume", "gainers", "losers", "movers", "funding_positive", "funding_negative"],
+    "values": ["oi", "volume", "gainers", "losers", "movers", "funding_positive",
+               "funding_negative", "volatility"],  # SCAN-RANKBY-W2
     "aliases": {"oi": "oi", "vol": "volume", "gain": "gainers", "lose": "losers",
-                "move": "movers", "pfr": "funding_positive", "nfr": "funding_negative"},
+                "move": "movers", "pfr": "funding_positive", "nfr": "funding_negative",
+                "atr": "volatility"},  # SCAN-RANKBY-W2
     "default": "oi",
 }
 _RANK_LENSES_TTL = 300.0
@@ -206,6 +208,7 @@ RANK_LABELS: dict[str, str] = {
     "movers": "24h movers",
     "funding_positive": "funding (most positive)",
     "funding_negative": "funding (most negative)",
+    "volatility": "ATRP (volatility)",  # SCAN-RANKBY-W2
 }
 
 

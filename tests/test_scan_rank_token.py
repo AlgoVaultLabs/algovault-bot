@@ -175,3 +175,30 @@ def test_scanwatch_persists_rank(tmp_db):
     handlers.handle_scanwatch(tmp_db, 1, "u", "en", ["nfr", "4h"])
     rows = tmp_db.list_scan_watches(1)
     assert len(rows) == 1 and rows[0]["rank_by"] == "nfr"
+
+
+# ── SCAN-RANKBY-W2: the bot auto-inherits the `volatility`/`atr` lens via /capabilities ──
+
+def test_w2_atr_lens_recognized_and_forwarded(tmp_db, monkeypatch):
+    captured: dict = {}
+
+    def fake(top_n, tf, exchange, rank=None):
+        captured["rank"] = rank
+        return {"calls": []}
+
+    monkeypatch.setattr(handlers, "_scan_via_mcp", fake)
+    handlers.handle_scan(tmp_db, 1, "u", "en", ["atr", "20", "15m"])
+    assert captured["rank"] == "atr"  # forwarded RAW; the MCP resolves atr → volatility
+
+
+def test_w2_volatility_and_atr_in_derived_token_set():
+    toks = capabilities.recognized_rank_tokens()
+    assert "volatility" in toks and "atr" in toks
+    assert capabilities.rank_label("atr") == "ATRP (volatility)"
+
+
+def test_w2_scanwatch_persists_volatility(tmp_db):
+    tmp_db.upsert_subscriber(2, "u", "en")
+    handlers.handle_scanwatch(tmp_db, 2, "u", "en", ["atr", "1h"])
+    rows = tmp_db.list_scan_watches(2)
+    assert len(rows) == 1 and rows[0]["rank_by"] == "atr"  # raw token persisted; MCP resolves at fire
