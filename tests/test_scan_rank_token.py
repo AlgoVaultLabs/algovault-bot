@@ -202,3 +202,30 @@ def test_w2_scanwatch_persists_volatility(tmp_db):
     handlers.handle_scanwatch(tmp_db, 2, "u", "en", ["atr", "1h"])
     rows = tmp_db.list_scan_watches(2)
     assert len(rows) == 1 and rows[0]["rank_by"] == "atr"  # raw token persisted; MCP resolves at fire
+
+
+# ── SCAN-RANKBY-W3: the bot auto-inherits the `oi_change`/`oid` lens via /capabilities ──
+
+def test_w3_oid_lens_recognized_and_forwarded(tmp_db, monkeypatch):
+    captured: dict = {}
+
+    def fake(top_n, tf, exchange, rank=None):
+        captured["rank"] = rank
+        return {"calls": []}
+
+    monkeypatch.setattr(handlers, "_scan_via_mcp", fake)
+    handlers.handle_scan(tmp_db, 1, "u", "en", ["oid", "20", "15m"])
+    assert captured["rank"] == "oid"  # forwarded RAW; the MCP resolves oid → oi_change
+
+
+def test_w3_oi_change_and_oid_in_derived_token_set():
+    toks = capabilities.recognized_rank_tokens()
+    assert "oi_change" in toks and "oid" in toks
+    assert capabilities.rank_label("oid") == "OI change (24h)"
+
+
+def test_w3_scanwatch_persists_oid(tmp_db):
+    tmp_db.upsert_subscriber(3, "u", "en")
+    handlers.handle_scanwatch(tmp_db, 3, "u", "en", ["oid", "4h"])
+    rows = tmp_db.list_scan_watches(3)
+    assert len(rows) == 1 and rows[0]["rank_by"] == "oid"  # raw token persisted; MCP resolves at fire

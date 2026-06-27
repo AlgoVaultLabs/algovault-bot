@@ -144,10 +144,10 @@ def derive_commands(caps: dict[str, Any]) -> set[str]:
 _FALLBACK_RANK_LENSES: dict[str, Any] = {
     "param": "rankBy",
     "values": ["oi", "volume", "gainers", "losers", "movers", "funding_positive",
-               "funding_negative", "volatility"],  # SCAN-RANKBY-W2
+               "funding_negative", "volatility", "oi_change"],  # SCAN-RANKBY-W2 / W3
     "aliases": {"oi": "oi", "vol": "volume", "gain": "gainers", "lose": "losers",
                 "move": "movers", "pfr": "funding_positive", "nfr": "funding_negative",
-                "atr": "volatility"},  # SCAN-RANKBY-W2
+                "atr": "volatility", "oid": "oi_change"},  # SCAN-RANKBY-W2 / W3
     "default": "oi",
 }
 _RANK_LENSES_TTL = 300.0
@@ -209,6 +209,7 @@ RANK_LABELS: dict[str, str] = {
     "funding_positive": "funding (most positive)",
     "funding_negative": "funding (most negative)",
     "volatility": "ATRP (volatility)",  # SCAN-RANKBY-W2
+    "oi_change": "OI change (24h)",  # SCAN-RANKBY-W3
 }
 
 
