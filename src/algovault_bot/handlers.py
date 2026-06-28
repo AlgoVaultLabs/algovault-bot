@@ -48,7 +48,7 @@ from .validators import (
 )
 from .quota import consume_quota, get_quota_state, record_call_delivered
 from .capabilities import rank_label, rank_lens_help, recognized_rank_tokens
-from .scan_digest import cadence_for_timeframe, is_valid_cadence, scan_digest_reminder
+from .scan_digest import cadence_for_timeframe, is_valid_cadence, render_scan_digest_line, scan_digest_reminder
 
 log = logging.getLogger(__name__)
 
@@ -328,7 +328,9 @@ def _scan_via_mcp_impl(top_n: int, timeframe: str, exchange: str, rank_by: str |
     """Real scan call — fires scan_trade_calls over the internal-bypass MCP edge. The RAW
     rank token is forwarded as `rankBy` (the MCP resolves the alias); omitted ⇒ default oi
     (byte-identical to the historical /scan call)."""
-    payload: dict = {"topN": top_n, "timeframe": timeframe, "exchange": exchange}
+    # SCAN-DIGEST-MCP-PARITY-W1 CH3: /scan renders the enriched line (price + drivers +
+    # reasoning) from ONE enriched scan — no per-coin get_trade_call depth call.
+    payload: dict = {"topN": top_n, "timeframe": timeframe, "exchange": exchange, "includeReasoning": True}
     if rank_by is not None:
         payload["rankBy"] = rank_by
     with from_env() as cli:
@@ -367,20 +369,6 @@ def _parse_scan_args(args: list[str]) -> tuple[int, str, str, str | None]:
     return top_n, timeframe, exchange, rank
 
 
-def _rank_metric_suffix(call: dict) -> str:
-    """Trailing ' · <metric>' echoing the MCP's per-call rank value (non-oi lens only;
-    oi calls carry no rank fields → empty → byte-identical line)."""
-    if call.get("change_24h_pct") is not None:
-        return f" · {call['change_24h_pct']:+.2f}%"
-    if call.get("funding_rate") is not None:
-        apr = call.get("funding_apr")
-        apr_s = f", {apr * 100:+.1f}% APR" if isinstance(apr, (int, float)) else ""
-        return f" · funding {call['funding_rate'] * 100:+.4f}%{apr_s}"
-    if call.get("volume_24h") is not None:
-        return f" · ${call['volume_24h'] / 1e6:,.1f}M vol"
-    return ""
-
-
 def _format_scan_reply(
     result: dict, top_n: int, timeframe: str, exchange: str, rank: str | None = None
 ) -> str:
@@ -390,14 +378,12 @@ def _format_scan_reply(
     header = f"🔍 Scan — top {top_n} perps by {rank_label(rank)} on {exchange} @ {timeframe}"
     if not non_hold:
         return f"{header}\n\nNo actionable BUY/SELL calls right now ({scanned} scanned)."
-    lines = [f"{header} — {len(non_hold)} actionable:", ""]
-    for c in non_hold:
-        mark = "🟢" if c.get("call") == "BUY" else "🔴"
-        lines.append(
-            f"{mark} {c.get('coin')} — {c.get('call')} · conf {c.get('confidence')} · {c.get('regime')}"
-            f"{_rank_metric_suffix(c)}"
-        )
-    return "\n".join(lines)
+    # SCAN-DIGEST-MCP-PARITY-W1 CH3: render each actionable line via the ONE shared
+    # render_scan_digest_line (== the MCP renderScanDigestLine + the /scanwatch digest;
+    # single-derivation). The enriched scan carries price + drivers + reasoning per call;
+    # the rank lens still SELECTS the universe (rank_value rides in the structured payload).
+    blocks = [render_scan_digest_line(c) for c in non_hold]
+    return "\n\n".join([f"{header} — {len(non_hold)} actionable:", *blocks])
 
 
 def handle_scan(

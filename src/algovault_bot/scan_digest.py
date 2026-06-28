@@ -68,3 +68,90 @@ def scan_digest_reminder(cadence: str, timeframe: str) -> str:
         reps = repeats_per_timeframe(cadence, timeframe)
         msg += f" ⚠️ a {cadence} digest on a {timeframe} scan repeats the same calls ~{reps}× and charges each time."
     return msg
+
+
+# ── SCAN-DIGEST-MCP-PARITY-W1 CH3 — the per-call digest-line renderer ──────────
+# A faithful MIRROR of src/lib/scan-digest.ts::renderScanDigestLine. Both /scan and
+# /scanwatch (and the webhook, via the MCP) render each actionable call through
+# render_scan_digest_line (single-derivation); the CH4 canary pins it byte-identical
+# to the TS SoT. The factor mapping/arrows mirror the MCP enrichScanCall + receipts.
+
+# Short labels for the receipt factor names (the 📊 drivers line). Unknown factors
+# fall back to their raw name.
+_FACTOR_LABELS: dict[str, str] = {
+    "oi_change_pct": "OI",
+    "trend_persistence": "trend persistence",
+    "funding_state": "funding",
+    "funding_24h_avg": "funding",
+    "breakout_pending": "breakout",
+    "volume_24h": "vol",
+}
+_DIR_ARROW: dict[str, str] = {"bullish": " ↑", "bearish": " ↓"}  # neutral → no arrow
+
+
+def _fmt_price(p: object) -> str:
+    """≥1000 → no-decimal w/ comma; ≥1 → 2-decimal; <1 → 4-decimal stripped.
+    MIRRORS the MCP fmtScanPrice."""
+    try:
+        v = float(p)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if v >= 1000:
+        return f"{v:,.0f}"
+    if v >= 1:
+        return f"{v:,.2f}"
+    return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def _trim_reasoning(text: object, max_len: int = 110) -> str:
+    """First sentence of the engine reasoning, capped — MIRRORS the MCP trimReasoning."""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    first = text.strip().split(". ")[0].rstrip(".")
+    return first[: max_len - 1].rstrip() + "…" if len(first) > max_len else first
+
+
+def _render_drivers(factors: list[dict], oi_window: str | None = None) -> str:
+    """Top ≤3 factors → 'trend persistence HIGH · funding elevated ↑ · OI +10.0% (24h) ↑'.
+    SCAN-DIGEST-MCP-PARITY-W1 CH3: the OI driver carries its (window). MIRRORS the MCP
+    renderDrivers."""
+    parts: list[str] = []
+    for f in factors[:3]:
+        name = str(f.get("factor", ""))
+        label = _FACTOR_LABELS.get(name, name)
+        val = f.get("value", "")
+        if name in ("funding_state", "breakout_pending") and isinstance(val, str):
+            val = val.lower()
+        if name == "oi_change_pct" and oi_window:
+            val = f"{val} ({oi_window})"
+        arrow = _DIR_ARROW.get(str(f.get("direction", "")), "")
+        piece = f"{label} {val}{arrow}".strip()
+        if piece:
+            parts.append(piece)
+    return " · ".join(parts)
+
+
+def render_scan_digest_line(call: dict) -> str:
+    """ONE actionable scan call as the digest block — the SoT MIRRORED from the MCP
+    renderScanDigestLine (src/lib/scan-digest.ts); the CH4 canary pins them byte-identical:
+
+        🟢 CL — BUY @ $71.49 · 60% conviction · TRENDING_UP
+           📊 trend persistence HIGH · funding elevated ↑ · OI +10.0% (24h) ↑
+           💡 Trending regime, upward bias
+
+    🟢 BUY / 🔴 SELL. The 📊 line is omitted with no drivers, 💡 with no reasoning,
+    the price clause when price is absent."""
+    mark = "🟢" if call.get("call") == "BUY" else "🔴"
+    price = _fmt_price(call.get("price")) if call.get("price") is not None else ""
+    price_str = f" @ ${price}" if price else ""
+    lines = [
+        f"{mark} {call.get('coin')} — {call.get('call')}{price_str} · "
+        f"{call.get('confidence')}% conviction · {call.get('regime')}"
+    ]
+    drivers = _render_drivers(call.get("factors") or [], call.get("oi_change_window"))
+    if drivers:
+        lines.append(f"   📊 {drivers}")
+    why = _trim_reasoning(call.get("reasoning"))
+    if why:
+        lines.append(f"   💡 {why}")
+    return "\n".join(lines)

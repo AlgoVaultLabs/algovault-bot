@@ -773,101 +773,29 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     return counts
 
 
-# ── scan-digest verdict rendering (enriched via get_trade_call depth) ──────────
-# Short labels for the get_trade_call _receipts factor names (the digest "drivers"
-# line). Unknown factors fall back to their raw name.
-_FACTOR_LABELS = {
-    "oi_change_pct": "OI",
-    "trend_persistence": "trend persistence",
-    "funding_state": "funding",
-    "funding_24h_avg": "funding",
-    "breakout_pending": "breakout",
-    "volume_24h": "vol",
-}
-_DIR_ARROW = {"bullish": " ↑", "bearish": " ↓"}  # neutral → no arrow
-
-
-def _enrich_scan_call(scan_call: dict[str, Any], depth: dict[str, Any]) -> dict[str, Any]:
-    """Merge a breadth scan call (coin/call/confidence/regime) with its get_trade_call
-    depth (price + top factors + reasoning). Depth is best-effort — a failed depth call
-    leaves those fields absent and the verdict renders bare."""
-    receipts = depth.get("_receipts") or {}
-    return {
-        "coin": scan_call.get("coin"),
-        "call": scan_call.get("call"),
-        "confidence": scan_call.get("confidence"),
-        "regime": scan_call.get("regime") or depth.get("regime"),
-        "price": depth.get("price"),
-        "factors": receipts.get("factors") or [],
-        "reasoning": depth.get("reasoning"),
-    }
-
-
-def _fmt_price(p: Any) -> str:
-    try:
-        v = float(p)
-    except (TypeError, ValueError):
-        return ""
-    if v >= 1000:
-        return f"{v:,.0f}"
-    if v >= 1:
-        return f"{v:,.2f}"
-    return f"{v:.4f}".rstrip("0").rstrip(".")
-
-
-def _render_drivers(factors: list[dict[str, Any]]) -> str:
-    """Top ≤3 factors → 'OI +1.6% ↑ · trend persistence HIGH · funding normal'."""
-    parts: list[str] = []
-    for f in factors[:3]:
-        name = str(f.get("factor", ""))
-        label = _FACTOR_LABELS.get(name, name)
-        val = f.get("value", "")
-        if name in ("funding_state", "breakout_pending") and isinstance(val, str):
-            val = val.lower()
-        arrow = _DIR_ARROW.get(str(f.get("direction", "")), "")
-        piece = f"{label} {val}{arrow}".strip()
-        if piece:
-            parts.append(piece)
-    return " · ".join(parts)
-
-
-def _trim_reasoning(text: Any, max_len: int = 110) -> str:
-    """First sentence of the engine reasoning, capped — the one-line 'why'."""
-    if not isinstance(text, str) or not text.strip():
-        return ""
-    first = text.strip().split(". ")[0].rstrip(".")
-    return first[: max_len - 1].rstrip() + "…" if len(first) > max_len else first
+# ── scan-digest verdict rendering ─────────────────────────────────────────────
+# SCAN-DIGEST-MCP-PARITY-W1 CH3: the per-call digest line + its helpers (price/factor/
+# reasoning formatting) moved to scan_digest.render_scan_digest_line — the bot mirror of
+# the MCP renderScanDigestLine, ONE renderer shared by /scan + /scanwatch + (via the MCP)
+# the webhook (single-derivation; CH4 canary pins it byte-identical to the TS SoT). The
+# Python re-derivation — the per-coin get_trade_call depth merge (_enrich_scan_call) — is
+# RETIRED: the scan now returns the enriched calls directly (includeReasoning:true).
 
 
 def _format_scan_digest_push(
     enriched: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str,
     rank_by: str = "oi",
 ) -> str:
-    """Enriched scan-digest body: per actionable verdict — call @ price · conviction ·
-    regime, a drivers line, and a one-line 'why'. Only called with ≥1 actionable call
-    (all-HOLD rounds are suppressed upstream). SCAN-RANKBY-W1: the header reflects the
-    lens (oi ⇒ 'OI', byte-identical to the pre-wave digest)."""
+    """Enriched scan-digest body: a 🚀 header + render_scan_digest_line per actionable
+    call. Only called with ≥1 actionable call (all-HOLD rounds are suppressed upstream).
+    SCAN-RANKBY-W1: the header reflects the lens (oi ⇒ 'OI', byte-identical to pre-wave)."""
+    from .scan_digest import render_scan_digest_line
+
     header = (
         f"🚀Scan digest ({cadence}) — top {top_n} perps by {rank_label(rank_by)} on {exchange} @ {tf}"
         f" — {len(enriched)} actionable:"
     )
-    lines = [header, ""]
-    for c in enriched:
-        mark = "🟢" if c.get("call") == "BUY" else "🔴"
-        price = _fmt_price(c.get("price"))
-        price_str = f" @ ${price}" if price else ""
-        lines.append(
-            f"{mark} {c.get('coin')} — {c.get('call')}{price_str} · "
-            f"{c.get('confidence')}% conviction · {c.get('regime')}"
-        )
-        drivers = _render_drivers(c.get("factors") or [])
-        if drivers:
-            lines.append(f"   📊 {drivers}")
-        why = _trim_reasoning(c.get("reasoning"))
-        if why:
-            lines.append(f"   💡 {why}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+    return "\n\n".join([header, *(render_scan_digest_line(c) for c in enriched)])
 
 
 async def process_scan_digests(
@@ -911,7 +839,11 @@ async def process_scan_digests(
                     # omitting → existing oi watches push the same digest as before).
                     result = mcp.call_tool(
                         "scan_trade_calls",
-                        {"topN": top_n, "timeframe": tf, "exchange": exchange, "rankBy": rank_by},
+                        # SCAN-DIGEST-MCP-PARITY-W1 CH3: the enriched scan IS the digest — one
+                        # call returns price+factors+reasoning+oi_change_window per coin (retires
+                        # the per-coin get_trade_call depth re-derivation). Composes with the lens.
+                        {"topN": top_n, "timeframe": tf, "exchange": exchange,
+                         "rankBy": rank_by, "includeReasoning": True},
                     )
                 except McpError as e:
                     log.warning(json.dumps({
@@ -936,20 +868,10 @@ async def process_scan_digests(
                             cadence_bucket_epoch(r["cadence"], now), rank_by,
                         )
                     continue
-                # Enrich each actionable coin with depth (price + top drivers + reasoning)
-                # via get_trade_call — ONE call per actionable coin, computed ONCE for the
-                # whole group (internal-bypass; no user-quota cost). Fail-soft per coin: a
-                # depth-call error leaves that verdict bare (no price/drivers/why).
-                enriched: list[dict[str, Any]] = []
-                for c in non_hold:
-                    try:
-                        depth = mcp.call_tool(
-                            "get_trade_call",
-                            {"coin": c.get("coin"), "timeframe": tf, "exchange": exchange},
-                        )
-                    except McpError:
-                        depth = {}
-                    enriched.append(_enrich_scan_call(c, depth))
+                # SCAN-DIGEST-MCP-PARITY-W1 CH3: the scan calls are ALREADY enriched
+                # (price+factors+reasoning+oi_change_window via enrichScanCall) — NO per-coin
+                # get_trade_call depth call, NO Python re-derivation. Render straight from the
+                # scan payload (single-derivation LAW; the digest is computed once).
                 for r in grp:
                     chat_id = r["chat_id"]
                     bucket = cadence_bucket_epoch(r["cadence"], now)
@@ -959,7 +881,7 @@ async def process_scan_digests(
                         counts["scan_skipped_exhausted"] += 1
                         db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
                         continue
-                    text = _format_scan_digest_push(enriched, top_n, tf, exchange, r["cadence"], rank_by)
+                    text = _format_scan_digest_push(non_hold, top_n, tf, exchange, r["cadence"], rank_by)
                     ok = await _push(bot, chat_id, text, db)
                     if ok:
                         # BOT-DIGEST-COUNT-ALL-CALLS-W1: one recorder call per actionable

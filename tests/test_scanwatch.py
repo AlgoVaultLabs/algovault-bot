@@ -129,7 +129,9 @@ def test_producer_shares_one_scan_across_same_param_subs(tmp_db, monkeypatch):
     monkeypatch.setattr(alert_engine, "_push", fake_push)
     counts = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=1_700_003_600))
     assert seen["scan_trade_calls"] == 1  # ONE shared scan across both subs
-    assert seen.get("get_trade_call", 0) == len(THREE)  # depth enrich once per coin (group-level, shared)
+    # SCAN-DIGEST-MCP-PARITY-W1 CH3: the per-coin get_trade_call depth re-derivation is
+    # RETIRED — the enriched scan IS the digest, so ZERO get_trade_call calls (was len(THREE)).
+    assert seen.get("get_trade_call", 0) == 0
     assert counts["scan_fired"] == 2  # both chats pushed
 
 
@@ -179,32 +181,56 @@ def test_producer_all_hold_round_suppressed_no_push_no_charge(tmp_db, monkeypatc
     assert c3["scan_fired"] == 1 and len(pushed) == 1
 
 
-def test_producer_enriches_verdict_with_price_drivers_reasoning_proof(tmp_db, monkeypatch):
-    """Enriched + reasoning format: price, drivers, one-line why, LIVE proof line;
-    disclaimer + in-digest /unscanwatch hint removed."""
+class _ScanOnlyMcp:
+    """SCAN-DIGEST-MCP-PARITY-W1 CH3 strict mock: scan_trade_calls returns the enriched
+    result; get_trade_call MUST NOT be called (the per-coin depth re-derivation is retired)."""
+
+    def __init__(self, result: dict) -> None:
+        self._r = result
+        self.scan_args: dict | None = None
+
+    def __enter__(self) -> "_ScanOnlyMcp":
+        return self
+
+    def __exit__(self, *a) -> bool:
+        return False
+
+    def call_tool(self, name: str, args: dict) -> dict:
+        if name == "get_trade_call":
+            raise AssertionError("CH3: process_scan_digests must NOT call get_trade_call (re-derivation retired)")
+        self.scan_args = args
+        return self._r
+
+
+def test_producer_renders_from_the_enriched_scan_no_depth_call(tmp_db, monkeypatch):
+    """CH3: the scan IS the digest — price/drivers/reasoning come straight from the
+    enriched scan payload (includeReasoning:true), NO per-coin get_trade_call depth call.
+    OI driver carries its (window); proof/disclaimer/unscanwatch stay removed; metering
+    preserved (1 actionable → 1 unit)."""
+    enriched_call = {
+        "coin": "BTC", "timeframe": "15m", "exchange": "BINANCE", "call": "BUY",
+        "confidence": 80, "regime": "TRENDING_UP",
+        "price": 73.23,
+        "factors": [
+            {"factor": "oi_change_pct", "direction": "bullish", "value": "+1.6%"},
+            {"factor": "trend_persistence", "direction": "neutral", "value": "HIGH"},
+            {"factor": "funding_state", "direction": "neutral", "value": "NORMAL"},
+        ],
+        "reasoning": "Trending up, momentum building. Breakout pending.",
+        "oi_change_window": "24h",
+    }
     scan = {
-        **_result([THREE[0]]),  # 1 actionable: BTC BUY conf 80
+        **_result([enriched_call]),  # 1 actionable: BTC BUY conf 80 (already enriched)
         "_receipts": {
             "track_record": {"pfe_win_rate": 0.9165, "n": 259295},
             "verification_uri": "https://algovault.com/track-record",
         },
     }
-    depth = {
-        "price": 73.23,
-        "regime": "TRENDING_UP",
-        "reasoning": "Trending up, momentum building. Breakout pending.",
-        "_receipts": {
-            "factors": [
-                {"factor": "oi_change_pct", "direction": "bullish", "value": "+1.6%"},
-                {"factor": "trend_persistence", "direction": "neutral", "value": "HIGH"},
-                {"factor": "funding_state", "direction": "neutral", "value": "NORMAL"},
-            ]
-        },
-    }
     tmp_db.upsert_subscriber(444, "u", "en")
     tmp_db.add_scan_watch(444, 20, "15m", "BINANCE", "1h")
     pushed: list = []
-    monkeypatch.setattr(alert_engine, "McpClient", lambda cfg: _FakeMcp(scan, depth))
+    mcp = _ScanOnlyMcp(scan)
+    monkeypatch.setattr(alert_engine, "McpClient", lambda cfg: mcp)
     monkeypatch.setattr(alert_engine, "Bot", lambda token: object())
 
     async def fake_push(bot, chat_id, text, db=None):  # noqa: ANN001
@@ -215,12 +241,16 @@ def test_producer_enriches_verdict_with_price_drivers_reasoning_proof(tmp_db, mo
     counts = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=1_700_003_600))
 
     assert counts["scan_fired"] == 1
+    # CH3: the scan was requested ENRICHED (so calls[] carry the digest fields).
+    assert mcp.scan_args is not None and mcp.scan_args.get("includeReasoning") is True
     text = pushed[0][1]
     assert "BTC — BUY @ $73.23 · 80% conviction · TRENDING_UP" in text
-    assert "OI +1.6% ↑" in text  # drivers from get_trade_call _receipts.factors
+    assert "OI +1.6% (24h) ↑" in text  # drivers from the enriched scan payload (+ window)
     assert "trend persistence HIGH" in text and "funding normal" in text
     assert "💡 Trending up, momentum building" in text  # one-line why (first sentence)
-    assert text.startswith("🚀")  # rocket header (was 🔁)
-    assert "PFE win-rate" not in text and "track-record" not in text  # proof line removed
-    assert "Not financial advice" not in text  # disclaimer removed
-    assert "/unscanwatch" not in text  # in-digest management hint removed (now in /start + /help)
+    assert text.startswith("🚀")  # rocket header
+    assert "PFE win-rate" not in text and "track-record" not in text  # proof line stays removed
+    assert "Not financial advice" not in text  # disclaimer stays removed
+    assert "/unscanwatch" not in text  # in-digest management hint stays removed
+    # Metering preserved: 1 actionable call → 1 unit (no change from dropping depth calls).
+    assert get_quota_state(tmp_db, 444).used == 1
