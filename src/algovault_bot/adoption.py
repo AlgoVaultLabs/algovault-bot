@@ -32,6 +32,7 @@ from typing import Any, Callable
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .log_setup import log_alert_event
+from .scan_digest import render_scan_digest_line
 from .validators import DEFAULT_EXCHANGE, EXCHANGES
 
 log = logging.getLogger(__name__)
@@ -238,7 +239,14 @@ def _scan_one_venue(top_n: int, timeframe: str, exchange: str) -> dict[str, Any]
     with from_env() as cli:
         return cli.call_tool(
             "scan_trade_calls",
-            {"topN": top_n, "timeframe": timeframe, "exchange": exchange},
+            # OPS-SCAN-SHOWCASE-ENRICH-W1: includeReasoning enriches each call
+            # (price/factors/reasoning/oi_change_window via enrichScanCall) so the
+            # showcase renders the canonical digest line (render_scan_digest_line) —
+            # the SAME render /scan + /scanwatch use (single-derivation). No billing
+            # change: the showcase broadcast does not meter per call (zero-user-cost,
+            # digest-wave Q3c precedent).
+            {"topN": top_n, "timeframe": timeframe, "exchange": exchange,
+             "includeReasoning": True},
         )
 
 
@@ -288,18 +296,24 @@ def fetch_showcase_setups(
                 conf = float(c.get("confidence") or 0)
             except (TypeError, ValueError):
                 conf = 0.0
-            row = {
-                "coin": coin,
-                "call": call,
-                "confidence": conf,
-                "regime": c.get("regime"),
-                "exchange": venue,
-                "timeframe": timeframe,
-            }
+            # OPS-SCAN-SHOWCASE-ENRICH-W1: PRESERVE the enriched call as-is
+            # (price/factors/reasoning/oi_change_window from includeReasoning) so
+            # render_scan_showcase can project the canonical digest line byte-for-byte.
+            # We only normalize the coin/call keys + stamp the winning venue/timeframe;
+            # the raw confidence (int) is kept for render parity, `conf` (float) sorts.
+            row = dict(c)
+            row["coin"] = coin
+            row["call"] = call
+            row["exchange"] = venue
+            row["timeframe"] = timeframe
             prev = best_by_coin.get(coin)
-            if prev is None or conf > float(prev["confidence"]):
+            if prev is None or conf > float(prev.get("confidence") or 0):
                 best_by_coin[coin] = row
-    top3 = sorted(best_by_coin.values(), key=lambda r: r["confidence"], reverse=True)[:3]
+    top3 = sorted(
+        best_by_coin.values(),
+        key=lambda r: float(r.get("confidence") or 0),
+        reverse=True,
+    )[:3]
     return top3, asset_count, venue_count
 
 
@@ -307,20 +321,26 @@ def render_scan_showcase(
     top3: list[dict[str, Any]], asset_count: int, venue_count: int
 ) -> str | None:
     """Render the weekly scan-showcase body. Returns None when there are no
-    fresh setups → caller SUPPRESSES the broadcast (A3, anti-spam)."""
+    fresh setups → caller SUPPRESSES the broadcast (A3, anti-spam).
+
+    OPS-SCAN-SHOWCASE-ENRICH-W1: each setup renders through the canonical per-call
+    digest line (``render_scan_digest_line``) — the SAME function /scan + /scanwatch
+    project from — so the showcase can never fork the digest format (single-derivation;
+    the last bot render surface folded in). The showcase's own framing (header + live
+    counts + CTA) is PRESERVED; only the per-call lines unify on the enriched canonical
+    block. The winning-venue annotation drops (the canonical line carries no venue —
+    venue lives in the header's "across Y venues" count)."""
     if not top3:
         return None
-    lines = [
-        f"📡 This week I scanned {asset_count} assets across {venue_count} venues.",
-        "",
-        "Top fresh setups:",
-    ]
-    for s in top3:
-        mark = "🟢" if s["call"] == "BUY" else "🔴"
-        conf = int(round(float(s["confidence"])))
-        lines.append(f"{mark} {s['coin']} {s['call']} · {conf}% ({s['exchange']})")
-    lines.append("")
-    lines.append(
-        "Want this on your coins automatically? Set a standing scan: /scanwatch."
+    setups = "\n\n".join(render_scan_digest_line(s) for s in top3)
+    return "\n".join(
+        [
+            f"📡 This week I scanned {asset_count} assets across {venue_count} venues.",
+            "",
+            "Top fresh setups:",
+            "",
+            setups,
+            "",
+            "Want this on your coins automatically? Set a standing scan: /scanwatch.",
+        ]
     )
-    return "\n".join(lines)
