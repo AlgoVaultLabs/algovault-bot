@@ -7,6 +7,14 @@ the digest is operator-only.
 
 Reuses the existing internal-monitor edge per the system-map; the public
 bot stays scoped to public subscribers.
+
+OPS-DIGEST-TGBOT-METRIC-BRIDGE-W1 (2026-07-06): the digest's numbers are now
+computed ONCE into a ``DigestMetrics`` (``compute_digest_metrics``) that feeds
+BOTH the Telegram string (``render_digest``) AND a shared-Postgres
+``bot_daily_metrics`` upsert (``write_bot_daily_metrics``) — single-derivation,
+so the bot's own digest and the main 📊 AlgoVault Daily Digest's ``🔁 TG bot``
+line can never disagree. The Postgres write is FAIL-SOFT: it never raises and
+never blocks the bot's own digest send.
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -24,17 +33,35 @@ from .db import Database, DEFAULT_DB_PATH
 log = logging.getLogger("algovault_bot.digest")
 
 
-def render_digest(db: Database) -> str:
+@dataclass(frozen=True)
+class DigestMetrics:
+    """One-shot snapshot of the daily digest numbers. The SINGLE source both the
+    Telegram render and the shared-Postgres ``bot_daily_metrics`` row derive from."""
+
+    metric_date: str  # 'YYYY-MM-DD' UTC (digest run date; the 24h window ends at run time)
+    total_subs: int
+    new_subs_24h: int
+    blocked: int
+    regime_24h: int
+    calls_watch: int
+    calls_scanwatch: int
+    calls_scan: int
+    calls_24h: int  # = watch + scanwatch + scan
+    watch_total: int
+    quota_notices_24h: int
+    generated_at: str  # ISO-8601 UTC
+
+
+def compute_digest_metrics(db: Database) -> DigestMetrics:
+    """Run the digest queries ONCE. Verbatim from the pre-W1 ``render_digest`` body
+    (same SQL, same windows) so the bridged row == the bot's own digest numbers."""
     now = datetime.now(timezone.utc)
     day_ago = (now - timedelta(days=1)).isoformat()
 
     with db._cursor() as cur:
         # BOT-ZOMBIE-W1 2026-05-17: "Total" + "New 24h" both exclude
         # bot-blocked subscribers so the count reflects reachable users.
-        # The Blocked line surfaces only when at least one zombie exists.
-        cur.execute(
-            "SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NULL"
-        )
+        cur.execute("SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NULL")
         total_subs = int(cur.fetchone()[0])
         cur.execute(
             "SELECT COUNT(*) FROM subscribers "
@@ -42,17 +69,10 @@ def render_digest(db: Database) -> str:
             (day_ago,),
         )
         new_subs_24h = int(cur.fetchone()[0])
-        cur.execute(
-            "SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NOT NULL"
-        )
+        cur.execute("SELECT COUNT(*) FROM subscribers WHERE bot_blocked_at IS NOT NULL")
         blocked = int(cur.fetchone()[0])
 
-        # BOT-DIGEST-LAST24H-W1 2026-05-21: switched from
-        # SUM(total_regime_alerts) / SUM(total_call_alerts) lifetime counters
-        # to a rolling-24h count over the alerts_fired log so the digest
-        # answers "what happened yesterday" instead of "what happened since
-        # /opt/algovault-bot/ was first deployed". Lifetime totals still live
-        # in admin /stats under a separate "(all-time)" header.
+        # BOT-DIGEST-LAST24H-W1 2026-05-21: rolling-24h counts over the alerts_fired log.
         cur.execute(
             "SELECT kind, COUNT(*) FROM alerts_fired "
             "WHERE fired_at >= datetime('now', '-1 day') "
@@ -60,9 +80,7 @@ def render_digest(db: Database) -> str:
         )
         kind_counts = {row[0]: int(row[1]) for row in cur.fetchall()}
         regime_24h = kind_counts.get("regime", 0)
-        # BOT-DIGEST-COUNT-ALL-CALLS-W1: break 📈 Calls out by delivery source so a
-        # silently-zeroed path is visible at a glance (the bug this fixed: scanwatch +
-        # scan delivered calls but never logged → Calls undercounted). C = w + sw + sc.
+        # BOT-DIGEST-COUNT-ALL-CALLS-W1: 📈 Calls broken out by delivery source. C = w + sw + sc.
         cur.execute(
             "SELECT source, COUNT(*) FROM alerts_fired "
             "WHERE kind='call' AND fired_at >= datetime('now', '-1 day') "
@@ -74,10 +92,7 @@ def render_digest(db: Database) -> str:
         calls_scan = src_counts.get("scan", 0)
         calls_24h = calls_watch + calls_scanwatch + calls_scan
 
-        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: exclude watchlist rows owned
-        # by bot-blocked subscribers — they can never receive an alert, so
-        # counting them overstated reachable watchers. (watchlists.chat_id is
-        # FK→subscribers, so the JOIN never drops a real row.)
+        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: reachable watchers only.
         cur.execute(
             "SELECT COUNT(*) FROM watchlists w "
             "JOIN subscribers s ON s.chat_id = w.chat_id "
@@ -85,38 +100,154 @@ def render_digest(db: Database) -> str:
         )
         watch_total = int(cur.fetchone()[0])
 
-        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: rolling-24h count of
-        # quota-exhausted notices delivered (a watcher hit the 100/mo free
-        # cap). Surfaced so "Calls: 0" isn't misread as "quiet market" when
-        # really the only active watcher is quota-capped. Separate table from
-        # alerts_fired (UX-nudge volume, not signal volume).
+        # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: rolling-24h quota-exhausted notices.
         cur.execute(
             "SELECT COUNT(*) FROM quota_notices_fired "
             "WHERE fired_at >= datetime('now', '-1 day')"
         )
         quota_notices_24h = int(cur.fetchone()[0])
 
+    return DigestMetrics(
+        metric_date=now.strftime("%Y-%m-%d"),
+        total_subs=total_subs,
+        new_subs_24h=new_subs_24h,
+        blocked=blocked,
+        regime_24h=regime_24h,
+        calls_watch=calls_watch,
+        calls_scanwatch=calls_scanwatch,
+        calls_scan=calls_scan,
+        calls_24h=calls_24h,
+        watch_total=watch_total,
+        quota_notices_24h=quota_notices_24h,
+        generated_at=now.isoformat(),
+    )
+
+
+def _format_digest(m: DigestMetrics) -> str:
+    """Render the operator Telegram string from a computed snapshot (verbatim layout)."""
+    now_str = datetime.fromisoformat(m.generated_at).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        "🤖 Algovault-Telegram-bot — Daily Digest "
-        f"({now.strftime('%Y-%m-%d %H:%M UTC')})",
+        f"🤖 Algovault-Telegram-bot — Daily Digest ({now_str})",
         "",
-        f"👥 Total Subscribers: {total_subs}",
-        f"👥 New Subscribers last 24h: {new_subs_24h}",
+        f"👥 Total Subscribers: {m.total_subs}",
+        f"👥 New Subscribers last 24h: {m.new_subs_24h}",
     ]
-    if blocked > 0:
-        lines.append(f"🚫 Blocked the bot: {blocked}")
+    if m.blocked > 0:
+        lines.append(f"🚫 Blocked the bot: {m.blocked}")
     lines.extend([
         "",
-        f"📝 Watchlist entries: {watch_total}",
+        f"📝 Watchlist entries: {m.watch_total}",
         "",
         "Last 24h Alerts:",
-        f"  📊 Regime: {regime_24h}",
-        f"  📈 Calls: {calls_24h}  "
-        f"(👁 Watch {calls_watch} · 🔭 Scanwatch {calls_scanwatch} · 🔎 Scan {calls_scan})",
-        f"  🔒 Quota-exhausted notices: {quota_notices_24h}",
+        f"  📊 Regime: {m.regime_24h}",
+        f"  📈 Calls: {m.calls_24h}  "
+        f"(👁 Watch {m.calls_watch} · 🔭 Scanwatch {m.calls_scanwatch} · 🔎 Scan {m.calls_scan})",
+        f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}",
         "",
     ])
     return "\n".join(lines)
+
+
+def render_digest(db: Database) -> str:
+    """Operator digest string. Interface-preserved: derives from the ONE snapshot."""
+    return _format_digest(compute_digest_metrics(db))
+
+
+# ── OPS-DIGEST-TGBOT-METRIC-BRIDGE-W1: shared-Postgres bridge (Option A) ──────
+
+_BOT_METRICS_UPSERT_SQL = """
+INSERT INTO bot_daily_metrics
+  (metric_date, calls_total, calls_watch, calls_scanwatch, calls_scan,
+   alerts_regime, subscribers, new_subscribers_24h, blocked_subscribers,
+   watchlist_entries, quota_exhausted_notices, generated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+ON CONFLICT (metric_date) DO UPDATE SET
+  calls_total=EXCLUDED.calls_total,
+  calls_watch=EXCLUDED.calls_watch,
+  calls_scanwatch=EXCLUDED.calls_scanwatch,
+  calls_scan=EXCLUDED.calls_scan,
+  alerts_regime=EXCLUDED.alerts_regime,
+  subscribers=EXCLUDED.subscribers,
+  new_subscribers_24h=EXCLUDED.new_subscribers_24h,
+  blocked_subscribers=EXCLUDED.blocked_subscribers,
+  watchlist_entries=EXCLUDED.watchlist_entries,
+  quota_exhausted_notices=EXCLUDED.quota_exhausted_notices,
+  generated_at=EXCLUDED.generated_at
+""".strip()
+
+
+def _bot_metrics_upsert(m: DigestMetrics) -> tuple[str, tuple]:
+    """Build the (sql, params) upsert from the SAME snapshot the digest rendered.
+    Pure — no I/O — so a test can assert single-derivation (params == metrics)
+    without a live Postgres. Param order MUST match ``_BOT_METRICS_UPSERT_SQL``."""
+    params = (
+        m.metric_date,
+        m.calls_24h,
+        m.calls_watch,
+        m.calls_scanwatch,
+        m.calls_scan,
+        m.regime_24h,
+        m.total_subs,
+        m.new_subs_24h,
+        m.blocked,
+        m.watch_total,
+        m.quota_notices_24h,
+    )
+    return _BOT_METRICS_UPSERT_SQL, params
+
+
+def _redact(text: str, dsn: str) -> str:
+    """Scrub the DSN + its bare password from any log/error text (never leak creds —
+    a psycopg connection error can echo the DSN). Redacts by STRUCTURE, not prefix."""
+    if not text:
+        return text
+    out = text
+    if dsn and dsn in out:
+        out = out.replace(dsn, "<dsn-redacted>")
+    try:
+        from urllib.parse import urlparse
+
+        pw = urlparse(dsn).password or ""
+        if pw and pw in out:
+            out = out.replace(pw, "<redacted>")
+    except Exception:
+        pass
+    return out
+
+
+def write_bot_daily_metrics(m: DigestMetrics) -> None:
+    """UPSERT the daily snapshot into shared Postgres ``bot_daily_metrics`` (Option A).
+
+    Read by crypto-quant-signal-mcp ``monitor.ts`` for the main digest's ``🔁 TG bot``
+    line. FAIL-SOFT: a missing DSN or any write error logs + returns — it MUST NEVER
+    raise or block the bot's own digest send. Creds come from ``SIGNAL_PG_DSN`` in
+    ``/etc/algovault-bot/env`` (host-only, mode 600, never committed)."""
+    dsn = os.environ.get("SIGNAL_PG_DSN", "").strip()
+    if not dsn:
+        log.info("SIGNAL_PG_DSN unset; skipping bot_daily_metrics write (fail-soft)")
+        return
+    sql, params = _bot_metrics_upsert(m)
+    try:
+        import psycopg
+
+        # psycopg3 connection context manager commits on clean exit, rolls back on error.
+        with psycopg.connect(dsn, connect_timeout=10) as conn:
+            conn.execute(sql, params)
+        # Success-path log (load-bearing side-effect proof). No secrets.
+        log.info(
+            json.dumps({
+                "event": "bot_daily_metrics_written",
+                "metric_date": m.metric_date,
+                "calls_total": m.calls_24h,
+                "subscribers": m.total_subs,
+            })
+        )
+    except Exception as e:  # noqa: BLE001 — fail-soft; the digest must survive any PG failure
+        log.error(
+            "bot_daily_metrics write failed (fail-soft): %s: %s",
+            type(e).__name__,
+            _redact(str(e), dsn)[:200],
+        )
 
 
 def send_via_internal_monitor(text: str) -> None:
@@ -160,9 +291,13 @@ def main() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     db_path = os.environ.get("ALGOVAULT_BOT_DB_PATH", DEFAULT_DB_PATH)
     db = Database(db_path)
-    text = render_digest(db)
+    # Single-derivation: compute ONCE → render + send + bridge-write.
+    metrics = compute_digest_metrics(db)
+    text = _format_digest(metrics)
     log.info("digest_render: %s", text.replace("\n", " | "))
     send_via_internal_monitor(text)
+    # AFTER the bot's own digest send — fail-soft, never blocks it.
+    write_bot_daily_metrics(metrics)
 
 
 if __name__ == "__main__":
