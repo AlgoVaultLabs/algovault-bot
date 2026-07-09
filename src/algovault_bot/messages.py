@@ -80,8 +80,8 @@ HELP_MESSAGE: Final = (
     "   /scan                       → top 20 by open interest, Binance, 15m\n"
     "\n"
     "🔁 /scanwatch [lens] [how many] [timeframe] [exchange]\n"
-    "The scan, sent on a schedule (BUY/SELL only), checked hourly.\n"
-    "   /scanwatch                  → top 20 by open interest, Binance, 15m\n"
+    "The scan on repeat — I re-check on your chosen timeframe and message only new BUY/SELL calls.\n"
+    "   /scanwatch                  → top 20 by open interest, Binance, 15m (re-checked every 15m)\n"
     "\n"
     "Scan lenses (how to rank the top coins):\n"
     "   oi: most open interest (default)\n"
@@ -113,7 +113,9 @@ HELP_MESSAGE: Final = (
     "\n"
     "Free tier: 100 calls a month. Regime and BUY/SELL alerts each use one call. Silent HOLDs are free.\n"
     "Informational analytics, not financial advice.\n"
-    f"Upgrade → {signup_url('help_message')}"
+    # TG-SCANWATCH-TF-CADENCE-W1 (B): CTA lead-in → the inline Upgrade button renders below
+    # (attached as reply_markup by _help); the raw signup URL line is gone.
+    "Need more than 100 calls a month?"
 )
 
 
@@ -170,9 +172,10 @@ def format_subscription_confirmation(
             "Manage: /list · /unwatch"
         )
     if kind == "scanwatch":
+        # TG-SCANWATCH-TF-CADENCE-W1: cadence == the timeframe; content-deduped to new calls.
         return (
-            f"✅ Standing scan: top {top_n} · {tf} · {exch} (every {cadence})\n"
-            "🚀 You'll get a digest only on actionable BUY/SELL — HOLD rounds stay silent + free.\n"
+            f"✅ Standing scan: top {top_n} · {tf} · {exch}\n"
+            f"🔁 I'll re-check every {tf} and message only NEW BUY/SELL — repeats + HOLD rounds stay silent + free.\n"
             "📈 Actionable digests count toward your 100/mo. Manage: /list · /unscanwatch"
         )
     raise ValueError(f"unknown subscription kind: {kind!r}")

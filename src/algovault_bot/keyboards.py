@@ -57,9 +57,21 @@ def _nav_row(prefix: str, *, back: bool = True) -> list[InlineKeyboardButton]:
     return row
 
 
+def upgrade_button(campaign: str) -> InlineKeyboardButton:
+    """TG-SCANWATCH-TF-CADENCE-W1 (B): the shared Upgrade CTA button (label + utm-tagged
+    signup URL). /start's menu + /help both build from this → the CTA is single-derived.
+    `campaign` feeds signup_url's utm_campaign (start_welcome / help_message)."""
+    return InlineKeyboardButton("⬆️ Upgrade", url="https://" + signup_url(campaign))
+
+
+def upgrade_markup(campaign: str) -> InlineKeyboardMarkup:
+    """Standalone one-button Upgrade markup — /help attaches this as its reply_markup."""
+    return InlineKeyboardMarkup([[upgrade_button(campaign)]])
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     """The /start BotFather-style menu. Watch/Scan → wizards; others → existing
-    handlers; Upgrade → signup URL button (utm preserved via signup_url)."""
+    handlers; Upgrade → the shared upgrade_button (utm preserved via signup_url)."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 Watch", callback_data="mnu:watch"),
          InlineKeyboardButton("🔍 Scan", callback_data="mnu:scan")],
@@ -68,7 +80,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("💰 Funding", callback_data="mnu:funding")],
         [InlineKeyboardButton("📋 My list", callback_data="mnu:list"),
          InlineKeyboardButton("❓ Help", callback_data="mnu:help")],
-        [InlineKeyboardButton("⬆️ Upgrade", url="https://" + signup_url("start_welcome"))],
+        [upgrade_button("start_welcome")],
     ])
 
 

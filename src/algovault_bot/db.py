@@ -302,6 +302,15 @@ REFERRAL_NUDGE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN referral_nudge_last_at TIMESTAMP",
 )
 
+# TG-SCANWATCH-TF-CADENCE-W1 (2026-07-09): per-scanwatch "last-sent signature" for content
+# dedup — a stable hash of the last-delivered actionable (coin:call) set. NULL = never sent.
+# With TF-based re-scan cadence a persistent BUY would re-send each TF-bucket; comparing this
+# sig makes the digest fire ONLY on a NEW/changed set (all-HOLD resets it to ''). Additive
+# ADD COLUMN (no CHECK, no table-rebuild) — idempotent via the _init_schema try/except loop.
+SCANWATCH_SIG_MIGRATIONS = (
+    "ALTER TABLE scan_watches ADD COLUMN last_sent_sig TEXT",
+)
+
 
 def _migrate_scan_watches_rank_by(cur: sqlite3.Cursor) -> None:
     """SCAN-RANKBY-W1: widen the scan_watches PRIMARY KEY to include ``rank_by`` on an
@@ -417,6 +426,14 @@ class Database:
             # SCAN-RANKBY-W1: widen scan_watches PK to include rank_by on EXISTING DBs.
             # Row-preserving + atomic + backed-up; idempotent (no-op once rank_by present).
             _migrate_scan_watches_rank_by(cur)
+            # TG-SCANWATCH-TF-CADENCE-W1: add last_sent_sig AFTER the rank_by recreate so it
+            # lands on the FINAL table shape regardless of migration order. Idempotent.
+            for stmt in SCANWATCH_SIG_MIGRATIONS:
+                try:
+                    cur.execute(stmt)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e).lower():
+                        raise
 
     def _enforce_mode_660(self) -> None:
         # Spec C2 line 180: state.db mode 660 owner algovault-bot:algovault-bot.
@@ -745,25 +762,38 @@ class Database:
             return list(cur.fetchall())
 
     def list_all_scan_watches(self) -> list[sqlite3.Row]:
-        """Every scan-digest subscription (the cron's candidate set; due is computed in
-        Python via cadence_bucket_epoch since the bucket period depends on per-row cadence)."""
+        """Every scan-digest subscription (the cron's candidate set; due is computed in Python
+        via timeframe_bucket_epoch — the re-scan bucket period is the row's OWN timeframe,
+        TG-SCANWATCH-TF-CADENCE-W1). ``last_sent_sig`` drives content-dedup."""
         with self._cursor() as cur:
             cur.execute(
-                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, rank_by "
+                "SELECT chat_id, top_n, timeframe, exchange, cadence, last_fired_bucket, rank_by, "
+                "last_sent_sig "
                 "FROM scan_watches ORDER BY chat_id ASC"
             )
             return list(cur.fetchall())
 
     def mark_scan_watch_fired(
         self, chat_id: int, top_n: int, timeframe: str, exchange: str, bucket: int,
-        rank_by: str = "oi",
+        rank_by: str = "oi", sig: str | None = None,
     ) -> None:
+        # TG-SCANWATCH-TF-CADENCE-W1: `sig` (when not None) ALSO updates the content-dedup
+        # signature (the last-delivered actionable set). Pass sig="" on an all-HOLD round so a
+        # returning set re-fires; the new set's sig on a successful push; leave None (advance
+        # the bucket only) for exhausted / deduped-unchanged owners.
         with self._cursor() as cur:
-            cur.execute(
-                "UPDATE scan_watches SET last_fired_bucket = ? "
-                "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ? AND rank_by = ?",
-                (bucket, chat_id, top_n, timeframe, exchange, rank_by),
-            )
+            if sig is None:
+                cur.execute(
+                    "UPDATE scan_watches SET last_fired_bucket = ? "
+                    "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ? AND rank_by = ?",
+                    (bucket, chat_id, top_n, timeframe, exchange, rank_by),
+                )
+            else:
+                cur.execute(
+                    "UPDATE scan_watches SET last_fired_bucket = ?, last_sent_sig = ? "
+                    "WHERE chat_id = ? AND top_n = ? AND timeframe = ? AND exchange = ? AND rank_by = ?",
+                    (bucket, sig, chat_id, top_n, timeframe, exchange, rank_by),
+                )
 
     def list_due_watches(self, now_epoch_seconds: int, tf_seconds: dict[str, int]) -> list[sqlite3.Row]:
         """Return rows due for the next cron fire (C3 consumer).

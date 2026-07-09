@@ -86,7 +86,9 @@ def test_confirmation_watch_card_content():
 
 def test_confirmation_scanwatch_card_content():
     card = messages.format_subscription_confirmation("scanwatch", top_n=10, tf="15m", exchange="BINANCE", cadence="1h")
-    assert "top 10 · 15m · BINANCE (every 1h)" in card
+    # TG-SCANWATCH-TF-CADENCE-W1: cadence == the TF; content-deduped to new calls.
+    assert "top 10 · 15m · BINANCE" in card
+    assert "re-check every 15m" in card and "NEW BUY/SELL" in card
     assert "HOLD" in card and "/unscanwatch" in card
 
 

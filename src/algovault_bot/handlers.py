@@ -47,7 +47,7 @@ from .validators import (
 )
 from .quota import consume_quota, get_quota_state, record_call_delivered
 from .capabilities import rank_label, rank_lens_help, recognized_rank_tokens
-from .scan_digest import cadence_for_timeframe, is_valid_cadence, render_scan_digest_line, scan_digest_reminder
+from .scan_digest import cadence_for_timeframe, is_valid_cadence, render_scan_digest_line
 
 log = logging.getLogger(__name__)
 
@@ -759,11 +759,10 @@ def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str, str | No
 def _scanwatch_usage(err: object) -> str:
     return (
         "Usage: /scanwatch [RANK] [TOP_N] [TF] [EXCH]\n"
-        "Schedules a recurring whole-market scan digest pushed to this chat.\n"
-        "  /scanwatch              — top 20 by OI on BINANCE @ 15m, every 1h\n"
-        "  /scanwatch nfr 4h       — most-negative funding @ 4h (crowded shorts)\n"
-        "  /scanwatch 4h 1d BYBIT  — top 20 @ 4h on BYBIT, every 1d\n"
-        "Cadence ∈ {1h, 4h, 1d}; defaults from your timeframe (floor 1h).\n"
+        "A standing scan — I re-check on your chosen timeframe and message only NEW BUY/SELL.\n"
+        "  /scanwatch              — top 20 by OI on BINANCE @ 15m (re-checked every 15m)\n"
+        "  /scanwatch nfr 4h       — most-negative funding @ 4h (crowded shorts), every 4h\n"
+        "  /scanwatch 1d BYBIT     — top 20 @ 1d on BYBIT, every 1d\n"
         f"{rank_lens_help()}\n"
         f"↳ {err}"
     )
@@ -794,8 +793,9 @@ def handle_scanwatch(
     # SCAN-RANKBY-W1: surface the lens on the confirmation when it's not the default oi.
     if rank_by != "oi":
         card = f"{card}\nLens: {rank_label(rank_by)}."
-    reminder = scan_digest_reminder(cadence, timeframe)
-    return f"{card}\n{reminder}" if reminder else card
+    # TG-SCANWATCH-TF-CADENCE-W1: the card states the TF re-check cadence directly; the old
+    # cadence-vs-tf "repeats results" reminder (from the coarsening model) no longer applies.
+    return card
 
 
 def handle_unscanwatch(
@@ -1262,7 +1262,12 @@ def register_handlers(app: Application, db: Database) -> None:
         chat_id, username, lang = _user_meta(update)
         _maybe_fire_first_command_event(db, chat_id)
         reply = handle_help(db, chat_id, username, lang)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+        # TG-SCANWATCH-TF-CADENCE-W1 (B): the Upgrade CTA is now an inline button (shared
+        # upgrade_button; utm_campaign=help_message), not a raw URL in the body.
+        await update.message.reply_text(
+            reply, disable_web_page_preview=True,
+            reply_markup=keyboards.upgrade_markup("help_message"),
+        )
 
     async def _send_referral_card(message: Message, code_data: dict, lang: str | None) -> None:
         """Render the /referral body + a one-tap Share url-button. Reused by the

@@ -783,16 +783,18 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
 
 
 def _format_scan_digest_push(
-    enriched: list[dict[str, Any]], top_n: int, tf: str, exchange: str, cadence: str,
+    enriched: list[dict[str, Any]], top_n: int, tf: str, exchange: str,
     rank_by: str = "oi",
 ) -> str:
     """Enriched scan-digest body: a 🚀 header + render_scan_digest_line per actionable
     call. Only called with ≥1 actionable call (all-HOLD rounds are suppressed upstream).
-    SCAN-RANKBY-W1: the header reflects the lens (oi ⇒ 'OI', byte-identical to pre-wave)."""
+    SCAN-RANKBY-W1: the header reflects the lens (oi ⇒ 'OI', byte-identical to pre-wave).
+    TG-SCANWATCH-TF-CADENCE-W1: re-scan cadence == the timeframe, so `@ {tf}` conveys it
+    (dropped the coarse '(1h)' cadence tag)."""
     from .scan_digest import render_scan_digest_line
 
     header = (
-        f"🚀Scan digest ({cadence}) — top {top_n} perps by {rank_label(rank_by)} on {exchange} @ {tf}"
+        f"🚀Scan digest — top {top_n} perps by {rank_label(rank_by)} on {exchange} @ {tf}"
         f" — {len(enriched)} actionable:"
     )
     return "\n\n".join([header, *(render_scan_digest_line(c) for c in enriched)])
@@ -810,14 +812,16 @@ async def process_scan_digests(
     An all-HOLD round (no actionable BUY/SELL) is SUPPRESSED — no push, no charge (parity
     with /watch silent-on-HOLD) — but the bucket still advances so it never re-scans the tick."""
     from .mcp_client import McpClientConfig
-    from .scan_digest import cadence_bucket_epoch
+    from .scan_digest import timeframe_bucket_epoch
 
     db = Database(db_path)
     now = now_epoch if now_epoch is not None else int(time.time())
-    counts: dict[str, int] = {"scan_due": 0, "scan_fired": 0, "scan_skipped_exhausted": 0, "scan_skipped_empty": 0, "scan_errors": 0}
+    counts: dict[str, int] = {"scan_due": 0, "scan_fired": 0, "scan_skipped_exhausted": 0, "scan_skipped_empty": 0, "scan_skipped_dup": 0, "scan_errors": 0}
 
     rows = db.list_all_scan_watches()
-    due = [r for r in rows if cadence_bucket_epoch(r["cadence"], now) > r["last_fired_bucket"]]
+    # TG-SCANWATCH-TF-CADENCE-W1 (Approach B): re-scan bucket = the subscription's OWN
+    # timeframe (not the coarse cadence column) → a 5m scanwatch is due every 5m.
+    due = [r for r in rows if timeframe_bucket_epoch(r["timeframe"], now) > r["last_fired_bucket"]]
     counts["scan_due"] = len(due)
     if not due:
         return counts
@@ -854,18 +858,22 @@ async def process_scan_digests(
                     continue
                 calls = result.get("calls") or []
                 non_hold = [c for c in calls if c.get("call") not in (None, "HOLD")]
+                # TG-SCANWATCH-TF-CADENCE-W1: bucket = the group's TIMEFRAME (Approach B), and a
+                # content-dedup signature = the sorted actionable (coin:call) set — a persistent
+                # set re-sends NOTHING; only a NEW/changed set fires (timely, not spammy).
+                bucket = timeframe_bucket_epoch(tf, now)
+                sig = ",".join(
+                    f"{c.get('coin')}:{c.get('call')}"
+                    for c in sorted(non_hold, key=lambda c: str(c.get("coin")))
+                )
                 # All-HOLD round → no actionable BUY/SELL. Suppress the digest entirely
-                # (parity with /watch, which is silent on HOLD): NO push + NO charge for
-                # any owner in this group. STILL advance each bucket so the producer does
-                # not re-scan every 1-min tick this bucket (cadence-bucket-marker-advances
-                # -on-skip — no re-scan storm). The one-shot /scan command keeps its own
-                # "nothing actionable" reply (an explicit request deserves a response).
+                # (parity with /watch, silent on HOLD): NO push + NO charge. STILL advance the
+                # TF-bucket, and RESET the dedup sig to '' so a RETURNING set re-fires (X→∅→X).
                 if not non_hold:
                     for r in grp:
                         counts["scan_skipped_empty"] += 1
                         db.mark_scan_watch_fired(
-                            r["chat_id"], top_n, tf, exchange,
-                            cadence_bucket_epoch(r["cadence"], now), rank_by,
+                            r["chat_id"], top_n, tf, exchange, bucket, rank_by, sig="",
                         )
                     continue
                 # SCAN-DIGEST-MCP-PARITY-W1 CH3: the scan calls are ALREADY enriched
@@ -874,25 +882,30 @@ async def process_scan_digests(
                 # scan payload (single-derivation LAW; the digest is computed once).
                 for r in grp:
                     chat_id = r["chat_id"]
-                    bucket = cadence_bucket_epoch(r["cadence"], now)
-                    # Exhausted free owner → skip the push+charge but ADVANCE the bucket
-                    # (one attempt per bucket; mirrors the webhook PAUSE; no re-scan storm).
+                    # Exhausted free owner → skip push+charge, advance the bucket, LEAVE the sig.
                     if get_quota_state(db, chat_id).exhausted:
                         counts["scan_skipped_exhausted"] += 1
                         db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
                         continue
-                    text = _format_scan_digest_push(non_hold, top_n, tf, exchange, r["cadence"], rank_by)
+                    # Content-dedup: the actionable set is UNCHANGED since last delivery →
+                    # advance the bucket, no re-send (fires only on new/changed BUY/SELL).
+                    if sig == (r["last_sent_sig"] or ""):
+                        counts["scan_skipped_dup"] += 1
+                        db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
+                        continue
+                    text = _format_scan_digest_push(non_hold, top_n, tf, exchange, rank_by)
                     ok = await _push(bot, chat_id, text, db)
                     if ok:
-                        # BOT-DIGEST-COUNT-ALL-CALLS-W1: one recorder call per actionable
-                        # call delivered in this digest (alerts_fired + quota together).
-                        # K = len(non_hold) ≥ 1 here (all-HOLD rounds suppressed above), so
-                        # K×consume_quota(1) == the prior consume_quota(units=K) — quota
-                        # unchanged, but now every scanwatch call is logged for the digest.
+                        # BOT-DIGEST-COUNT-ALL-CALLS-W1: one recorder call per actionable call
+                        # delivered (alerts_fired + quota together). Store the delivered sig so
+                        # an unchanged set next bucket dedups.
                         for _ in non_hold:
                             record_call_delivered(db, chat_id, "scanwatch")
                         counts["scan_fired"] += 1
-                    db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
+                        db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by, sig=sig)
+                    else:
+                        # push failed → advance the bucket but DON'T store the sig (retry next).
+                        db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
     except McpError as e:
         log.error("scan-digest mcp client init failed: %s", e)
         counts["scan_errors"] += len(due)

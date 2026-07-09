@@ -49,20 +49,22 @@ def _mock_engine(monkeypatch, result: dict, pushed: list):
 
 # ── /scanwatch + /unscanwatch + /list ──
 
-def test_scanwatch_creates_row_and_reminder(tmp_db):
+def test_scanwatch_creates_row_and_confirmation(tmp_db):
     reply = handlers.handle_scanwatch(tmp_db, 1, "u", "en", ["25", "1h"])
     rows = tmp_db.list_scan_watches(1)
     assert len(rows) == 1
-    assert rows[0]["top_n"] == 25 and rows[0]["timeframe"] == "1h" and rows[0]["cadence"] == "1h"
-    assert "every 1h" in reply and "max(1, calls)" in reply
+    assert rows[0]["top_n"] == 25 and rows[0]["timeframe"] == "1h"
+    # TG-SCANWATCH-TF-CADENCE-W1: card states the TF re-check cadence + content-dedup (no reminder).
+    assert "re-check every 1h" in reply and "NEW BUY/SELL" in reply
 
 
-def test_scanwatch_first_time_token_is_tf_second_is_cadence(tmp_db):
-    # tf=4h (first time-token), cadence=1h (second) → cadence is FASTER → heads-up.
+def test_scanwatch_parser_tf_and_vestigial_cadence_arg(tmp_db):
+    # Parser unchanged: 1st time-token=tf, 2nd (valid cadence)=cadence. Under TF-dispatch the
+    # cadence column is vestigial; the card states the TF re-check cadence (every 4h), not "1h".
     reply = handlers.handle_scanwatch(tmp_db, 2, "u", "en", ["4h", "1h"])
     row = tmp_db.list_scan_watches(2)[0]
-    assert row["timeframe"] == "4h" and row["cadence"] == "1h"
-    assert "⚠️" in reply
+    assert row["timeframe"] == "4h"
+    assert "re-check every 4h" in reply
 
 
 def test_scanwatch_defaults(tmp_db):
@@ -88,25 +90,49 @@ def test_list_shows_scan_digests(tmp_db):
 
 # ── the scheduled producer ──
 
-def test_producer_fires_meters_and_is_idempotent(tmp_db, monkeypatch):
+def test_producer_fires_meters_and_dedups(tmp_db, monkeypatch):
     tmp_db.upsert_subscriber(111, "u", "en")
     tmp_db.add_scan_watch(111, 20, "15m", "BINANCE", "1h")
     pushed: list = []
     _mock_engine(monkeypatch, _result(THREE), pushed)
-    now = 1_700_003_600
+    now = 1_700_002_800  # aligned to 15m (900s) and 5m (300s)
 
+    # first 15m bucket → fires, meters max(1, 3 non-HOLD)
     counts = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now))
     assert counts["scan_fired"] == 1
     assert len(pushed) == 1 and pushed[0][0] == 111 and "BTC" in pushed[0][1]
-    assert get_quota_state(tmp_db, 111).used == 3  # max(1, 3 non-HOLD)
+    assert get_quota_state(tmp_db, 111).used == 3
 
-    # Same bucket → idempotent (not due).
+    # same 15m bucket → not due (idempotent)
     c2 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 60))
     assert c2["scan_due"] == 0
 
-    # Next bucket → fires again.
-    c3 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 3600))
-    assert c3["scan_fired"] == 1
+    # TG-SCANWATCH-TF-CADENCE-W1: NEXT 15m bucket, SAME actionable set → content-dedup
+    # (no re-send, no re-charge — timely, not spammy).
+    c3 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 900))
+    assert c3["scan_fired"] == 0 and c3["scan_skipped_dup"] == 1
+    assert len(pushed) == 1  # still just the first push
+    assert get_quota_state(tmp_db, 111).used == 3  # no extra charge
+
+
+def test_producer_5m_cadence_and_refires_on_changed_set(tmp_db, monkeypatch):
+    # A 5m scanwatch is due every 5m (TF-cadence, NOT hourly); a CHANGED actionable set re-fires.
+    tmp_db.upsert_subscriber(112, "u", "en")
+    tmp_db.add_scan_watch(112, 20, "5m", "BINANCE", "1h")
+    pushed: list = []
+    _mock_engine(monkeypatch, _result(THREE), pushed)
+    now = 1_700_002_800  # aligned to 5m
+
+    c1 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now))
+    assert c1["scan_fired"] == 1  # 5m sub fires this 5m bucket
+    # next 5m bucket (+300s), CHANGED set → re-fires (SOL→XRP)
+    changed = [
+        THREE[0], THREE[1],
+        {"coin": "XRP", "timeframe": "5m", "exchange": "BINANCE", "call": "BUY", "confidence": 60, "regime": "TRENDING_UP"},
+    ]
+    _mock_engine(monkeypatch, _result(changed), pushed)
+    c2 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 300))
+    assert c2["scan_fired"] == 1 and len(pushed) == 2
 
 
 def test_producer_shares_one_scan_across_same_param_subs(tmp_db, monkeypatch):

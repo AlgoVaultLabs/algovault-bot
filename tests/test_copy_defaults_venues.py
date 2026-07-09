@@ -13,7 +13,7 @@ from algovault_bot.handlers import (
     handle_regime,
     handle_watch,
 )
-from algovault_bot.messages import HELP_MESSAGE, signup_url
+from algovault_bot.messages import HELP_MESSAGE
 from algovault_bot.scan_digest import cadence_for_timeframe
 from algovault_bot.validators import EXCHANGE_DISPLAY_ORDER, EXCHANGES, normalize_exchange
 
@@ -42,9 +42,15 @@ def test_venue_aliases_resolve() -> None:
 
 
 # ── /help Upgrade URL byte-identical (AC1) ──
-def test_help_upgrade_url_utm_byte_identical() -> None:
-    assert f"Upgrade → {signup_url('help_message')}" in HELP_MESSAGE
-    assert "api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=help_message" in HELP_MESSAGE
+def test_help_upgrade_is_inline_button_utm_intact() -> None:
+    # TG-SCANWATCH-TF-CADENCE-W1 (B): the /help Upgrade CTA is now an inline button (no raw
+    # URL in the body); the utm-tagged signup URL is byte-identical (utm_campaign=help_message).
+    from algovault_bot import keyboards
+    assert "Upgrade → " not in HELP_MESSAGE
+    assert "Need more than 100 calls a month?" in HELP_MESSAGE
+    assert keyboards.upgrade_button("help_message").url == (
+        "https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=help_message"
+    )
 
 
 # ── bare-command defaults (R8 / AC2) ──

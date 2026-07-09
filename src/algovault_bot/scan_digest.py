@@ -40,6 +40,16 @@ def cadence_bucket_epoch(cadence: str, now_sec: int) -> int:
     return (now_sec // period) * period
 
 
+def timeframe_bucket_epoch(timeframe: str, now_sec: int) -> int:
+    """TG-SCANWATCH-TF-CADENCE-W1 (Approach B): `now_sec` floored to the TIMEFRAME period —
+    the scanwatch re-scan bucket. Dispatch cadence == the subscription's OWN timeframe (no
+    coarsening) — a 5m scanwatch re-scans every 5m, a 1h hourly. Leaves cadence_for_timeframe
+    (the MCP scan-digest.ts mirror) + the 1h/4h/1d cadence column untouched. Unknown tf → 1d
+    floor (conservative; matches cadence_for_timeframe's unknown-tf default)."""
+    period = TF_SECONDS.get(timeframe, 86_400)
+    return (now_sec // period) * period
+
+
 def cadence_faster_than_timeframe(cadence: str, timeframe: str) -> bool:
     """True iff the cadence fires faster than the scan refreshes (→ stronger heads-up)."""
     tf_sec = TF_SECONDS.get(timeframe)
