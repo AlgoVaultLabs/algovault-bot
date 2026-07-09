@@ -117,13 +117,24 @@ def test_wizard_watch_ticker_validation(tmp_db):
     assert asyncio.run(got_ticker(_FakeUpdate(message=_FakeMessage("NOTACOIN")), ctx)) == wizard.W_COIN
 
 
-def test_wizard_watch_typed_args_delegate_to_fast_path(tmp_db):
+def test_wizard_watch_command_entry_always_delegates(tmp_db):
+    # TG-COPY-DEFAULTS-VENUES-W1: the bare TYPED /watch now delegates to the typed handler
+    # (which runs the BTC 1h Binance default) — NOT the wizard. The mnu:watch button entry
+    # still opens the wizard (see test_wizard_watch_menu_entry_opens_wizard).
     spy: list = []
     conv = _build(tmp_db, typed_spy=spy)
     entry = conv.entry_points[0].callback  # CommandHandler("watch")
-    # args present → reuse the typed handler verbatim, no wizard
     ended = asyncio.run(entry(_FakeUpdate(message=_FakeMessage()), _Ctx(args=["BTC", "15m"])))
     assert ended == ConversationHandler.END and len(spy) == 1
-    # no args → launches the wizard (COIN state), no typed call
-    state = asyncio.run(entry(_FakeUpdate(message=_FakeMessage()), _Ctx()))
-    assert state == wizard.W_COIN and len(spy) == 1
+    # no args → ALSO delegates to the typed handler (default), NOT the wizard COIN state
+    ended2 = asyncio.run(entry(_FakeUpdate(message=_FakeMessage()), _Ctx()))
+    assert ended2 == ConversationHandler.END and len(spy) == 2
+
+
+def test_mnu_watch_button_still_opens_wizard(tmp_db):
+    # AC7: the /start button path (mnu:watch → _entry_menu) STILL launches the guided
+    # wizard — the bare TYPED /watch repoint (→ default) left the callback entry untouched.
+    conv = _build(tmp_db)
+    menu_entry = next(h.callback for h in conv.entry_points if getattr(h, "pattern", None) is not None)
+    state = asyncio.run(menu_entry(_FakeUpdate(query=_FakeQuery("mnu:watch")), _Ctx()))
+    assert state == wizard.W_COIN

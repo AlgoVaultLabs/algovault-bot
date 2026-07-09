@@ -20,14 +20,14 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .messages import signup_url
-from .validators import EXCHANGES, TF_SECONDS, TIMEFRAMES
+from .validators import EXCHANGE_DISPLAY_ORDER, EXCHANGES, TF_SECONDS, TIMEFRAMES
 
 # Wizard TF grid — the FULL supported set (1m–1d), ordered shortest→longest, in
 # exact parity with the typed `/watch` path (no floor). Shared by both wizards.
 WIZARD_TIMEFRAMES: tuple[str, ...] = tuple(sorted(TIMEFRAMES, key=lambda t: TF_SECONDS[t]))
 
-# Stable display order (the EXCHANGES frozenset is unordered); BINANCE first (default).
-_EXCHANGE_ORDER: tuple[str, ...] = ("BINANCE", "BYBIT", "OKX", "BITGET", "HL")
+# Stable display order — the single validators source (12 venues, HL-first, /help order).
+_EXCHANGE_ORDER: tuple[str, ...] = EXCHANGE_DISPLAY_ORDER
 EXCHANGE_DISPLAY: tuple[str, ...] = tuple(e for e in _EXCHANGE_ORDER if e in EXCHANGES)
 
 # Watch-wizard quick-picks — a curated crypto + TradFi showcase (the bot watches BOTH:

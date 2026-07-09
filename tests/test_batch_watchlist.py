@@ -36,9 +36,9 @@ def test_parse_all_timeframes_is_11() -> None:
     assert tfs[0] == "1m" and tfs[-1] == "1d"  # canonical ascending order
 
 
-def test_parse_all_exchanges_is_5() -> None:
+def test_parse_all_exchanges_is_12() -> None:
     xs = batch.parse_exchanges("all")
-    assert len(xs) == 5
+    assert len(xs) == 12  # TG-COPY-DEFAULTS-VENUES-W1: 5 → 12 venues
     assert set(xs) == set(EXCHANGES)
 
 
@@ -60,9 +60,9 @@ def test_expand_dedup() -> None:
 
 
 def test_expand_all_all_all_for_one_coin() -> None:
-    # AC1.1 shape: BTC all all = 1 × 11 × 5 = 55
+    # AC1.1 shape: BTC all all = 1 × 11 × 12 = 132 (TG-COPY-DEFAULTS-VENUES-W1: 5 → 12 venues)
     combos = batch.expand_watch_spec("BTC", "all", "all", universe=[])
-    assert len(combos) == 55
+    assert len(combos) == 132
 
 
 def test_expand_invalid_token_raises() -> None:
@@ -183,10 +183,10 @@ def test_handle_watch_comma_list_commits_no_nudge(tmp_db: Database) -> None:
 
 
 def test_handle_watch_all_dim_triggers_nudge_no_insert(tmp_db: Database) -> None:
-    # AC1.1 — BTC all all = 55 combos > threshold → nudge, nothing inserted yet.
+    # AC1.1 — BTC all all = 132 combos > threshold → nudge, nothing inserted yet.
     reply = handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC", "all", "all"])
     assert reply.confirm is True
-    assert reply.combos == 55
+    assert reply.combos == 132
     assert tmp_db.count_watches(1) == 0
     assert reply.pending is not None
 
@@ -278,31 +278,20 @@ def test_handle_list_summarizes_over_threshold(tmp_db: Database) -> None:
 # ── /start + /help copy (AC1.9) ────────────────────────────────
 
 
-def test_start_copy_trimmed_with_upgrade_link() -> None:
-    # TG-START-COPY-TRIM-W1: burn-examples + standalone "⚡ Add in bulk" block
-    # removed; /watch consolidated into one Get-started line; raw URL → <a> Upgrade.
+def test_start_copy_plain_language_and_link_light() -> None:
+    # TG-COPY-DEFAULTS-VENUES-W1 (R1/F2): plain-language /start; link-light — the
+    # clickable Upgrade CTA + its utm moved to /help.
     w = messages.WELCOME_MESSAGE
-    assert "⚡ Add in bulk" not in w
-    assert "faster quota burn" not in w
-    # consolidated Get-started + preserved command lines (placeholders escaped)
-    assert "/watch &lt;COIN&gt; &lt;TF&gt; &lt;Exch&gt; [regime|calls|both]" in w
-    assert "Example: ETH 15m Bybit regime / BTC All Binance" in w
-    # BOT-ONDEMAND-CMDS-W1: one-shot pulls surfaced in /start.
-    assert "/scan [RANK] [TOP_N] [TF] [EXCH]" in w
-    assert "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]" in w
-    assert "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]" in w
-    assert "/list" in w
-    assert "/unwatch &lt;COIN&gt; &lt;TF&gt;" in w
-    assert "/unwatchall" in w
-    assert "/help" in w
-    # preserved explainer + clickable upgrade CTA (generated, utm-preserved)
     assert "the brain layer for AI trading agents" in w
-    assert "all 900+ assets" in w
-    # ACTIVATION-NUDGE-W1: anchor text is now "Unlock 3,000 calls/mo →" + the
-    # track-record trust line; utm preserved alongside upgrade_from=tg_start.
-    assert ">Unlock 3,000 calls/mo →</a>" in w
-    assert "on-chain-verified track record" in w
-    assert "utm_campaign=start_welcome" in w
+    assert "900+ markets (crypto, gold, stocks, pre-IPO) across 12 exchanges" in w
+    assert "New here? Just type /watch and I'll start you on BTC 1h (Binance)." in w
+    assert "🔔 Watch a coin → /watch BTC 4h" in w
+    assert "🔍 Scan the top movers → /scan" in w
+    assert "📈 Get one call now → /call ETH 1h" in w
+    # F2: plain text — no HTML tags, no inline upgrade link/utm on /start
+    assert "<a href" not in w
+    assert "utm_campaign=start_welcome" not in w
+    assert "algovault.com/track-record" in w
 
 
 def test_help_copy_has_batch_and_unwatchall() -> None:

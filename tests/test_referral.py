@@ -224,10 +224,11 @@ def test_db_mark_referral_nudge_throttle(tmp_db):
     assert get_quota_state(tmp_db, 920).referral_nudge_last_at is not None
 
 
-def test_welcome_and_help_mention_referral():
+def test_referral_in_help_only():
+    # TG-COPY-DEFAULTS-VENUES-W1 (R1): /start is link-light — /referral lives in /help now.
     from algovault_bot import messages
-    assert "/referral" in messages.WELCOME_MESSAGE
     assert "/referral" in messages.HELP_MESSAGE
+    assert "/referral" not in messages.WELCOME_MESSAGE
 
 
 # ── REFERRAL-PARITY-NOTIFS-W1 / C2 — earnings parity + notifications ──

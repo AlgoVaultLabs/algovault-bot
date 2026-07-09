@@ -64,13 +64,13 @@ def build_watch_conversation(
         return W_COIN
 
     async def _entry_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        # TG-COPY-DEFAULTS-VENUES-W1: the bare TYPED /watch now runs the default
+        # (handle_watch defaults to BTC 1h Binance calls) instead of launching the wizard
+        # — always delegate. The button path (mnu:watch → _entry_menu) STILL opens the wizard.
         if update.message is None:
             return ConversationHandler.END
-        if ctx.args:  # typed fast-path — reuse the existing handler verbatim, no wizard
-            await typed_watch(update, ctx)
-            return ConversationHandler.END
-        _pick(ctx).clear()
-        return await _send_coin_grid(update.message.reply_text)
+        await typed_watch(update, ctx)
+        return ConversationHandler.END
 
     async def _entry_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         q = update.callback_query
@@ -264,22 +264,20 @@ def build_scan_conversation(
         return S_TOPN
 
     async def _entry_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        # TG-COPY-DEFAULTS-VENUES-W1: bare TYPED /scan runs the default (oi 20 15m Binance);
+        # mnu:scan → _entry_menu still opens the wizard.
         if update.message is None:
             return ConversationHandler.END
-        if ctx.args:
-            await typed_scan(update, ctx)
-            return ConversationHandler.END
-        _pick(ctx).clear()
-        return await _send_topn(update.message.reply_text, "oneshot", ctx)
+        await typed_scan(update, ctx)
+        return ConversationHandler.END
 
     async def _entry_scanwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        # TG-COPY-DEFAULTS-VENUES-W1: bare TYPED /scanwatch runs the default (oi 20 15m
+        # Binance, hourly); mnu:scan → _entry_menu still opens the wizard.
         if update.message is None:
             return ConversationHandler.END
-        if ctx.args:
-            await typed_scanwatch(update, ctx)
-            return ConversationHandler.END
-        _pick(ctx).clear()
-        return await _send_topn(update.message.reply_text, "standing", ctx)
+        await typed_scanwatch(update, ctx)
+        return ConversationHandler.END
 
     async def _entry_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         q = update.callback_query

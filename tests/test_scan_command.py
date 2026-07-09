@@ -87,10 +87,11 @@ def test_exhausted_free_user_blocked_no_scan(tmp_db, monkeypatch):
     assert get_quota_state(tmp_db, 555).used == FREE_TIER_MONTHLY_QUOTA  # not charged
 
 
-def test_bad_arg_returns_usage_no_scan(tmp_db, monkeypatch):
+def test_bad_arg_returns_error_no_scan(tmp_db, monkeypatch):
     monkeypatch.setattr(handlers, "_scan_via_mcp", lambda *a, **k: pytest.fail("must not scan on bad args"))
     reply = handlers.handle_scan(tmp_db, 666, "u", "en", ["BTC,ETH"])
-    assert "Usage:" in reply
+    # TG-COPY-DEFAULTS-VENUES-W1 (R4): friendly error with the offending token injected.
+    assert "didn't recognize" in reply and "BTC,ETH" in reply
 
 
 def test_alert_types_derive_to_canonical_set():

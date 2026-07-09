@@ -125,3 +125,12 @@ def test_wizard_scan_typed_args_delegate(tmp_db):
     assert len(scan_spy) == 1
     assert asyncio.run(sw_entry(_Upd(message=_Msg()), _Ctx(args=["10", "1h"]))) == ConversationHandler.END
     assert len(sw_spy) == 1
+
+
+def test_mnu_scan_button_still_opens_wizard(tmp_db):
+    # AC7: mnu:scan → _entry_menu STILL opens the scan wizard (kind picker); the bare
+    # TYPED /scan + /scanwatch repoint left the callback entry untouched.
+    conv = _build(tmp_db)
+    menu_entry = next(h.callback for h in conv.entry_points if getattr(h, "pattern", None) is not None)
+    state = asyncio.run(menu_entry(_Upd(query=_Query("mnu:scan")), _Ctx()))
+    assert state == wizard.S_KIND

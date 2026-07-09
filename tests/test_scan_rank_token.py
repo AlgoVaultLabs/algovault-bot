@@ -166,8 +166,9 @@ def test_scan_no_rank_is_none_byte_identical(tmp_db, monkeypatch):
 def test_scan_invalid_token_friendly_error(tmp_db, monkeypatch):
     monkeypatch.setattr(handlers, "_scan_via_mcp", lambda *a: {"calls": []})
     out = handlers.handle_scan(tmp_db, 1, "u", "en", ["garbage"])
-    assert "unrecognized argument" in out
-    assert "Lenses:" in out  # derived lens list surfaced (not hardcoded in the handler)
+    # TG-COPY-DEFAULTS-VENUES-W1 (R4): friendly error with the offending token + lens list.
+    assert "didn't recognize" in out and "garbage" in out
+    assert "Lenses:" in out
 
 
 def test_scanwatch_persists_rank(tmp_db):

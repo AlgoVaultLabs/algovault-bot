@@ -21,9 +21,10 @@ def test_start_creates_subscriber_no_default_watchlist(tmp_db: Database) -> None
 
 def test_help_full_command_list(tmp_db: Database) -> None:
     reply = handle_help(tmp_db, 1, "u", "en")
-    for cmd in ("/start", "/watch", "/unwatch", "/list", "/help"):
+    # TG-COPY-DEFAULTS-VENUES-W1 (R2): commands present in the new full guide.
+    for cmd in ("/watch", "/scan", "/call", "/regime", "/funding", "/list", "/unwatch", "/referral"):
         assert cmd in reply
-    assert "[regime|calls|both]" in reply  # type-flag mentioned (compact form)
+    assert "[regime|calls|both]" in reply  # /watch type-flag mentioned
 
 
 def test_watch_default_exchange_and_type(tmp_db: Database) -> None:
@@ -67,9 +68,10 @@ def test_watch_invalid_type(tmp_db: Database) -> None:
     assert reply.startswith("❌")
 
 
-def test_watch_too_few_args_shows_usage(tmp_db: Database) -> None:
+def test_watch_too_few_args_shows_error(tmp_db: Database) -> None:
+    # TG-COPY-DEFAULTS-VENUES-W1: 1 arg (missing TF) → friendly error (bare [] → default).
     reply = handle_watch(tmp_db, 1, "u", "en", ["BTC"])
-    assert "Usage:" in reply
+    assert "couldn't read that watch" in reply
 
 
 def test_unwatch_existing(tmp_db: Database) -> None:

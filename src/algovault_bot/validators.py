@@ -35,11 +35,34 @@ TF_SECONDS: Final[dict[str, int]] = {
     "1d": 86400,
 }
 
-EXCHANGES: Final[frozenset[str]] = frozenset({"HL", "BINANCE", "BYBIT", "OKX", "BITGET"})
+# TG-COPY-DEFAULTS-VENUES-W1: 12 venues — the exact set the signal server serves per command
+# (verified live: scan_trade_calls enum == these 12; get_trade_call/get_market_regime accept
+# them; scan_funding_arb is cross-venue). Display order lives in keyboards._EXCHANGE_ORDER.
+EXCHANGES: Final[frozenset[str]] = frozenset({
+    "HL", "BINANCE", "BYBIT", "OKX", "BITGET",
+    "ASTER", "BINGX", "GATE", "HTX", "KUCOIN", "MEXC", "PHEMEX",
+})
 
 # D8 inline-fix: default exchange BINANCE (was HL in spec; HL upstream
 # rate-limit hot from external IPs per REGIME-BOT-W1 P5 truth-table).
 DEFAULT_EXCHANGE: Final = "BINANCE"
+
+# TG-COPY-DEFAULTS-VENUES-W1: friendly aliases → canonical token, applied in
+# normalize_exchange BEFORE the membership check. Canonical tokens (gate, kucoin, …)
+# already resolve via upper()+membership; only NON-canonical variants live here.
+EXCHANGE_ALIASES: Final[dict[str, str]] = {
+    "HYPERLIQUID": "HL",
+    "GATEIO": "GATE",
+    "KC": "KUCOIN",
+}
+
+# TG-COPY-DEFAULTS-VENUES-W1: the SINGLE ordered venue source (HL-first, matching the /help
+# copy). keyboards (wizard grid) + batch ("/watch all"/"all exchanges" expansion) both derive
+# from this so a future venue-add can't leave one list stale (the drift this wave hit).
+EXCHANGE_DISPLAY_ORDER: Final[tuple[str, ...]] = (
+    "HL", "BINANCE", "BYBIT", "OKX", "BITGET",
+    "ASTER", "BINGX", "GATE", "HTX", "KUCOIN", "MEXC", "PHEMEX",
+)
 
 # FEATURE-PARITY-CHANNELS-W1 CH3: DERIVED from the bot-flagged 'alert'-kind tools in
 # capabilities.BOT_TOOL_SURFACE (the SoT the CH5 canary ties to /capabilities) + the
@@ -78,6 +101,7 @@ def normalize_exchange(raw: str | None) -> str:
     if raw is None or raw == "":
         return DEFAULT_EXCHANGE
     ex = raw.strip().upper()
+    ex = EXCHANGE_ALIASES.get(ex, ex)  # friendly alias → canonical (gateio→GATE, kc→KUCOIN, …)
     if ex not in EXCHANGES:
         raise ValidationError(
             f"Invalid exchange '{raw}'. Pick one of: {' '.join(sorted(EXCHANGES))}"

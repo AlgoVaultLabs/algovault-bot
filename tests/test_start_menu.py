@@ -48,8 +48,7 @@ def test_menu_router_serves_existing_handlers_not_wizards(tmp_db):
         assert not pat.match(not_ok)
 
 
-def test_start_welcome_prose_preserved():
-    # C4 only appends the keyboard — the approved welcome body is untouched.
+def test_start_welcome_prose_present():
+    # TG-COPY-DEFAULTS-VENUES-W1 (R1): plain-language welcome (the C4 button menu still appends).
     assert "Welcome to AlgoVault" in WELCOME_MESSAGE
-    assert "utm_campaign=start_welcome" in WELCOME_MESSAGE  # upgrade utm intact
-    assert "/referral" in WELCOME_MESSAGE  # prior-wave lines preserved
+    assert "New here? Just type /watch and I'll start you on BTC 1h (Binance)." in WELCOME_MESSAGE

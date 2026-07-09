@@ -16,7 +16,6 @@ import secrets
 from typing import Sequence
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -356,7 +355,9 @@ def _parse_scan_args(args: list[str]) -> tuple[int, str, str, str | None]:
         if tok.isdigit():
             n = int(tok)
             if not 1 <= n <= 100:
-                raise ValidationError("TOP_N must be between 1 and 100")
+                # TG-COPY-DEFAULTS-VENUES-W1 (R4): carry ONLY the offending token so
+                # handle_scan injects it into scan_error_message({arg}).
+                raise ValidationError(tok)
             top_n = n
         elif tok.lower() in TIMEFRAMES:
             timeframe = tok.lower()
@@ -365,7 +366,7 @@ def _parse_scan_args(args: list[str]) -> tuple[int, str, str, str | None]:
         elif tok.lower() in recognized_rank_tokens():
             rank = tok.lower()
         else:
-            raise ValidationError(f"unrecognized argument {raw!r}. {rank_lens_help()}")
+            raise ValidationError(tok)  # R4: offending token → scan_error_message
     return top_n, timeframe, exchange, rank
 
 
@@ -395,16 +396,8 @@ def handle_scan(
     try:
         top_n, timeframe, exchange, rank = _parse_scan_args(list(args))
     except ValidationError as e:
-        return (
-            "Usage: /scan [RANK] [TOP_N] [TF] [EXCH]\n"
-            "Ranks the top-N perps by the chosen lens for actionable (BUY/SELL) calls.\n"
-            "  /scan            — top 20 by OI on BINANCE @ 15m\n"
-            "  /scan nfr 20     — most-negative funding (crowded shorts)\n"
-            "  /scan gain 1h    — top 24h gainers @ 1h\n"
-            f"{rank_lens_help()}\n"
-            "(For specific coins use /watch — the scanner takes no coin list.)\n"
-            f"↳ {e}"
-        )
+        # TG-COPY-DEFAULTS-VENUES-W1 (R4): {arg} = the offending token (bare /scan defaults).
+        return messages.scan_error_message(str(e))
     state = get_quota_state(db, chat_id)
     if state.exhausted:
         return (
@@ -449,19 +442,33 @@ _REGIME_GLYPHS = {
     "VOLATILE": "🌪️",
 }
 
+# TG-COPY-DEFAULTS-VENUES-W1 (R5/R7): friendly error blocks — fire ONLY on invalid args
+# (bare /regime + /call now run the BTC 1h Binance default). Self-contained (no ↳ append).
 _USAGE_REGIME = (
-    "Usage: /regime <COIN> <TF> [EXCH]\n"
-    "One-shot market regime for a coin (TRENDING_UP/DOWN, RANGING, VOLATILE).\n"
-    "  /regime BTC 1h          — BTC 1h on BINANCE\n"
-    "  /regime ETH 4h BYBIT    — ETH 4h on Bybit\n"
-    "Classified at 1h/4h/1d (finer TFs map to 1h)."
+    "🤔 I couldn't read that regime check.\n"
+    "\n"
+    "Format: /regime <coin> <timeframe> [exchange]\n"
+    "Regime works on 1h, 4h, or 1d. Exchange optional (default Binance).\n"
+    "\n"
+    "Try:\n"
+    "   /regime BTC 4h\n"
+    "   /regime ETH 1h Bybit\n"
+    "\n"
+    "Tip: just type /regime for BTC 1h on Binance.\n"
+    "❓ Full guide → /help"
 )
 _USAGE_CALL = (
-    "Usage: /call <COIN> <TF> [EXCH]\n"
-    "One-shot BUY/SELL/HOLD trade call for a coin.\n"
-    "  /call SOL 15m           — SOL 15m on BINANCE\n"
-    "  /call BTC 1h HL         — BTC 1h on Hyperliquid\n"
-    "Use /watch for recurring alerts."
+    "🤔 I couldn't read that call.\n"
+    "\n"
+    "Format: /call <coin> <timeframe> [exchange]\n"
+    "Exchange optional (default Binance).\n"
+    "\n"
+    "Try:\n"
+    "   /call BTC 4h\n"
+    "   /call ETH 1h Bybit\n"
+    "\n"
+    "Tip: just type /call for BTC 1h on Binance.\n"
+    "❓ Full guide → /help"
 )
 
 
@@ -529,10 +536,13 @@ def handle_regime(
     """On-demand get_market_regime for one coin. Per-call quota (not HOLD-free):
     an exhausted user is asked to upgrade before the call fires (like /scan)."""
     db.upsert_subscriber(chat_id, username, lang_code)
-    try:
-        coin, timeframe, exchange = _parse_coin_tf_exchange(list(args))
-    except ValidationError as e:
-        return f"{_USAGE_REGIME}\n↳ {e}"
+    if not args:  # TG-COPY-DEFAULTS-VENUES-W1 (R8): bare /regime → default BTC 1h Binance.
+        coin, timeframe, exchange = "BTC", "1h", DEFAULT_EXCHANGE
+    else:
+        try:
+            coin, timeframe, exchange = _parse_coin_tf_exchange(list(args))
+        except ValidationError:
+            return _USAGE_REGIME  # self-contained friendly error (R5)
     state = get_quota_state(db, chat_id)
     if state.exhausted:
         return (
@@ -582,10 +592,13 @@ def handle_call(
     watch engine): a HOLD is always shown free; a BUY/SELL costs 1 call and is
     gated behind the monthly quota."""
     db.upsert_subscriber(chat_id, username, lang_code)
-    try:
-        coin, timeframe, exchange = _parse_coin_tf_exchange(list(args))
-    except ValidationError as e:
-        return f"{_USAGE_CALL}\n↳ {e}"
+    if not args:  # TG-COPY-DEFAULTS-VENUES-W1 (R8): bare /call → default BTC 1h Binance.
+        coin, timeframe, exchange = "BTC", "1h", DEFAULT_EXCHANGE
+    else:
+        try:
+            coin, timeframe, exchange = _parse_coin_tf_exchange(list(args))
+        except ValidationError:
+            return _USAGE_CALL  # self-contained friendly error (R7)
     try:
         result = _call_via_mcp(coin, timeframe, exchange)
     except McpError as e:
@@ -612,12 +625,17 @@ def handle_call(
 DEFAULT_FUNDING_LIMIT = 5
 _DEFAULT_FUNDING_MIN_BPS = 5
 
-_USAGE_FUNDING = (
-    "Usage: /funding [TOP_N]\n"
-    "Cross-venue funding-rate arbitrage — biggest long/short spreads across\n"
-    "Binance, Bybit, OKX, Bitget, Hyperliquid (no exchange arg — it scans all).\n"
-    "  /funding        — top 5 spreads\n"
-    "  /funding 10     — top 10"
+_USAGE_FUNDING = (  # TG-COPY-DEFAULTS-VENUES-W1 (R6): friendly error; bare /funding = top 5.
+    "🤔 I couldn't read that funding request.\n"
+    "\n"
+    "Format: /funding [how many]\n"
+    "Shows the biggest funding-rate gaps across exchanges.\n"
+    "\n"
+    "Try:\n"
+    "   /funding        top 5 spreads\n"
+    "   /funding 10     top 10 spreads\n"
+    "\n"
+    "❓ Full guide → /help"
 )
 
 
@@ -683,8 +701,8 @@ def handle_funding(
     db.upsert_subscriber(chat_id, username, lang_code)
     try:
         limit = _parse_funding_args(list(args))
-    except ValidationError as e:
-        return f"{_USAGE_FUNDING}\n↳ {e}"
+    except ValidationError:
+        return _USAGE_FUNDING  # R6: self-contained friendly error (bare /funding = top 5)
     state = get_quota_state(db, chat_id)
     if state.exhausted:
         return (
@@ -829,6 +847,8 @@ def handle_watch(
     """
     db.upsert_subscriber(chat_id, username, lang_code)
 
+    if not args:  # TG-COPY-DEFAULTS-VENUES-W1 (R8): bare /watch → BTC 1h Binance calls
+        args = ["BTC", "1h", DEFAULT_EXCHANGE, DEFAULT_ALERT_TYPE]
     if len(args) < 2:
         return BatchReply(messages.usage_watch_message())
     if len(args) > 4:
@@ -1165,12 +1185,12 @@ def register_handlers(app: Application, db: Database) -> None:
             ref_code = args[0][len(_REF_PREFIX):].upper()
             await _handle_ref_start(update, chat_id, username, lang, ref_code)
         else:
-            # TG-START-COPY-TRIM-W1: the welcome carries an <a> "Upgrade" link →
-            # send as HTML (body is fully HTML-escaped in messages.WELCOME_MESSAGE).
+            # TG-COPY-DEFAULTS-VENUES-W1 (R1/F2): WELCOME is plain text now (no HTML
+            # tags) — send WITHOUT parse_mode so the plain track-record domain auto-links.
             reply = handle_start(db, chat_id, username, lang)
-            # TG-BUTTON-UX-W1 (C4): append the inline button menu (prose unchanged).
+            # TG-BUTTON-UX-W1 (C4): append the inline button menu.
             await update.message.reply_text(
-                reply, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                reply, disable_web_page_preview=True,
                 reply_markup=keyboards.main_menu_kb(),
             )
         # TG-WATCH-ADOPTION-BROADCAST-W1 (R1): fire the one-time first-watch
@@ -1231,8 +1251,9 @@ def register_handlers(app: Application, db: Database) -> None:
                 await _send_referral_card(update.message, code_data, lang)
         # Onboard everyone (granted or not) with the standard welcome.
         welcome = handle_start(db, chat_id, username, lang)
+        # TG-COPY-DEFAULTS-VENUES-W1: WELCOME is plain text now (no HTML).
         await update.message.reply_text(
-            welcome, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+            welcome, disable_web_page_preview=True
         )
 
     async def _help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:

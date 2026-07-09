@@ -5,7 +5,7 @@ a single token, a comma-list (`BTC,ETH,SOL`), or the literal `all`. The asset
 universe for `all` coins is INJECTED as an argument (the HTTP/MCP fetch lives
 in ``asset_universe.py``), keeping this module fully unit-testable.
 
-`all` TF → all 11 timeframes (ascending); `all` EXCHANGE → all 5 exchanges;
+`all` TF → all 11 timeframes (ascending); `all` EXCHANGE → all 12 exchanges;
 `all` COIN → the injected universe. ``expand_watch_spec`` returns the
 de-duplicated Cartesian product as ``(coin, tf, exchange)`` tuples.
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from .validators import (
+    EXCHANGE_DISPLAY_ORDER,
     TF_SECONDS,
     normalize_coin,
     normalize_exchange,
@@ -37,8 +38,8 @@ DEFAULT_TOP_N: int = 30
 # Canonical ascending TF order (1m … 1d) — TF_SECONDS preserves insertion order.
 TF_ORDER: tuple[str, ...] = tuple(TF_SECONDS.keys())
 
-# Canonical exchange order for `all` expansion (deterministic, display-friendly).
-EXCHANGE_ORDER: tuple[str, ...] = ("BINANCE", "BYBIT", "OKX", "BITGET", "HL")
+# Canonical exchange order for `all` expansion — the single validators source (12 venues).
+EXCHANGE_ORDER: tuple[str, ...] = EXCHANGE_DISPLAY_ORDER
 
 
 def is_all(raw: str) -> bool:

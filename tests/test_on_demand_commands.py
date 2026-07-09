@@ -25,9 +25,10 @@ def _exhaust(db: Database, chat_id: int) -> None:
 # ── /regime ───────────────────────────────────────────────────
 
 
-def test_regime_usage_on_missing_args(tmp_db: Database) -> None:
+def test_regime_error_on_invalid_args(tmp_db: Database) -> None:
+    # TG-COPY-DEFAULTS-VENUES-W1: 1 arg (missing TF) → friendly error; bare [] → default.
     reply = handle_regime(tmp_db, 1, "u", "en", ["BTC"])
-    assert "Usage: /regime" in reply
+    assert "couldn't read that regime check" in reply
 
 
 def test_regime_success_consumes_one(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,9 +187,10 @@ _FUNDING_RESULT = {
 }
 
 
-def test_funding_usage_on_bad_arg(tmp_db: Database) -> None:
+def test_funding_error_on_bad_arg(tmp_db: Database) -> None:
+    # TG-COPY-DEFAULTS-VENUES-W1 (R6): invalid arg → friendly error; bare [] → top 5.
     reply = handlers.handle_funding(tmp_db, 1, "u", "en", ["banana"])
-    assert "Usage: /funding" in reply
+    assert "couldn't read that funding request" in reply
 
 
 def test_funding_success_renders_and_charges(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:

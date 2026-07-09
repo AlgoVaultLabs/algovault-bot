@@ -22,88 +22,96 @@ def signup_url(campaign: str) -> str:
     return f"{SIGNUP_BASE}&utm_source=tg_bot&utm_campaign={campaign}"
 
 
-# TG-START-COPY-TRIM-W1: the /start welcome is sent with parse_mode=HTML so the
-# upgrade CTA is a clickable link instead of a raw wrapping URL. The href is
-# GENERATED from signup_url('start_welcome') (utm attribution byte-identical)
-# with the scheme prepended and `&` HTML-escaped to `&amp;`. The four <…>
-# placeholders are HTML-escaped to &lt;…&gt; so they render literally; every
-# other char in the body is HTML-safe. KEEP this body fully escaped — it is
-# sent as HTML (see handlers._start).
-# ACTIVATION-NUDGE-W1 (2026-06-18): `upgrade_from=tg_start` added (utm preserved,
-# A2) so the bot's /start CTA carries the primary funnel-attribution param the
-# /signup handler reads for upgrade_cta_clicked.
-_UPGRADE_HREF: Final = "https://" + (
-    signup_url("start_welcome") + "&upgrade_from=tg_start"
-).replace("&", "&amp;")
-
-# ACTIVATION-NUDGE-W1: the public on-chain-verified track record — the
-# trust→conversion lever surfaced in /start. Plain https link (no query to escape).
-_TRACK_RECORD_HREF: Final = "https://algovault.com/track-record"
-
+# TG-COPY-DEFAULTS-VENUES-W1 (R1): plain-language onboarding, PLAIN TEXT (no HTML tags;
+# handle_start sends without parse_mode so the plain domain auto-links). The clickable
+# Upgrade CTA moved to /help (byte-identical URL); /start is link-light by design.
 WELCOME_MESSAGE: Final = (
-    "👋 Welcome to AlgoVault — the brain layer for AI trading agents.\n"
+    "👋 Welcome to AlgoVault, the brain layer for AI trading agents.\n"
     "\n"
-    "I push two kinds of alerts to your watchlist:\n"
-    "📊 Regime shifts — count toward your free 100 calls/month\n"
-    "📈 Trade calls (BUY/SELL) — count toward your free 100 calls/month\n"
-    "HOLD verdicts are silent + free.\n"
+    "I watch the markets for you and message you the moment something changes.\n"
     "\n"
-    "Free tier covers all 900+ assets — crypto + TradFi (gold, stocks, pre-IPO) — and all 11 timeframes (1m–1d). YOU choose what to watch.\n"
+    "You get 100 free calls a month. Each alert uses one call. Silent HOLDs are always free.\n"
     "\n"
-    "Get started:\n"
-    "/watch &lt;COIN&gt; &lt;TF&gt; &lt;Exch&gt; [regime|calls|both] — recurring alerts\n"
-    "Example: ETH 15m Bybit regime / BTC All Binance / XRP 5m All\n"
-    "/scan [RANK] [TOP_N] [TF] [EXCH]    — one-shot scan (RANK: oi/vol/gain/lose/move/pfr/nfr/atr/oid)\n"
-    "/scanwatch [RANK] [TOP_N] [TF] [EXCH] — recurring scan digest (BUY/SELL only)\n"
-    "/regime &lt;COIN&gt; &lt;TF&gt; [EXCH]  — one-shot market regime\n"
-    "/call &lt;COIN&gt; &lt;TF&gt; [EXCH]    — one-shot BUY/SELL/HOLD call\n"
-    "/funding [TOP_N]            — cross-venue funding arb\n"
-    "/list                       — see your picks\n"
-    '/unwatch &lt;COIN&gt; &lt;TF&gt;        — remove one (TF/EXCH can be "all")\n'
-    "/unwatchall                 — clear everything\n"
-    "/unscanwatch [TOP_N] [TF] [EXCH] — stop a scan digest\n"
-    "/help                       — full commands\n"
-    "/referral                   — invite friends, earn rewards\n"
+    "Two kinds of alerts:\n"
+    "📊 Regime: the market's mood flips (trending, ranging, or wild)\n"
+    "📈 Trade call: a clear BUY or SELL\n"
     "\n"
-    # ACTIVATION-NUDGE-W1: track-record trust line + the upgrade CTA (button text
-    # "Unlock 3,000 calls/mo →"; upgrade_from=tg_start, utm preserved). HTML-safe.
-    "Free tier: 100 calls/month. See the live, on-chain-verified track record: "
-    f'<a href="{_TRACK_RECORD_HREF}">algovault.com/track-record</a>.\n'
-    f'<a href="{_UPGRADE_HREF}">Unlock 3,000 calls/mo →</a> with Starter ($9.99/mo), or pay per call via x402.'
+    "You choose what to watch: 900+ markets (crypto, gold, stocks, pre-IPO) across 12 exchanges, on any timeframe from 1m to 1d.\n"
+    "\n"
+    "Start here:\n"
+    "🔔 Watch a coin → /watch BTC 4h\n"
+    "🔍 Scan the top movers → /scan\n"
+    "📈 Get one call now → /call ETH 1h\n"
+    "\n"
+    "New here? Just type /watch and I'll start you on BTC 1h (Binance).\n"
+    "\n"
+    "📋 See your picks → /list\n"
+    "❓ Every command → /help\n"
+    "✅ Live, on-chain-verified results → algovault.com/track-record\n"
+    "\n"
+    "Free: 100 calls/month. Want more? Starter is $9.99/mo for 3,000 calls, or pay per call with x402."
 )
 
 
+# TG-COPY-DEFAULTS-VENUES-W1 (R2): plain-language full guide, PLAIN TEXT (sent without
+# parse_mode by _help, so <coin>/<timeframe> render literally). Upgrade URL byte-identical
+# via signup_url('help_message'). 12 venues listed.
 HELP_MESSAGE: Final = (
-    "AlgoVault Bot — full command list\n"
+    "📖 AlgoVault — full command guide\n"
     "\n"
-    "Args are positional: COIN TF EXCH (space-separated). EXCH optional, default BINANCE.\n"
+    "I send you alerts when the market changes. You pick the coins, timeframes, and alert type.\n"
+    "New here? Every command works on its own — just type /watch, /scan, or /call and I'll use a smart default.\n"
     "\n"
-    "/start — welcome + tap menu\n"
-    "/watch <COIN> <TF> <Exch> [regime|calls|both] — recurring alerts (default calls)\n"
-    "/scan [RANK] [TOP_N] [TF] [EXCH] — one-shot scan; RANK lens oi(default)/volume/gainers/losers/movers/funding_positive/funding_negative/volatility/oi_change (aliases vol/gain/lose/move/pfr/nfr/atr/oid)\n"
-    "/scanwatch [RANK] [TOP_N] [TF] [EXCH] — recurring scan digest (BUY/SELL only); same RANK lenses\n"
-    "/regime <COIN> <TF> [EXCH] — one-shot market regime (1h/4h/1d)\n"
-    "/call <COIN> <TF> [EXCH] — one-shot BUY/SELL/HOLD call\n"
-    "/funding [TOP_N] — cross-venue funding arb\n"
-    "/list — see your picks\n"
-    '/unwatch <COIN> <TF> — remove one (TF/EXCH can be "all")\n'
-    "/unwatchall — clear everything\n"
-    "/unscanwatch [TOP_N] [TF] [EXCH] — stop a scan digest\n"
-    "/referral — invite friends, earn rewards\n"
-    "/help — this message\n"
+    "Every command uses three simple parts:\n"
+    "• Coin — BTC, ETH, SOL … or a stock like XAU, TSLA, QQQ\n"
+    "• Timeframe — 1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d\n"
+    "• Exchange — optional, default Binance\n"
+    "   HL · Binance · Bybit · OKX · Bitget · Aster · BingX · Gate · HTX · KuCoin · MEXC · Phemex\n"
     "\n"
-    "Values:\n"
-    "  COIN — BTC ETH SOL … + TradFi (XAU QQQ TSLA SPCX)\n"
-    "  TF   — 1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d\n"
-    "  EXCH — HL BINANCE BYBIT OKX BITGET\n"
+    "━━ Get alerts ━━\n"
+    "🔔 /watch <coin> <timeframe> [exchange] [regime|calls|both]\n"
+    "Recurring alerts for a coin. Default alert type: calls.\n"
+    "   /watch                      → BTC 1h on Binance (calls)\n"
+    "   /watch BTC 4h               → BUY/SELL alerts, BTC 4h\n"
+    "   /watch ETH 15m Bybit regime → mood-change alerts, ETH 15m on Bybit\n"
     "\n"
-    "Examples:\n"
-    "  /watch ETH 15m Bybit regime  — regime alerts, ETH 15m on Bybit\n"
-    "  /watch BTC all               — BTC, every timeframe\n"
-    "  /watch BTC,ETH,SOL 15m       — 3 coins, one timeframe\n"
-    "  /unwatch BTC all             — remove every BTC watch\n"
+    "🔍 /scan [lens] [how many] [timeframe] [exchange]\n"
+    "One-time ranking of the top coins with a live BUY/SELL.\n"
+    "   /scan                       → top 20 by open interest, Binance, 15m\n"
     "\n"
-    "Free tier: 100 calls/month — regime shifts + BUY/SELL count; HOLD is silent + free.\n"
+    "🔁 /scanwatch [lens] [how many] [timeframe] [exchange]\n"
+    "The scan, sent on a schedule (BUY/SELL only), checked hourly.\n"
+    "   /scanwatch                  → top 20 by open interest, Binance, 15m\n"
+    "\n"
+    "Scan lenses (how to rank the top coins):\n"
+    "   oi: most open interest (default)\n"
+    "   volume: most traded (vol)\n"
+    "   gainers: biggest 24h winners (gain)\n"
+    "   losers: biggest 24h losers (lose)\n"
+    "   movers: biggest moves either way (move)\n"
+    "   funding_positive: crowded longs (pfr)\n"
+    "   funding_negative: crowded shorts (nfr)\n"
+    "   volatility: most volatile (atr)\n"
+    "   oi_change: fastest-rising open interest (oid)\n"
+    "\n"
+    "━━ Check right now ━━\n"
+    "📈 /call <coin> <timeframe> [exchange]     one BUY/SELL/HOLD call (default BTC 1h Binance)\n"
+    "📊 /regime <coin> <timeframe> [exchange]   the market's mood, 1h/4h/1d (default BTC 1h Binance)\n"
+    "💰 /funding [how many]                     biggest funding gaps across exchanges (default top 5)\n"
+    "\n"
+    "━━ Manage ━━\n"
+    "📋 /list                          your watchlist\n"
+    '✂️ /unwatch <coin> <timeframe>    remove one ("all" works for either)\n'
+    "🧹 /unwatchall                    clear everything\n"
+    "🔕 /unscanwatch [how many] [timeframe] [exchange]   stop a scan digest\n"
+    "🎁 /referral                      invite friends, earn rewards\n"
+    "\n"
+    "Power moves:\n"
+    "   /watch BTC all            every timeframe for BTC\n"
+    "   /watch BTC,ETH,SOL 15m    three coins at once\n"
+    "   /unwatch BTC all          remove every BTC watch\n"
+    "\n"
+    "Free tier: 100 calls a month. Regime and BUY/SELL alerts each use one call. Silent HOLDs are free.\n"
     "Informational analytics, not financial advice.\n"
     f"Upgrade → {signup_url('help_message')}"
 )
@@ -301,12 +309,19 @@ def unwatchall_done_message(n: int) -> str:
 
 def usage_watch_message() -> str:
     return (
-        "Usage: /watch <COIN> <TF> <Exch> [regime|calls|both]\n"
-        "Coin · TimeFrame · Exchange (space-separated). EXCH optional, default Binance.\n"
-        "Examples:\n"
-        "  /watch BTC 4h\n"
-        "  /watch ETH 1h Bybit regime\n"
-        "Type /help for the full command reference."
+        # TG-COPY-DEFAULTS-VENUES-W1 (R3): fires only on UNPARSEABLE /watch — bare
+        # /watch now runs the BTC 1h Binance calls default (handle_watch), not this.
+        "🤔 I couldn't read that watch.\n"
+        "\n"
+        "Format: /watch <coin> <timeframe> [exchange] [regime|calls|both]\n"
+        "Exchange and alert type are optional. Defaults: Binance, calls.\n"
+        "\n"
+        "Try:\n"
+        "   /watch BTC 4h\n"
+        "   /watch ETH 1h Bybit regime\n"
+        "\n"
+        "Tip: just type /watch for BTC 1h on Binance.\n"
+        "❓ Full guide → /help"
     )
 
 
@@ -314,6 +329,26 @@ def usage_unwatch_message() -> str:
     return (
         "Usage: /unwatch <COIN> <TF> [EXCH]   (TF/EXCH can be \"all\")\n"
         "Example: /unwatch BTC 4h"
+    )
+
+
+def scan_error_message(arg: str) -> str:
+    # TG-COPY-DEFAULTS-VENUES-W1 (R4): fires only on an UNPARSEABLE /scan token; {arg} is
+    # the offending token (bare /scan runs the oi/20/15m/Binance default, not this).
+    return (
+        f"🤔 I didn't recognize \"{arg}\" in that scan.\n"
+        "\n"
+        "Format: /scan [lens] [how many] [timeframe] [exchange]\n"
+        "Everything is optional. Default: top 20 by open interest, Binance, 15m.\n"
+        "\n"
+        "Try:\n"
+        "   /scan            top 20 by open interest\n"
+        "   /scan nfr 20     20 most-crowded shorts\n"
+        "   /scan gain 1h    top 24h gainers, 1h\n"
+        "\n"
+        "Lenses: oi, volume, gainers, losers, movers, funding_positive, funding_negative, volatility, oi_change\n"
+        "Want specific coins? Use /watch — scan ranks the whole market.\n"
+        "❓ Full guide → /help"
     )
 
 
