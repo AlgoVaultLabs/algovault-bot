@@ -1143,11 +1143,43 @@ def handle_adoption_scanwatch_tap(
         created=created,
     )
     if created:
+        # TG-ADOPTION-CONFIRM-MSG-W1: state the real re-check cadence — Approach B
+        # dispatches on the scan_watch's TIMEFRAME, not the (vestigial) cadence column,
+        # so "every 1h" was stale. The default TF (15m) is the true re-check interval.
         return (
-            f"✅ Standing scan set — top {adoption.SCANWATCH_DEFAULT_TOP_N} every "
-            f"{adoption.SCANWATCH_DEFAULT_CADENCE}. See it in /list."
+            f"✅ Standing scan set — top {adoption.SCANWATCH_DEFAULT_TOP_N}, "
+            f"re-checked every {adoption.SCANWATCH_DEFAULT_TF}. See /list."
         )
     return "📡 You already have this standing scan. See /list."
+
+
+# TG-ADOPTION-CONFIRM-MSG-W1 — the one-tap adoption buttons answer with a transient
+# toast (≤200 chars, vanishes). These pure builders render the SAME persistent
+# confirmation card as the typed /watch and /scanwatch paths (shared renderer →
+# tap==type parity) so the callback can ALSO send a durable message.
+def adoption_scanwatch_confirmation_card() -> str:
+    """Full confirmation card for the one-tap 'set a standing scan' button. The
+    button always creates the DEFAULT standing scan, so the params are constants."""
+    return messages.format_subscription_confirmation(
+        "scanwatch",
+        top_n=adoption.SCANWATCH_DEFAULT_TOP_N,
+        tf=adoption.SCANWATCH_DEFAULT_TF,
+        exchange=adoption.SCANWATCH_DEFAULT_EXCHANGE,
+        cadence=adoption.SCANWATCH_DEFAULT_CADENCE,
+    )
+
+
+def adoption_watch_confirmation_card(data: str) -> str | None:
+    """Full confirmation card for the one-tap watch button. None on a malformed
+    payload — mirrors ``handle_adoption_watch_tap``'s guard so the callback stays
+    symmetric (no card sent when nothing was created)."""
+    parsed = adoption.parse_watch_callback(data)
+    if parsed is None:
+        return None
+    coin, tf, exch, _source = parsed
+    return messages.format_subscription_confirmation(
+        "watch", coin=coin, tf=tf, exchange=exch, mode=DEFAULT_ALERT_TYPE
+    )
 
 
 def _user_meta(update: Update) -> tuple[int, str | None, str | None]:
@@ -1838,6 +1870,13 @@ def register_handlers(app: Application, db: Database) -> None:
             query.data,
         )
         await query.answer(text=toast or "", show_alert=False)
+        # TG-ADOPTION-CONFIRM-MSG-W1: a toast vanishes — ALSO send the persistent
+        # confirmation card (same shared renderer as typed /watch) so the user gets a
+        # durable message that they subscribed. toast is None only on a malformed
+        # payload (nothing created) → no card.
+        card = adoption_watch_confirmation_card(query.data) if toast is not None else None
+        if card and isinstance(query.message, Message):
+            await query.message.reply_text(card, disable_web_page_preview=True)
 
     async def _on_adoption_scanwatch_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """A5: one-tap 'set a standing scan' button (scan-showcase). Thin shell
@@ -1855,6 +1894,14 @@ def register_handlers(app: Application, db: Database) -> None:
             query.data,
         )
         await query.answer(text=toast or "", show_alert=False)
+        # TG-ADOPTION-CONFIRM-MSG-W1: ALSO send the persistent confirmation card (same
+        # shared renderer as typed /scanwatch) so the user gets a durable message — the
+        # reported gap was "Set a standing scan" only popping a toast. toast is None only
+        # on a malformed payload (nothing created) → skip the card.
+        if toast is not None and isinstance(query.message, Message):
+            await query.message.reply_text(
+                adoption_scanwatch_confirmation_card(), disable_web_page_preview=True
+            )
 
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
