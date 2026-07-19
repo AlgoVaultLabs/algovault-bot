@@ -45,6 +45,13 @@ class McpClientConfig:
     internal_bypass_key: str = ""
     client_name: str = "algovault-bot"
     client_version: str = "0.1"
+    #: OPS-HL-INTERACTIVE-PRIORITY-W1 — mark this client's calls as background work.
+    #: Sends ``X-AlgoVault-Priority: background``; signal-MCP then runs the request's
+    #: venue fan-out in its BATCH rate-limit lane, waiting for capacity instead of
+    #: consuming Hyperliquid's interactive reserve (which exists for LIVE callers).
+    #: Set it ONLY on scheduled/cron work — never on a path a human is waiting on,
+    #: because the batch lane may wait up to ~5 minutes.
+    background: bool = False
 
 
 def _parse_response(resp: httpx.Response) -> dict[str, Any]:
@@ -111,6 +118,9 @@ class McpClient:
         }
         if self.config.internal_bypass_key:
             h["X-AlgoVault-Internal-Key"] = self.config.internal_bypass_key
+        if self.config.background:
+            # Honoured server-side for tier:'internal' callers only.
+            h["X-AlgoVault-Priority"] = "background"
         if self._session_id:
             h["Mcp-Session-Id"] = self._session_id
         return h
@@ -224,11 +234,17 @@ class McpClient:
         return result
 
 
-def from_env() -> McpClient:
-    """Build an McpClient using the bot's standard env vars."""
+def from_env(background: bool = False) -> McpClient:
+    """Build an McpClient using the bot's standard env vars.
+
+    ``background=True`` marks every call from this client as deferrable work
+    (OPS-HL-INTERACTIVE-PRIORITY-W1). Use it for cron/scheduled paths only — see
+    ``McpClientConfig.background``.
+    """
     cfg = McpClientConfig(
         url=os.environ.get("ALGOVAULT_MCP_URL", DEFAULT_MCP_URL),
         internal_bypass_key=os.environ.get("ALGOVAULT_INTERNAL_BYPASS_KEY", "").strip(),
+        background=background,
     )
     if not cfg.internal_bypass_key or cfg.internal_bypass_key == "__C3_PLACEHOLDER__":
         raise McpError(

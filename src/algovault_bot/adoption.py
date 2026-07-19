@@ -233,10 +233,18 @@ def supported_venues() -> list[str]:
 
 
 def _scan_one_venue(top_n: int, timeframe: str, exchange: str) -> dict[str, Any]:
-    """Live scan_trade_calls for ONE venue. Test seam: monkeypatch THIS fn."""
+    """Live scan_trade_calls for ONE venue. Test seam: monkeypatch THIS fn.
+
+    OPS-HL-INTERACTIVE-PRIORITY-W1: ``background=True``. This runs once a week from
+    cron (Mon 13:17 UTC) and fans out across every supported venue, which made it the
+    measured source of 161 of 171 HL interactive rate-limit throws in a week — all in
+    a single minute. Nobody is waiting on it, so it yields the interactive reserve to
+    live callers and takes the batch lane instead. The live ``/scan`` command uses a
+    DIFFERENT function (``handlers._scan_via_mcp_impl``) and stays interactive.
+    """
     from .mcp_client import from_env  # local import → keep module import-light
 
-    with from_env() as cli:
+    with from_env(background=True) as cli:
         return cli.call_tool(
             "scan_trade_calls",
             # OPS-SCAN-SHOWCASE-ENRICH-W1: includeReasoning enriches each call
