@@ -11,7 +11,19 @@ tests/scan-digest.test.ts in the MCP repo) pin the identical map by construction
 """
 from __future__ import annotations
 
+from .dispatch_schedule import timeframe_bucket_epoch  # re-export; see the note below
 from .validators import TF_SECONDS  # the canonical bot-side tf→seconds map (11 TFs)
+
+__all__ = [
+    "VALID_CADENCES",
+    "cadence_bucket_epoch",
+    "cadence_faster_than_timeframe",
+    "cadence_for_timeframe",
+    "is_valid_cadence",
+    "repeats_per_timeframe",
+    "scan_digest_reminder",
+    "timeframe_bucket_epoch",
+]
 
 VALID_CADENCES: tuple[str, ...] = ("1h", "4h", "1d")
 _CADENCE_SECONDS: dict[str, int] = {"1h": 3600, "4h": 14_400, "1d": 86_400}
@@ -40,14 +52,11 @@ def cadence_bucket_epoch(cadence: str, now_sec: int) -> int:
     return (now_sec // period) * period
 
 
-def timeframe_bucket_epoch(timeframe: str, now_sec: int) -> int:
-    """TG-SCANWATCH-TF-CADENCE-W1 (Approach B): `now_sec` floored to the TIMEFRAME period —
-    the scanwatch re-scan bucket. Dispatch cadence == the subscription's OWN timeframe (no
-    coarsening) — a 5m scanwatch re-scans every 5m, a 1h hourly. Leaves cadence_for_timeframe
-    (the MCP scan-digest.ts mirror) + the 1h/4h/1d cadence column untouched. Unknown tf → 1d
-    floor (conservative; matches cadence_for_timeframe's unknown-tf default)."""
-    period = TF_SECONDS.get(timeframe, 86_400)
-    return (now_sec // period) * period
+# SIGNAL-CLOSEDBAR-SHADOW-W1 CH6: `timeframe_bucket_epoch` MOVED to the `dispatch_schedule`
+# leaf so the WATCHLIST dispatcher (db.list_due_watches) and this SCANWATCH one share ONE
+# derivation instead of two contracts in one codebase. Re-exported unchanged, so every
+# existing importer — including alert_engine's local import and tests/test_tf_cadence.py —
+# keeps working. Interface-preserving: no call site had to change.
 
 
 def cadence_faster_than_timeframe(cadence: str, timeframe: str) -> bool:

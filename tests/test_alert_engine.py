@@ -11,6 +11,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from algovault_bot.alert_engine import (
     WatchRow,
     format_regime_alert,
@@ -37,34 +39,59 @@ def test_lazy_dispatch_never_fetched_is_due(tmp_db: Database) -> None:
     assert len(due) == 5
 
 
-def test_lazy_dispatch_only_1m_due_at_61s_after_fetch(tmp_db: Database) -> None:
+# SIGNAL-CLOSEDBAR-SHADOW-W1 CH6 — the two lazy-dispatch tests below used to read the LIVE
+# wall clock (`datetime.now()` / `time.time()`). Under the old relative-age contract that was
+# harmless: only the ELAPSED gap mattered. Due-ness is now BUCKET-based, so whether a gap
+# crosses a bucket boundary depends on the clock's PHASE — a live clock made these tests
+# flaky by construction rather than merely wrong. They now pin a fixed epoch and zero the
+# jitter, so the assertion is deterministic and still says what it always said: short
+# timeframes dispatch, long ones do not.
+#
+# `_LAZY_NOW` is chosen so that for every timeframe below, the shifted instants for `now` and
+# `now - gap` land in the SAME bucket for the long TFs and DIFFERENT buckets for the short
+# ones. With jitter forced to 0, shift(tf) = TF_SECONDS[tf] * 75 // 100 + 60.
+_LAZY_BASE = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())  # ≡ 0 mod 1d
+
+
+def _pin_no_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Window 1 ⇒ `jitter_minutes` returns 0 for every row, so the phase math is exact."""
+    monkeypatch.setenv("ALGOVAULT_BOT_JITTER_WINDOW_MIN", "1")
+    monkeypatch.delenv("ALGOVAULT_BOT_DISPATCH_OFFSET_PCT", raising=False)
+    monkeypatch.delenv("ALGOVAULT_BOT_CLOSE_GRACE_MIN", raising=False)
+
+
+def _seed(tmp_db: Database, at_epoch: int) -> None:
     tmp_db.upsert_subscriber(1, "u", "en")
     for tf in ("1m", "5m", "15m", "1h", "4h"):
         tmp_db.add_watch(1, "BTC", tf, "BINANCE", "both")
-
-    # Force last_fetched_at = now-61s on every row.
-    past = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+    stamp = datetime.fromtimestamp(at_epoch, tz=timezone.utc).replace(tzinfo=None).isoformat()
     with tmp_db._cursor() as cur:
-        cur.execute("UPDATE watchlists SET last_fetched_at = ?", (past,))
+        cur.execute("UPDATE watchlists SET last_fetched_at = ?", (stamp,))
 
-    due = tmp_db.list_due_watches(int(time.time()), TF_SECONDS)
+
+def test_lazy_dispatch_only_1m_due_at_61s_after_fetch(
+    tmp_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_no_jitter(monkeypatch)
+    now = _LAZY_BASE + 120
+    _seed(tmp_db, now - 61)
+
+    due = tmp_db.list_due_watches(now, TF_SECONDS)
     due_tfs = sorted({r["timeframe"] for r in due})
-    # 1m TF (60s) → due (61s ≥ 60). Others not.
+    # Only the 1m bucket advanced across a 61s gap; every longer TF is still in its bucket.
     assert due_tfs == ["1m"], f"expected only 1m due, got {due_tfs}"
 
 
-def test_lazy_dispatch_1m_5m_due_at_301s(tmp_db: Database) -> None:
-    tmp_db.upsert_subscriber(1, "u", "en")
-    for tf in ("1m", "5m", "15m", "1h", "4h"):
-        tmp_db.add_watch(1, "BTC", tf, "BINANCE", "both")
+def test_lazy_dispatch_1m_5m_due_at_301s(
+    tmp_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_no_jitter(monkeypatch)
+    now = _LAZY_BASE + 300
+    _seed(tmp_db, now - 301)
 
-    past = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
-    with tmp_db._cursor() as cur:
-        cur.execute("UPDATE watchlists SET last_fetched_at = ?", (past,))
-
-    due = tmp_db.list_due_watches(int(time.time()), TF_SECONDS)
+    due = tmp_db.list_due_watches(now, TF_SECONDS)
     due_tfs = sorted({r["timeframe"] for r in due})
-    # 1m and 5m due. 15m+ not.
+    # A 301s gap always crosses a 60s and a 300s boundary; 15m+ stay put at this phase.
     assert due_tfs == ["1m", "5m"], f"got {due_tfs}"
 
 

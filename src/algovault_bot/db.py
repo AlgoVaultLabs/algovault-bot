@@ -15,8 +15,23 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Iterator
+
+from .dispatch_schedule import is_due
+
+
+def _iso_to_epoch(value: object) -> int | None:
+    """`last_fetched_at` is stored as an ISO datetime string. Returns None for NULL or for
+    anything unparseable — callers treat None as never-fetched, so a corrupt stamp can never
+    strand a row permanently un-dispatched."""
+    if value is None:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(value)).replace(tzinfo=timezone.utc).timestamp())
+    except (ValueError, TypeError):
+        return None
 
 
 log = logging.getLogger(__name__)
@@ -798,8 +813,23 @@ class Database:
     def list_due_watches(self, now_epoch_seconds: int, tf_seconds: dict[str, int]) -> list[sqlite3.Row]:
         """Return rows due for the next cron fire (C3 consumer).
 
-        A row is due iff ``now - last_fetched_at >= TF_SECONDS[timeframe]`` OR
-        ``last_fetched_at IS NULL`` (never fetched).
+        SIGNAL-CLOSEDBAR-SHADOW-W1 CH6 — due-ness is now BUCKET-DETERMINISTIC:
+
+            due iff target_epoch(tf, now) > target_epoch(tf, last_fetched_at)
+
+        It used to be RELATIVE AGE (``now - last_fetched_at >= TF_SECONDS[tf]``) with the
+        anchor re-stamped at fetch COMPLETION, seconds past the ``OnCalendar=*:*:00`` tick —
+        so every fire slipped later than the last, forever. Measured on the live box:
+        ``00:44:04 -> 01:45:07 -> ... -> 13:56:03``, exact +61min steps on a 1h row.
+
+        A bucket is a function of the instant alone, so a fetch completing at :04 and one at
+        :07 map to the SAME bucket and produce the same next due-time — the ratchet cannot
+        accumulate. No new column, no migration: each row self-aligns on its first cycle and
+        ``last_fetched_at`` keeps its existing meaning and its existing writer.
+
+        ``tf_seconds`` stays in the signature (callers pass ``TF_SECONDS``) and still decides
+        which timeframes are dispatchable at all, so an unknown timeframe is skipped exactly
+        as before.
         """
         with self._cursor() as cur:
             cur.execute(
@@ -814,21 +844,18 @@ class Database:
         # Filter in Python — keeps the SQL portable and the math local to TF_SECONDS.
         due: list[sqlite3.Row] = []
         for r in all_rows:
-            secs = tf_seconds.get(r["timeframe"], 0)
-            if not secs:
+            if not tf_seconds.get(r["timeframe"], 0):
                 continue
-            if r["last_fetched_at"] is None:
-                due.append(r)
-                continue
-            # last_fetched_at stored as ISO datetime; compare via parse.
-            from datetime import datetime, timezone
-
-            try:
-                ts = datetime.fromisoformat(r["last_fetched_at"]).replace(tzinfo=timezone.utc)
-                age = now_epoch_seconds - int(ts.timestamp())
-                if age >= secs:
-                    due.append(r)
-            except (ValueError, TypeError):
+            # An unparseable stamp resolves to None ⇒ treated as never-fetched ⇒ due, which
+            # preserves the prior behaviour: a row must never strand itself on a bad value.
+            if is_due(
+                r["timeframe"],
+                now_epoch_seconds,
+                _iso_to_epoch(r["last_fetched_at"]),
+                r["chat_id"],
+                r["coin"],
+                r["exchange"],
+            ):
                 due.append(r)
         return due
 
