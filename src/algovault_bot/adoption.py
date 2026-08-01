@@ -73,6 +73,12 @@ SCAN_SHOWCASE_TYPE_PREFIX = "scan_showcase"  # tg_broadcasts.broadcast_type pref
 # aggregating the top-3 fresh setups cross-venue.
 SHOWCASE_TOP_N = 100
 SHOWCASE_TIMEFRAME = "1h"
+# FIX-CONVICTION-CALL-POSTS-W1: USD liquidity floor for the showcase universe (notional OI,
+# or 24h volume on venues exposing no bulk OI — the MCP resolves which). Same figure as
+# scan_funding_arb's per-leg gate, for the same reason: below it a "setup" is not executable
+# enough to publish under our own name. MIRRORED by `agent-forum-post.ts`
+# SHOWCASE_MIN_LIQUIDITY_USD — change both together or the two digests diverge.
+SHOWCASE_MIN_LIQUIDITY_USD = 5_000_000
 
 
 # ── Go-live gating ───────────────────────────────────────────────────────────
@@ -254,7 +260,20 @@ def _scan_one_venue(top_n: int, timeframe: str, exchange: str) -> dict[str, Any]
             # change: the showcase broadcast does not meter per call (zero-user-cost,
             # digest-wave Q3c precedent).
             {"topN": top_n, "timeframe": timeframe, "exchange": exchange,
-             "includeReasoning": True},
+             "includeReasoning": True,
+             # FIX-CONVICTION-CALL-POSTS-W1: universe-side USD liquidity floor. A live scan
+             # on 2026-08-01 returned 1000RATS / GIGGLE / KOMA — three illiquid microcaps,
+             # all at 51% conviction carrying byte-identical reasoning prose. That is the
+             # wrong list to put a subscriber's name against.
+             #
+             # It MUST stay in lockstep with the dev.to showcase's constant
+             # (`agent-forum-post.ts` SHOWCASE_MIN_LIQUIDITY_USD). A floor applied on ONE
+             # surface would silently break the digest parity both surfaces are built on,
+             # so either both change or neither does.
+             #
+             # Applied SERVER-side because the per-call payload carries no liquidity field
+             # at all — there is nothing for this client to filter on.
+             "minLiquidityUsd": SHOWCASE_MIN_LIQUIDITY_USD},
         )
 
 
