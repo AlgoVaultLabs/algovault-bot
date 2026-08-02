@@ -217,7 +217,11 @@ def test_ac3_jitter_is_stable_across_two_process_starts() -> None:
 
 @pytest.mark.parametrize(
     "tf,expected_window",
-    [("1m", 1), ("3m", 1), ("5m", 1), ("15m", 3), ("30m", 3), ("1h", 3), ("1d", 3)],
+    # 15m is 2, not 3: OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W1 added the headroom bound after
+    # a jitter=2 row (XAU/15m) dispatched at offset 0s every bar. This expectation previously
+    # certified the defect as correct, so it flips WITH the fix — leaving it would keep a test
+    # asserting the broken contract.
+    [("1m", 1), ("3m", 1), ("5m", 1), ("15m", 2), ("30m", 3), ("1h", 3), ("1d", 3)],
 )
 def test_ac3_jitter_window_is_bounded_by_the_timeframe(tf: str, expected_window: int) -> None:
     """``max(1, min(configured, TF_MINUTES // 5))`` — a 5m row is never jittered past its
@@ -307,3 +311,60 @@ def test_list_due_watches_still_skips_unknown_timeframes(tmp_db: Database) -> No
     tmp_db.upsert_subscriber(1, "u", "en")
     tmp_db.add_watch(1, "BTC", "1h", "BINANCE", "both")
     assert tmp_db.list_due_watches(BASE, {"4h": 14400}) == []
+
+
+# ── OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W1 — the jitter/tick overflow ─────
+
+
+def test_jitter_window_reserves_one_scheduler_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live 2026-08-01 defect: XAU/15m drew jitter=2, giving shift 675+60+120=855 of a
+    900s bar — 45s of headroom for a 60s tick — so it dispatched at offset 0s EVERY bar,
+    deterministically. `TF_MINUTES // 5` alone permitted that; the headroom bound does not."""
+    monkeypatch.setenv(ENV_OFFSET_PCT, "75")
+    monkeypatch.setenv(ENV_CLOSE_GRACE_MIN, "1")
+    monkeypatch.setenv(ENV_JITTER_WINDOW_MIN, "3")
+
+    assert jitter_window_for("15m") == 2, "15m must allow at most 1 minute of jitter"
+    # The property that actually matters, over every supported timeframe: worst-case shift
+    # plus one tick never reaches the end of the bar.
+    for tf, period in TF_SECONDS.items():
+        max_jitter = (jitter_window_for(tf) - 1) * 60
+        shift = offset_seconds(tf) + close_grace_min() * 60 + max_jitter
+        if period > 900:  # 1m/3m/5m/15m are the constrained end; see the docstring
+            assert shift + 60 <= period, f"{tf}: shift {shift} + tick exceeds {period}"
+        assert max_jitter < period, f"{tf}: jitter {max_jitter} alone exceeds its own bar"
+
+
+def test_the_offending_row_now_dispatches_late_bar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """chat 544140240 XAU/15m — the row that fired at offset 0s every bar. Simulated over four
+    consecutive bars it must now land late, and stay bucket-constant."""
+    monkeypatch.setenv(ENV_OFFSET_PCT, "75")
+    monkeypatch.setenv(ENV_CLOSE_GRACE_MIN, "1")
+    monkeypatch.setenv(ENV_JITTER_WINDOW_MIN, "3")
+
+    args = (544140240, "XAU", "BINANCE")
+    assert jitter_minutes(544140240, "XAU", "15m", "BINANCE") <= 1
+
+    offsets: list[int] = []
+    last: int = BASE
+    for _ in range(4):
+        now: int = last
+        while True:
+            now += 60
+            now -= now % 60
+            if is_due("15m", now, last, *args):
+                offsets.append(now % 900)
+                last = now + 1
+                break
+    assert len(set(offsets)) == 1, f"must stay bucket-constant, got {offsets}"
+    assert offsets[0] >= 600, f"must dispatch late-bar, got {offsets[0]}s into a 900s bar"
+
+
+def test_coarse_timeframes_keep_their_full_jitter_spread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The headroom bound must not quietly collapse spread where there is room for it —
+    otherwise it trades one defect (bar-open dispatch) for another (budget contention)."""
+    monkeypatch.setenv(ENV_OFFSET_PCT, "75")
+    monkeypatch.setenv(ENV_CLOSE_GRACE_MIN, "1")
+    monkeypatch.setenv(ENV_JITTER_WINDOW_MIN, "3")
+    for tf in ("30m", "1h", "2h", "4h", "8h", "12h", "1d"):
+        assert jitter_window_for(tf) == 3, f"{tf} has ample headroom and must keep window 3"

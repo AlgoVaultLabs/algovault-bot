@@ -51,6 +51,10 @@ DEFAULT_DISPATCH_OFFSET_PCT: Final[int] = 75
 # minute-resolution equivalent of Freqtrade opening trades "a few seconds after candle open".)
 DEFAULT_CLOSE_GRACE_MIN: Final[int] = 1
 DEFAULT_JITTER_WINDOW_MIN: Final[int] = 3
+# The scheduler grid: `algovault-bot-cron.timer` is OnCalendar=*:*:00, so every due-time is
+# rounded UP to the next whole minute. Any shift budget must reserve one of these or the fire
+# lands in the following bar.
+TICK_SECONDS: Final[int] = 60
 
 ENV_OFFSET_PCT: Final[str] = "ALGOVAULT_BOT_DISPATCH_OFFSET_PCT"
 ENV_CLOSE_GRACE_MIN: Final[str] = "ALGOVAULT_BOT_CLOSE_GRACE_MIN"
@@ -122,18 +126,41 @@ def offset_seconds(timeframe: str, pct: int | None = None) -> int:
 
 
 def jitter_window_for(timeframe: str, configured: int | None = None) -> int:
-    """``max(1, min(configured, TF_MINUTES // 5))``.
+    """``max(1, min(configured, TF_MINUTES // 5, headroom_minutes))``.
 
-    Bounded BY THE TIMEFRAME so a 5m row is never jittered past its own bar: a 5m bar is 5
-    minutes, ``5 // 5 == 1``, so its window is exactly one minute — i.e. no spread at all,
-    which is correct. Without this bound a 3-minute window would routinely push a 5m row
-    into the following bar and re-create the drift in a new form.
+    TWO bounds, because the first one alone does not deliver what it promises:
+
+    1. **By the timeframe** — a 5m bar is 5 minutes, ``5 // 5 == 1``, so its window is exactly
+       one minute, i.e. no spread. Without it a 3-minute window would routinely push a 5m row
+       into the following bar and re-create the drift in a new form.
+
+    2. **By the remaining HEADROOM, including one scheduler tick.** Bound 1 ignores that the
+       scheduler fires on a 60-SECOND grid, so a due-time is always rounded UP to the next
+       tick. At 15m with ``OFFSET_PCT=75`` the shift is ``675 + 60 grace + 120 jitter = 855``
+       of a 900s bar — only 45s of headroom for a 60s tick, so the fire quantizes forward into
+       the NEXT bar's OPEN. Measured live 2026-08-01: chat 544140240 XAU/15m drew jitter=2 and
+       dispatched at offset **0s every single bar**, deterministically — the exact degenerate
+       zone this whole design exists to move away from, reached by the mechanism that was
+       supposed to prevent it. Bound 2 subtracts the tick, so 15m allows at most 1 minute of
+       jitter (max shift 795 + 60 = 855 <= 900).
+
+    Bound 2 changes ONLY 15m (window 3 -> 2). 30m and coarser have hundreds of seconds of
+    headroom; 1m/3m/5m already sat at window 1 via bound 1. Their shift STILL overflows the
+    bar at 75% offset plus a 60s grace on a 60s tick (1m's grace alone IS the whole bar) —
+    that is a separate, pre-existing design question about which knob gives way, deliberately
+    NOT decided here. Tracked as OPS-BOT-SHORT-TF-DISPATCH-OVERFLOW-W{NEXT}.
     """
     cfg = jitter_window_min() if configured is None else configured
     tf_sec = TF_SECONDS.get(timeframe)
     if tf_sec is None:
         return 1
-    return max(1, min(cfg, (tf_sec // 60) // 5))
+    by_timeframe = (tf_sec // 60) // 5
+    # A window of W minutes yields jitter in [0, W-1], so W-1 minutes must fit alongside the
+    # offset, the grace and one tick. Floor division on a negative headroom yields <= 0, which
+    # `max(1, …)` then clamps to "no spread" — the correct degenerate answer.
+    headroom_seconds = tf_sec - offset_seconds(timeframe) - close_grace_min() * 60 - TICK_SECONDS
+    by_headroom = headroom_seconds // 60 + 1
+    return max(1, min(cfg, by_timeframe, by_headroom))
 
 
 def jitter_minutes(
