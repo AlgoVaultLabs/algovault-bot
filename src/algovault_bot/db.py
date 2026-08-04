@@ -326,6 +326,61 @@ SCANWATCH_SIG_MIGRATIONS = (
     "ALTER TABLE scan_watches ADD COLUMN last_sent_sig TEXT",
 )
 
+# GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH1): first-touch acquisition channel for a
+# subscriber, set from a ``?start=src_<channel>`` deep link. NULL = joined before
+# this wave, or via an untagged link — absence is absence, never a synthetic value.
+#
+# WHY THIS AND NOT signup_attribution: a /start payload arrives THROUGH Telegram, so
+# the chat_id is authenticated by construction. The funnel's `utm_source` is a query
+# string on a public URL — Step 0 measured 21 rows (12 tg_bot + 9 direct) minted by a
+# single Baidu crawler replaying a discovered signup link, which is what produced the
+# false "tg_bot converts 7.69%". This column is the trustworthy side of that pair.
+#
+# Additive ADD COLUMN (no CHECK, no table-rebuild) — idempotent via the _init_schema
+# try/except loop, because SQLite has no ADD COLUMN IF NOT EXISTS.
+ACQUISITION_SOURCE_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN acquisition_source TEXT",
+)
+
+# Recorded when a payload carries a source we do not recognise. Default-DENY: an
+# unknown tag is never trusted into a channel metric, but it is also never dropped —
+# the count of `unknown` IS the attribution-coverage ceiling CH4 has to report.
+UNKNOWN_ACQUISITION_SOURCE: Final = "unknown"
+
+# The closed acquisition-channel vocabulary (mirrors adoption._VALID_SOURCES).
+# Adding a channel = adding a row here; nothing else changes. Slugs are
+# lowercase [a-z0-9_] and MUST NOT contain '-', which is the composite separator
+# in the deep-link grammar (see handlers.parse_start_payload).
+ACQUISITION_CHANNELS: Final = frozenset(
+    {
+        "x",             # X/Twitter posts + replies
+        "devto",         # dev.to articles (canonical announcement channel)
+        "github",        # repo READMEs / releases / issues
+        "npm",           # npm package page
+        "geo",           # AI-engine / GEO answer surfaces
+        "awesome_list",  # crypto-vertical awesome-list entries
+        "referral_card", # the in-bot referral share card
+        "landing",       # algovault.com landing + docs
+        "partner",       # partner / integration placements
+    }
+)
+
+
+def normalize_acquisition_source(raw: str | None) -> str:
+    """Default-deny a raw deep-link channel tag to a storable value.
+
+    Anything not in ``ACQUISITION_CHANNELS`` becomes ``unknown`` — never the raw
+    string, so a crafted payload cannot invent a channel in the readout. Returns
+    ``unknown`` (not None) for empty/garbage: the user DID arrive via a tagged
+    link we could not read, and that is a different fact from "no tag at all".
+    """
+    if not raw:
+        return UNKNOWN_ACQUISITION_SOURCE
+    slug = raw.strip().lower()
+    if slug in ACQUISITION_CHANNELS:
+        return slug
+    return UNKNOWN_ACQUISITION_SOURCE
+
 
 def _migrate_scan_watches_rank_by(cur: sqlite3.Cursor) -> None:
     """SCAN-RANKBY-W1: widen the scan_watches PRIMARY KEY to include ``rank_by`` on an
@@ -428,6 +483,9 @@ class Database:
                 # BOT-DIGEST-COUNT-ALL-CALLS-W1 (2026-06-25): alerts_fired.source
                 # discriminator (runs after DIGEST_LAST24H_MIGRATIONS creates the table).
                 *DIGEST_SOURCE_MIGRATIONS,
+                # GROWTH-TG-CHANNEL-ACQUISITION-W1 (2026-08-05, CH1): first-touch
+                # acquisition channel from ?start=src_<channel>.
+                *ACQUISITION_SOURCE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -498,6 +556,54 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM subscribers")
             return int(cur.fetchone()[0])
+
+    # ── GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH1): first-touch acquisition source ──
+
+    def set_acquisition_source_first_touch(self, chat_id: int, source: str) -> bool:
+        """Record the acquisition channel for this chat, FIRST TOUCH ONLY.
+
+        Returns True iff this call is what set the value. The ``IS NULL`` guard in
+        the WHERE clause is the immutability: a second /start carrying a different
+        tag updates zero rows, so a later click can never claim a signup the first
+        one earned. Idempotent — re-sending the SAME tag also returns False, which
+        is correct (it did not set it; the first touch did).
+
+        Caller must have upserted the subscriber row first; a missing row updates
+        nothing and returns False rather than creating a sourced-but-unonboarded
+        subscriber.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET acquisition_source = ? "
+                "WHERE chat_id = ? AND acquisition_source IS NULL",
+                (source, chat_id),
+            )
+            return cur.rowcount > 0
+
+    def get_acquisition_source(self, chat_id: int) -> str | None:
+        """First-touch acquisition channel, or None for a pre-CH1 / untagged join.
+
+        None is meaningful and must stay None: CH2 emits the signup URL exactly as
+        it did before this wave for these users (absence is absence, no empty param).
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT acquisition_source FROM subscribers WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+
+    def count_by_acquisition_source(self) -> dict[str, int]:
+        """Subscribers per channel, for the CH4 readout. NULL is reported under the
+        key ``(untagged)`` rather than dropped — the untagged share IS the coverage
+        ceiling on every channel number, so it must never silently vanish."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(acquisition_source, '(untagged)') AS s, COUNT(*) "
+                "FROM subscribers GROUP BY s ORDER BY COUNT(*) DESC"
+            )
+            return {str(r[0]): int(r[1]) for r in cur.fetchall()}
 
     # ── REFERRAL-PARITY-NOTIFS-W1 / C2: referral-code ↔ chat_id mapping ──
     def set_referral_code(self, chat_id: int, code: str) -> None:
