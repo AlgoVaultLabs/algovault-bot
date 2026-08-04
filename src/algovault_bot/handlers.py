@@ -1296,6 +1296,21 @@ def register_handlers(app: Application, db: Database) -> None:
             "true" if first_touch else "false",
         )
 
+    def _acquisition_source_or_none(chat_id: int) -> str | None:
+        """Stored first-touch source for CTA carriage, fail-soft.
+
+        GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2). A read failure must degrade to the
+        pre-wave URL, never to a broken /start — so this returns None on any error,
+        which signup_url() renders byte-identically to before this wave.
+        """
+        try:
+            return db.get_acquisition_source(chat_id)
+        except Exception:
+            log.exception(
+                '{"event": "acquisition_source_read_failed", "chat_id": %d}', chat_id
+            )
+            return None
+
     async def _start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
@@ -1334,9 +1349,12 @@ def register_handlers(app: Application, db: Database) -> None:
             # tags) — send WITHOUT parse_mode so the plain track-record domain auto-links.
             reply = handle_start(db, chat_id, username, lang)
             # TG-BUTTON-UX-W1 (C4): append the inline button menu.
+            # GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): the menu's Upgrade button carries
+            # the stored first-touch source as utm_medium. None (every pre-CH1 and every
+            # untagged subscriber) → byte-identical URL to before this wave.
             await update.message.reply_text(
                 reply, disable_web_page_preview=True,
-                reply_markup=keyboards.main_menu_kb(),
+                reply_markup=keyboards.main_menu_kb(_acquisition_source_or_none(chat_id)),
             )
         # TG-WATCH-ADOPTION-BROADCAST-W1 (R1): fire the one-time first-watch
         # nudge for a 0-engagement sub right after /start. Gated by the go-live

@@ -57,21 +57,28 @@ def _nav_row(prefix: str, *, back: bool = True) -> list[InlineKeyboardButton]:
     return row
 
 
-def upgrade_button(campaign: str) -> InlineKeyboardButton:
+def upgrade_button(campaign: str, source: str | None = None) -> InlineKeyboardButton:
     """TG-SCANWATCH-TF-CADENCE-W1 (B): the shared Upgrade CTA button (label + utm-tagged
     signup URL). /start's menu + /help both build from this → the CTA is single-derived.
-    `campaign` feeds signup_url's utm_campaign (start_welcome / help_message)."""
-    return InlineKeyboardButton("⬆️ Upgrade", url="https://" + signup_url(campaign))
+    `campaign` feeds signup_url's utm_campaign (start_welcome / help_message).
+
+    GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): optional `source` feeds utm_medium — the
+    subscriber's first-touch acquisition channel. Defaults to None so every existing
+    caller emits a byte-identical URL."""
+    return InlineKeyboardButton("⬆️ Upgrade", url="https://" + signup_url(campaign, source))
 
 
-def upgrade_markup(campaign: str) -> InlineKeyboardMarkup:
+def upgrade_markup(campaign: str, source: str | None = None) -> InlineKeyboardMarkup:
     """Standalone one-button Upgrade markup — /help attaches this as its reply_markup."""
-    return InlineKeyboardMarkup([[upgrade_button(campaign)]])
+    return InlineKeyboardMarkup([[upgrade_button(campaign, source)]])
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
+def main_menu_kb(source: str | None = None) -> InlineKeyboardMarkup:
     """The /start BotFather-style menu. Watch/Scan → wizards; others → existing
-    handlers; Upgrade → the shared upgrade_button (utm preserved via signup_url)."""
+    handlers; Upgrade → the shared upgrade_button (utm preserved via signup_url).
+
+    `source` (GROWTH-TG-CHANNEL-ACQUISITION-W1 CH2) is threaded to the Upgrade
+    button only; None → byte-identical to pre-wave."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 Watch", callback_data="mnu:watch"),
          InlineKeyboardButton("🔍 Scan", callback_data="mnu:scan")],
@@ -80,7 +87,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("💰 Funding", callback_data="mnu:funding")],
         [InlineKeyboardButton("📋 My list", callback_data="mnu:list"),
          InlineKeyboardButton("❓ Help", callback_data="mnu:help")],
-        [upgrade_button("start_welcome")],
+        [upgrade_button("start_welcome", source)],
     ])
 
 
