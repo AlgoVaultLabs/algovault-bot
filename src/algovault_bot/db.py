@@ -605,6 +605,30 @@ class Database:
             )
             return {str(r[0]): int(r[1]) for r in cur.fetchall()}
 
+    def referral_mint_rate(self) -> tuple[int, int]:
+        """(minted, total) subscribers — READ-ONLY, zero schema change.
+
+        GROWTH-TG-LEVER-ACTIVATION-W1 (CH3). ``referral_code`` is written by
+        ``set_referral_code`` when a user runs /referral, so a non-NULL value means
+        that subscriber actually minted a shareable code.
+
+        Retained as a STANDING OBSERVATION, not as anyone's primary metric. CH3's
+        premise — that the referral loop was merely undiscovered — was falsified at
+        Step 0: the value-moment nudge (``cta.referral_nudge_text``, live and
+        ungated via ``alert_engine``) had already reached 19 of 50 subscribers and
+        the mint rate was still 1 of 50. A referral loop is a multiplier on an
+        engaged base; with 1-3 daily actives there is nothing to multiply. This
+        exists so the successor activation wave has the control series — NOT to
+        justify more surfacing.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FILTER (WHERE referral_code IS NOT NULL), COUNT(*) "
+                "FROM subscribers"
+            )
+            row = cur.fetchone()
+            return (int(row[0]), int(row[1]))
+
     # ── REFERRAL-PARITY-NOTIFS-W1 / C2: referral-code ↔ chat_id mapping ──
     def set_referral_code(self, chat_id: int, code: str) -> None:
         """Cache the engine's referral code for this chat (idempotent, set on /referral)."""
