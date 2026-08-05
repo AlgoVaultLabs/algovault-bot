@@ -17,9 +17,33 @@ from .batch import DEFAULT_TOP_N, TF_ORDER
 SIGNUP_BASE: Final = "api.algovault.com/signup?plan=starter"
 
 
-def signup_url(campaign: str) -> str:
-    """Build a UTM-tagged signup URL. Used for every bot-side CTA."""
-    return f"{SIGNUP_BASE}&utm_source=tg_bot&utm_campaign={campaign}"
+def signup_url(campaign: str, source: str | None = None) -> str:
+    """Build a UTM-tagged signup URL. Used for every bot-side CTA.
+
+    GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): ``source`` is the subscriber's
+    first-touch acquisition channel (db.get_acquisition_source). Two ORTHOGONAL
+    dimensions ride this URL and must never be collapsed:
+
+        utm_campaign -> WHICH in-bot CTA converted   (11 live tags)
+        utm_medium   -> HOW the user found the bot   (this wave)
+
+    ``utm_source`` stays ``tg_bot`` FOREVER. signal-MCP's ``deriveChannel``
+    (src/lib/subscriber-attribution.ts) keys the channel slug off it, so re-slugging
+    would orphan every historical row and break REVENUE-TRUTH-W1's join. Add; never
+    re-slug.
+
+    Carrier choice: ``utm_medium`` is already read by signal-MCP (index.ts) and
+    persisted to ``signup_attribution.utm_medium``, which is verified NULL on all
+    396 live rows — so this needs ZERO change in that repo and collides with nothing.
+
+    ``source=None`` (every pre-CH1 subscriber, and anyone who arrived untagged)
+    emits the URL BYTE-IDENTICALLY to before this wave. Absence is absence: no
+    empty parameter, no ``utm_medium=none``.
+    """
+    url = f"{SIGNUP_BASE}&utm_source=tg_bot&utm_campaign={campaign}"
+    if source:
+        url = f"{url}&utm_medium={source}"
+    return url
 
 
 # TG-COPY-DEFAULTS-VENUES-W1 (R1): plain-language onboarding, PLAIN TEXT (no HTML tags;

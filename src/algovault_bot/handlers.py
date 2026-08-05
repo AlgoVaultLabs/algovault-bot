@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from . import adoption, asset_universe, batch, keyboards, messages, referral, referral_client, wizard
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
-from .db import Database, PER_USER_WATCHLIST_CAP
+from .db import Database, PER_USER_WATCHLIST_CAP, normalize_acquisition_source
 from .link_validator import validate_api_key
 from .log_setup import log_alert_event
 from .mcp_client import McpError, from_env
@@ -123,6 +123,70 @@ def _validate_symbol(coin: str, timeframe: str, exchange: str) -> str | None:
 
 _AUTH_PREFIX = "auth_"
 _REF_PREFIX = "ref_"  # TG-REFERRAL-W1: /start ref_<CODE> deep-link referral join
+# GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH1): ?start=src_<channel> acquisition tag.
+_SRC_PREFIX = "src_"
+# Composite separator. '-' is base64url-legal (so Telegram accepts it) and appears
+# in NEITHER live payload today: referral codes are [A-Z0-9]{8} and API keys are
+# av_<tier>_<hex>. Channel slugs are [a-z0-9_] with '-' banned (db.ACQUISITION_CHANNELS),
+# so the split point is unambiguous by construction rather than by convention.
+_COMPOSITE_SEP = "-"
+
+# Telegram deep-link ceiling — VERIFIED at core.telegram.org/api/links 2026-08-05:
+# "Start parameter, up to 64 base64url characters", i.e. A-Z a-z 0-9 _ - and ONE
+# payload per link. No '?', '=' or '&' — UTM-style parameters are impossible here,
+# which is why a referral code and a source tag must share one token.
+START_PAYLOAD_MAX_LEN = 64
+_START_PAYLOAD_CHARSET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
+
+# Dark-guard law: a source-write that fails must be COUNTABLE, not merely logged —
+# a silently-swallowed write is indistinguishable from "nobody arrived tagged".
+# Read by tests and by the CH4 readout; never resets except on process restart.
+_acquisition_write_failures = 0
+
+
+def acquisition_write_failures() -> int:
+    """Count of /start source-writes that raised since process start (dark-guard)."""
+    return _acquisition_write_failures
+
+
+def is_valid_start_payload(payload: str) -> bool:
+    """True iff Telegram would actually carry this payload (<=64 base64url chars)."""
+    return (
+        0 < len(payload) <= START_PAYLOAD_MAX_LEN
+        and all(c in _START_PAYLOAD_CHARSET for c in payload)
+    )
+
+
+def parse_start_payload(payload: str) -> tuple[str, str | None]:
+    """Split a /start deep-link payload into ``(primary, acquisition_source)``.
+
+    Telegram carries exactly ONE payload of <=64 base64url chars, so a referral
+    code and a source tag cannot each have their own parameter — they share one
+    token, separated by ``-``:
+
+        src_<channel>              -> ("",           "<channel>")
+        ref_<CODE>                 -> ("ref_<CODE>", None)
+        ref_<CODE>-src_<channel>   -> ("ref_<CODE>", "<channel>")
+        auth_<key>                 -> ("auth_<key>", None)
+        <anything else>            -> (<payload>,    None)
+
+    ``auth_`` is deliberately NEVER composed: an API key's charset belongs to the
+    key issuer, not to us, so splitting one on '-' could corrupt a live linking
+    flow. Auth is a linking path, not an acquisition path — it has nothing to tag.
+
+    Pure function, no I/O — the whole grammar is unit-testable without a bot. The
+    returned source is RAW; default-deny normalisation is db.normalize_acquisition_source.
+    """
+    if not payload or payload.startswith(_AUTH_PREFIX):
+        return payload, None
+    head, sep, tail = payload.partition(_COMPOSITE_SEP)
+    if sep and tail.startswith(_SRC_PREFIX):
+        return head, tail[len(_SRC_PREFIX):]
+    if payload.startswith(_SRC_PREFIX):
+        return "", payload[len(_SRC_PREFIX):]
+    return payload, None
 
 
 # TG-BUTTON-UX-W1: curated Menu-button + `/` autocomplete list, set on boot via
@@ -1192,6 +1256,61 @@ def _user_meta(update: Update) -> tuple[int, str | None, str | None]:
 
 
 def register_handlers(app: Application, db: Database) -> None:
+    def _record_acquisition_source(
+        chat_id: int, username: str | None, lang: str | None, src_raw: str
+    ) -> None:
+        """First-touch acquisition-channel write. Fail-soft, but COUNTABLE.
+
+        /start is the entire first impression, so nothing here may raise into it —
+        the same contract the ref_ path already states ("a blip never blocks
+        /start"). But per this repo's dark-guard law a swallowed failure must stay
+        observable, so the except branch bumps a counter as well as logging: a
+        guard that exits quietly on every failure is indistinguishable from one
+        that is working and simply never fires.
+
+        The upsert comes first because the UPDATE is guarded on the row existing —
+        without it a src-only /start would update zero rows and silently lose the
+        tag. Same "ensure the row" step _handle_ref_start does for the bonus credit.
+        """
+        global _acquisition_write_failures
+        source = normalize_acquisition_source(src_raw)
+        try:
+            db.upsert_subscriber(chat_id, username, lang)
+            first_touch = db.set_acquisition_source_first_touch(chat_id, source)
+        except Exception:
+            _acquisition_write_failures += 1
+            log.exception(
+                '{"event": "start_source_write_failed", "chat_id": %d, "source": "%s"}',
+                chat_id,
+                source,
+            )
+            return
+        # A raw tag is operator-authored and public (it rides a shareable link), so
+        # logging the NORMALISED value is PII-safe. The raw value is never logged —
+        # default-deny means an attacker-crafted tag never reaches the log either.
+        log.info(
+            '{"event": "start_source_param_received", "chat_id": %d, '
+            '"source": "%s", "first_touch": %s}',
+            chat_id,
+            source,
+            "true" if first_touch else "false",
+        )
+
+    def _acquisition_source_or_none(chat_id: int) -> str | None:
+        """Stored first-touch source for CTA carriage, fail-soft.
+
+        GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2). A read failure must degrade to the
+        pre-wave URL, never to a broken /start — so this returns None on any error,
+        which signup_url() renders byte-identically to before this wave.
+        """
+        try:
+            return db.get_acquisition_source(chat_id)
+        except Exception:
+            log.exception(
+                '{"event": "acquisition_source_read_failed", "chat_id": %d}', chat_id
+            )
+            return None
+
     async def _start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
@@ -1199,6 +1318,15 @@ def register_handlers(app: Application, db: Database) -> None:
         # BOT-W2: detect deep-link param `/start auth_<api_key>`.
         # NEVER log args[0] value at INFO — it may carry the api_key.
         args = ctx.args or []
+        # GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH1): peel any `-src_<channel>` suffix
+        # BEFORE dispatch, so `payload` below is byte-identical to what the auth_ /
+        # ref_ / plain branches saw prior to this wave for every link that carries
+        # no source tag. The three branches are otherwise untouched.
+        raw_payload = args[0] if args and isinstance(args[0], str) else ""
+        payload, src_raw = parse_start_payload(raw_payload)
+        if src_raw is not None:
+            _record_acquisition_source(chat_id, username, lang, src_raw)
+        args = [payload] if payload else []
         if args and isinstance(args[0], str) and args[0].startswith(_AUTH_PREFIX):
             api_key = args[0][len(_AUTH_PREFIX):]
             log.info(
@@ -1221,9 +1349,12 @@ def register_handlers(app: Application, db: Database) -> None:
             # tags) — send WITHOUT parse_mode so the plain track-record domain auto-links.
             reply = handle_start(db, chat_id, username, lang)
             # TG-BUTTON-UX-W1 (C4): append the inline button menu.
+            # GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): the menu's Upgrade button carries
+            # the stored first-touch source as utm_medium. None (every pre-CH1 and every
+            # untagged subscriber) → byte-identical URL to before this wave.
             await update.message.reply_text(
                 reply, disable_web_page_preview=True,
-                reply_markup=keyboards.main_menu_kb(),
+                reply_markup=keyboards.main_menu_kb(_acquisition_source_or_none(chat_id)),
             )
         # TG-WATCH-ADOPTION-BROADCAST-W1 (R1): fire the one-time first-watch
         # nudge for a 0-engagement sub right after /start. Gated by the go-live
