@@ -464,9 +464,14 @@ def handle_scan(
         return messages.scan_error_message(str(e))
     state = get_quota_state(db, chat_id)
     if state.exhausted:
+        # GROWTH-TG-LEVER-ACTIVATION-W1 (CH2): carry the first-touch acquisition
+        # source. This is the CTA that produced BOTH real conversions, so without
+        # it the readout can say a user converted but not where they came from —
+        # on the one path where conversion actually happens.
+        src = db.get_acquisition_source(chat_id)
         return (
             f"You've used all {state.total} free calls this month. "
-            f"Upgrade for more: {messages.signup_url('scan_quota_exhausted')}"
+            f"Upgrade for more: {messages.signup_url('scan_quota_exhausted', src)}"
         )
     try:
         result = _scan_via_mcp(top_n, timeframe, exchange, rank)
@@ -609,9 +614,10 @@ def handle_regime(
             return _USAGE_REGIME  # self-contained friendly error (R5)
     state = get_quota_state(db, chat_id)
     if state.exhausted:
+        src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
         return (
             f"You've used all {state.total} free calls this month. "
-            f"Upgrade for more: {messages.signup_url('regime_quota_exhausted')}"
+            f"Upgrade for more: {messages.signup_url('regime_quota_exhausted', src)}"
         )
     regime_tf = timeframe if timeframe in REGIME_TFS else "1h"
     try:
@@ -674,9 +680,10 @@ def handle_call(
     if call in ("BUY", "SELL"):
         state = get_quota_state(db, chat_id)
         if state.exhausted:
+            src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
             return (
                 f"You've used all {state.total} free calls this month. "
-                f"Upgrade for more: {messages.signup_url('call_quota_exhausted')}"
+                f"Upgrade for more: {messages.signup_url('call_quota_exhausted', src)}"
             )
         consume_quota(db, chat_id, units=1)
     return _format_call_reply(coin, timeframe, exchange, result)
@@ -769,9 +776,10 @@ def handle_funding(
         return _USAGE_FUNDING  # R6: self-contained friendly error (bare /funding = top 5)
     state = get_quota_state(db, chat_id)
     if state.exhausted:
+        src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
         return (
             f"You've used all {state.total} free calls this month. "
-            f"Upgrade for more: {messages.signup_url('funding_quota_exhausted')}"
+            f"Upgrade for more: {messages.signup_url('funding_quota_exhausted', src)}"
         )
     try:
         result = _funding_via_mcp(limit, _DEFAULT_FUNDING_MIN_BPS)
