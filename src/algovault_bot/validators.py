@@ -20,6 +20,29 @@ TIMEFRAMES: Final[frozenset[str]] = frozenset(
     {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d"}
 )
 
+# SIGNAL-CLOSEDBAR-FLIP-W1 CH3 (2026-08-07): 1m is a valid ON-DEMAND timeframe and a
+# structurally invalid PUSH timeframe. The two are not the same question, so they get two
+# sets.
+#
+# The engine now scores on CONFIRMED bars only, and the dispatcher fires on a 60-second
+# tick. On a 60-second bar that leaves EXACTLY ONE dispatch opportunity per bar, so the
+# close-grace cannot be honoured: whatever phase the tick lands on, the just-closed bar may
+# not be published by the venue yet, and the alert then carries a silently one-bar-stale
+# verdict. There is no offset to shift to — the bar and the tick are the same length — so
+# this is arithmetic, not a tuning problem, and no config value fixes it.
+#
+# It does NOT affect one-shot answers: /call, /regime, /scan and the MCP tools compute at
+# request time against whatever has closed by then, which is exactly the freshness contract
+# a caller asked for. So:
+#
+#   TIMEFRAMES       — may I ANSWER for this timeframe right now?      (on-demand)
+#   PUSH_TIMEFRAMES  — may I SCHEDULE a repeating alert on it?         (push)
+#
+# Anything that schedules validates against PUSH_TIMEFRAMES; anything answering a one-shot
+# request keeps TIMEFRAMES. Deriving one from the other (rather than writing a second
+# literal) keeps a future timeframe addition from silently skipping the push question.
+PUSH_TIMEFRAMES: Final[frozenset[str]] = TIMEFRAMES - {"1m"}
+
 # Per CLAUDE.md TF→seconds map cited in C3 spec line 248.
 TF_SECONDS: Final[dict[str, int]] = {
     "1m": 60,
@@ -95,6 +118,41 @@ def normalize_timeframe(raw: str) -> str:
         sorted_tfs = " ".join(sorted(TIMEFRAMES, key=lambda x: TF_SECONDS[x]))
         raise ValidationError(f"Invalid timeframe '{raw}'. Pick one of: {sorted_tfs}")
     return tf
+
+
+def smallest_push_timeframe() -> str:
+    """The shortest timeframe that CAN be pushed — derived, never a literal.
+
+    Named in the rejection message below, so that retiring or restoring a push timeframe
+    updates the user-facing suggestion automatically instead of leaving it pointing at a
+    timeframe we no longer push.
+    """
+    return min(PUSH_TIMEFRAMES, key=lambda x: TF_SECONDS[x])
+
+
+def normalize_push_timeframe(raw: str) -> str:
+    """`normalize_timeframe` for surfaces that SCHEDULE a repeating alert.
+
+    Kept separate rather than folded into `normalize_timeframe` because "may I answer for
+    this timeframe" and "may I schedule a repeating alert on it" are different questions —
+    see PUSH_TIMEFRAMES.
+
+    A timeframe that is valid on demand but not for push gets its OWN message naming the
+    alternative, because the generic "Pick one of: …" list reads as a typo report and would
+    leave the user guessing why a timeframe they can plainly see in /help was refused.
+    """
+    tf = raw.strip().lower()
+    if tf in PUSH_TIMEFRAMES:
+        return tf
+    if tf in TIMEFRAMES:
+        raise ValidationError(
+            f"{tf} alerts can't be scheduled. A {tf} candle is the same length as the alert "
+            f"tick, so there's no room to wait for the candle to close first — the verdict "
+            f"could reach you one candle out of date. Use {smallest_push_timeframe()} for "
+            f"alerts, or ask any time with /call <COIN> {tf}."
+        )
+    sorted_tfs = " ".join(sorted(PUSH_TIMEFRAMES, key=lambda x: TF_SECONDS[x]))
+    raise ValidationError(f"Invalid timeframe '{raw}'. Pick one of: {sorted_tfs}")
 
 
 def normalize_exchange(raw: str | None) -> str:

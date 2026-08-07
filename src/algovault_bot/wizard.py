@@ -87,7 +87,7 @@ def build_watch_conversation(
         await q.answer()
         _pick(ctx)["coin"] = q.data.split(":", 2)[2]
         await q.edit_message_text(
-            f"📈 {_pick(ctx)['coin']} — pick a timeframe:", reply_markup=keyboards.tf_grid_kb("wz")
+            f"📈 {_pick(ctx)['coin']} — pick a timeframe:", reply_markup=keyboards.tf_grid_kb("wz", push_only=True)
         )
         return W_TF
 
@@ -120,7 +120,7 @@ def build_watch_conversation(
             return W_COIN
         _pick(ctx)["coin"] = coin
         await update.message.reply_text(
-            f"📈 {coin} — pick a timeframe:", reply_markup=keyboards.tf_grid_kb("wz")
+            f"📈 {coin} — pick a timeframe:", reply_markup=keyboards.tf_grid_kb("wz", push_only=True)
         )
         return W_TF
 
@@ -174,7 +174,7 @@ def build_watch_conversation(
             return W_EXCHANGE
         await q.answer()
         await q.edit_message_text(
-            f"📈 {_pick(ctx).get('coin')} — pick a timeframe:", reply_markup=keyboards.tf_grid_kb("wz")
+            f"📈 {_pick(ctx).get('coin')} — pick a timeframe:", reply_markup=keyboards.tf_grid_kb("wz", push_only=True)
         )
         return W_TF
 

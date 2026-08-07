@@ -43,6 +43,7 @@ from .validators import (
     normalize_alert_type,
     normalize_coin,
     normalize_exchange,
+    normalize_push_timeframe,
     normalize_timeframe,
 )
 from .quota import consume_quota, get_quota_state, record_call_delivered
@@ -813,7 +814,11 @@ def _parse_scanwatch_args(args: list[str]) -> tuple[int, str, str, str, str | No
             exchange = tok.upper()
         elif tok.lower() in TIMEFRAMES:
             if not seen_tf:
-                timeframe = tok.lower()
+                # /scanwatch SCHEDULES a repeating alert, so the push set governs. Matching
+                # on TIMEFRAMES (not PUSH_TIMEFRAMES) is deliberate: it keeps `1m` recognised
+                # as a TIMEFRAME token so the validator can explain why it is refused, instead
+                # of it falling through to the generic unrecognised-token error.
+                timeframe = normalize_push_timeframe(tok)
                 seen_tf = True
             elif is_valid_cadence(tok.lower()):
                 cadence = tok.lower()
@@ -1038,6 +1043,9 @@ def handle_unwatch(
 
     try:
         coin = None if batch.is_all(args[0]) else normalize_coin(args[0])
+        # normalize_timeframe (the FULL on-demand set), NOT normalize_push_timeframe:
+        # REMOVAL must accept any timeframe that could ever have been added, or a retired
+        # push timeframe would strand its existing rows with no way to delete them.
         timeframe = None if batch.is_all(args[1]) else normalize_timeframe(args[1])
         if len(args) >= 3 and not batch.is_all(args[2]):
             exchange: str | None = normalize_exchange(args[2])

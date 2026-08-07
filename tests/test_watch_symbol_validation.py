@@ -23,7 +23,9 @@ def test_watch_rejects_unknown_symbol(tmp_db: Database, monkeypatch: pytest.Monk
         "_validate_symbol",
         lambda c, tf, ex: f"❌ '{c}' isn't recognized by AlgoVault on {ex}.",
     )
-    reply = handlers.handle_watch(tmp_db, 1, "u", "en", ["XAUUSD", "1m", "BINANCE"])
+    # TF is incidental here — the subject is symbol validation. Moved off 1m by
+    # SIGNAL-CLOSEDBAR-FLIP-W1 CH3, which rejects 1m BEFORE the symbol check runs.
+    reply = handlers.handle_watch(tmp_db, 1, "u", "en", ["XAUUSD", "3m", "BINANCE"])
     assert "isn't recognized" in reply
     # Row was NOT inserted.
     assert tmp_db.count_watches(1) == 0

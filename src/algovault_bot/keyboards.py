@@ -20,11 +20,26 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .messages import signup_url
-from .validators import EXCHANGE_DISPLAY_ORDER, EXCHANGES, TF_SECONDS, TIMEFRAMES
+from .validators import (
+    EXCHANGE_DISPLAY_ORDER,
+    EXCHANGES,
+    PUSH_TIMEFRAMES,
+    TF_SECONDS,
+    TIMEFRAMES,
+)
 
-# Wizard TF grid — the FULL supported set (1m–1d), ordered shortest→longest, in
-# exact parity with the typed `/watch` path (no floor). Shared by both wizards.
+# Wizard TF grid — the full ON-DEMAND set (1m–1d), ordered shortest→longest. In parity
+# with what the engine will ANSWER for, which is what the scan wizard's /scan half needs.
+# NOT in parity with typed `/watch` any more: since SIGNAL-CLOSEDBAR-FLIP-W1 CH3 the push
+# surfaces carry a floor (1m cannot be scheduled) — see PUSH_WIZARD_TIMEFRAMES below.
 WIZARD_TIMEFRAMES: tuple[str, ...] = tuple(sorted(TIMEFRAMES, key=lambda t: TF_SECONDS[t]))
+
+# The push-eligible subset, same order — for wizards that only ever SCHEDULE alerts.
+# Derived from PUSH_TIMEFRAMES so the grid cannot drift from what the validators accept
+# (SIGNAL-CLOSEDBAR-FLIP-W1 CH3).
+PUSH_WIZARD_TIMEFRAMES: tuple[str, ...] = tuple(
+    t for t in WIZARD_TIMEFRAMES if t in PUSH_TIMEFRAMES
+)
 
 # Stable display order — the single validators source (12 venues, HL-first, /help order).
 _EXCHANGE_ORDER: tuple[str, ...] = EXCHANGE_DISPLAY_ORDER
@@ -100,9 +115,18 @@ def coin_grid_kb(coins: list[str], prefix: str = "wz", *, back: bool = False) ->
     return InlineKeyboardMarkup(rows)
 
 
-def tf_grid_kb(prefix: str = "wz") -> InlineKeyboardMarkup:
-    """Timeframe grid — 1m–1d (WIZARD_TIMEFRAMES; full parity with typed /watch). Shared by both wizards."""
-    btns = [InlineKeyboardButton(tf, callback_data=f"{prefix}:tf:{tf}") for tf in WIZARD_TIMEFRAMES]
+def tf_grid_kb(prefix: str = "wz", *, push_only: bool = False) -> InlineKeyboardMarkup:
+    """Timeframe grid, in parity with the typed path it mirrors. Shared by both wizards.
+
+    `push_only=True` drops the timeframes that cannot be SCHEDULED (validators.PUSH_TIMEFRAMES)
+    — used by the watch wizard, which only ever creates push alerts. It defaults to False
+    because the scan wizard is entered by BOTH `/scan` (a one-shot answer, where every
+    timeframe is valid) and `/scanwatch`; offering the full grid there and letting the
+    scanwatch commit path explain the refusal is preferable to hiding a timeframe that the
+    /scan half of the same wizard genuinely supports.
+    """
+    tfs = PUSH_WIZARD_TIMEFRAMES if push_only else WIZARD_TIMEFRAMES
+    btns = [InlineKeyboardButton(tf, callback_data=f"{prefix}:tf:{tf}") for tf in tfs]
     rows = _rows(btns, 4)
     rows.append(_nav_row(prefix))
     return InlineKeyboardMarkup(rows)

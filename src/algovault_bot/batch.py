@@ -21,10 +21,11 @@ from typing import Sequence
 
 from .validators import (
     EXCHANGE_DISPLAY_ORDER,
+    PUSH_TIMEFRAMES,
     TF_SECONDS,
     normalize_coin,
     normalize_exchange,
-    normalize_timeframe,
+    normalize_push_timeframe,
 )
 
 ALL_TOKEN = "all"
@@ -37,6 +38,11 @@ DEFAULT_TOP_N: int = 30
 
 # Canonical ascending TF order (1m … 1d) — TF_SECONDS preserves insertion order.
 TF_ORDER: tuple[str, ...] = tuple(TF_SECONDS.keys())
+
+# The push-eligible subset, in the same order. Derived from PUSH_TIMEFRAMES rather than
+# written out, so a timeframe added to or removed from the push set cannot silently miss
+# the `all` expansion below (SIGNAL-CLOSEDBAR-FLIP-W1 CH3).
+PUSH_TF_ORDER: tuple[str, ...] = tuple(tf for tf in TF_ORDER if tf in PUSH_TIMEFRAMES)
 
 # Canonical exchange order for `all` expansion — the single validators source (12 venues).
 EXCHANGE_ORDER: tuple[str, ...] = EXCHANGE_DISPLAY_ORDER
@@ -61,9 +67,12 @@ def parse_coins(raw: str, universe: Sequence[str]) -> list[str]:
 
 
 def parse_timeframes(raw: str) -> list[str]:
+    """PUSH-only. Every consumer is `/watch`, which SCHEDULES repeating alerts, so `all`
+    expands to the push-eligible set rather than to every timeframe the engine can answer
+    on demand (SIGNAL-CLOSEDBAR-FLIP-W1 CH3 — see validators.PUSH_TIMEFRAMES)."""
     if is_all(raw):
-        return list(TF_ORDER)
-    return [normalize_timeframe(t) for t in _split_tokens(raw)]
+        return list(PUSH_TF_ORDER)
+    return [normalize_push_timeframe(t) for t in _split_tokens(raw)]
 
 
 def parse_exchanges(raw: str) -> list[str]:
