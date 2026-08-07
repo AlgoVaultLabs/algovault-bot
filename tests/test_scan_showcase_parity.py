@@ -74,7 +74,7 @@ def test_golden_fixture_exercises_the_drift_prone_branches() -> None:
     assert "$1.19" in expected            # >=1    -> 2 decimals
     assert "$0.0412" in expected          # <1     -> 4dp, trailing zeros stripped
     assert "funding elevated ↓" in expected      # lowercased value + bearish arrow
-    assert "OI +27.6% (24h) ↑" in expected       # window suffix + bullish arrow
+    assert "OI +27.6% (24h)" in expected         # OPS-RECEIPTS-FACTORS-DIRECTION-FIX-W1 R3: window suffix, NO arrow (Class 1)
     assert "🔴 KOMA — SELL" in expected          # non-BUY marker
     # KOMA carries neither drivers nor reasoning, so its block is a SINGLE line.
     koma = next(b for b in expected.split("\n\n") if "KOMA" in b)

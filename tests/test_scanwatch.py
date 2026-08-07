@@ -238,7 +238,7 @@ def test_producer_renders_from_the_enriched_scan_no_depth_call(tmp_db, monkeypat
         "confidence": 80, "regime": "TRENDING_UP",
         "price": 73.23,
         "factors": [
-            {"factor": "oi_change_pct", "direction": "bullish", "value": "+1.6%"},
+            {"factor": "oi_change_pct", "direction": "neutral", "value": "+1.6%"},
             {"factor": "trend_persistence", "direction": "neutral", "value": "HIGH"},
             {"factor": "funding_state", "direction": "neutral", "value": "NORMAL"},
         ],
@@ -271,7 +271,8 @@ def test_producer_renders_from_the_enriched_scan_no_depth_call(tmp_db, monkeypat
     assert mcp.scan_args is not None and mcp.scan_args.get("includeReasoning") is True
     text = pushed[0][1]
     assert "BTC — BUY @ $73.23 · 80% conviction · TRENDING_UP" in text
-    assert "OI +1.6% (24h) ↑" in text  # drivers from the enriched scan payload (+ window)
+    # OPS-RECEIPTS-FACTORS-DIRECTION-FIX-W1 R3 — RE-BASELINED, Class 1: arrow gone, signed figure remains.
+    assert "OI +1.6% (24h)" in text  # drivers from the enriched scan payload (+ window)
     assert "trend persistence HIGH" in text and "funding normal" in text
     assert "💡 Trending up, momentum building" in text  # one-line why (first sentence)
     assert text.startswith("🚀")  # rocket header

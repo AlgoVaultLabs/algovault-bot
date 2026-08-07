@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from algovault_bot.scan_digest import render_scan_digest_line
 
+# OPS-RECEIPTS-FACTORS-DIRECTION-FIX-W1 R3 — the OI factor no longer carries a direction arrow: open
+# interest feeds no weight term and no adjustment in the signal engine, so the
+# sign-of-delta arrow asserted a cause nothing derived. The signal side moved in the
+# SAME wave. `funding elevated ↑/↓` is UNCHANGED — that is Class 2, a deferred naming
+# collision (z-bucket reading vs contribution sign), not a falsehood.
 # The shared fixture (identical to tests/unit/scan-digest-enrich.test.ts).
 CALL = {
     "coin": "CL",
@@ -19,7 +24,7 @@ CALL = {
     "factors": [
         {"factor": "trend_persistence", "direction": "neutral", "value": "HIGH"},
         {"factor": "funding_state", "direction": "bullish", "value": "ELEVATED"},
-        {"factor": "oi_change_pct", "direction": "bullish", "value": "+10.0%"},
+        {"factor": "oi_change_pct", "direction": "neutral", "value": "+10.0%"},
     ],
     "reasoning": "Trending regime, upward bias. Funding pressure mild.",
     "oi_change_window": "24h",
@@ -27,7 +32,7 @@ CALL = {
 
 EXPECTED = (
     "🟢 CL — BUY @ $71.49 · 60% conviction · TRENDING_UP\n"
-    "   📊 trend persistence HIGH · funding elevated ↑ · OI +10.0% (24h) ↑\n"
+    "   📊 trend persistence HIGH · funding elevated ↑ · OI +10.0% (24h)\n"
     "   💡 Trending regime, upward bias"
 )
 
@@ -66,8 +71,9 @@ def test_arrows_bearish_and_window():
         "factors": [
             {"factor": "trend_persistence", "direction": "neutral", "value": "LOW"},
             {"factor": "funding_state", "direction": "bearish", "value": "ELEVATED"},
-            {"factor": "oi_change_pct", "direction": "bearish", "value": "-3.2%"},
+            {"factor": "oi_change_pct", "direction": "neutral", "value": "-3.2%"},
         ],
     }
     drivers = next(ln for ln in render_scan_digest_line(c).split("\n") if "📊" in ln)
-    assert drivers == "   📊 trend persistence LOW · funding elevated ↓ · OI -3.2% (24h) ↓"
+    # OPS-RECEIPTS-FACTORS-DIRECTION-FIX-W1 R3 — RE-BASELINED, Class 1: OI arrow dropped (feeds no channel).
+    assert drivers == "   📊 trend persistence LOW · funding elevated ↓ · OI -3.2% (24h)"
