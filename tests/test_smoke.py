@@ -34,4 +34,8 @@ def test_welcome_is_plain_text_no_html_no_inline_upgrade_link() -> None:
     assert "<a href" not in WELCOME_MESSAGE
     assert "utm_campaign=start_welcome" not in WELCOME_MESSAGE
     assert "algovault.com/track-record" in WELCOME_MESSAGE
-    assert "Starter is $9.99/mo for 3,000 calls, or pay per call with x402." in WELCOME_MESSAGE
+    # CH5: the API ladder moved (Starter 3,000 -> 10,000/mo) and this bot's own free
+    # allowance is stated in ALERTS, which is what it actually meters.
+    assert "Starter is $9.99/mo or $39.90/6mo for 10,000 API " in WELCOME_MESSAGE
+    assert "Free: 100 alerts/month here." in WELCOME_MESSAGE
+    assert "3,000 calls" not in WELCOME_MESSAGE

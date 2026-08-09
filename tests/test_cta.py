@@ -50,7 +50,11 @@ def test_trade_call_cta_no_cta_below_75() -> None:
 def test_trade_call_cta_quota_75_at_75pct_first_fire() -> None:
     cta = trade_call_cta_text(_state(75), now=_NOW)
     assert "75%" in cta
-    assert "Starter ($9.99 → 3,000 calls/mo)" in cta
+    # PRICING-FOLLOWUPS-GENERATOR-W1 CH5: Starter has been 10,000 API calls/mo since
+    # 2026-08-09, and the nudge counts THIS BOT'S alerts, not the API's calls.
+    assert "Starter ($9.99/mo or $39.90/6mo → 10,000 API calls/mo)" in cta
+    assert "free alerts" in cta, "the bot meters DELIVERED ALERTS — see docs/METERING-DIVERGENCE.md"
+    assert "3,000 calls" not in cta, "retired API figure"
     assert "utm_campaign=quota_75" in cta
 
 
