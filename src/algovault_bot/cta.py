@@ -118,8 +118,8 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
         if _within_throttle(state.quota_75_last_fired_at, now):
             return ""
         return (
-            "⏰ You've used 75% of your free calls. "
-            "Upgrade to Starter ($9.99 → 3,000 calls/mo):\n"
+            "⏰ You've used 75% of your free alerts. "
+            "Upgrade to Starter ($9.99/mo or $39.90/6mo → 10,000 API calls/mo):\n"
             f"→ {signup_url('quota_75')}"
         )
     return ""
@@ -158,6 +158,6 @@ def quota_exhausted_message() -> str:
     bot owns the gate). Mirrors the upstream message shape."""
     return (
         f"Free tier limit reached ({FREE_TIER_MONTHLY_QUOTA}/{FREE_TIER_MONTHLY_QUOTA} "
-        "calls this month). Upgrade to Starter ($9.99/mo) for 3,000 calls/mo, "
-        "or pay per call via x402."
+        "alerts this month). Upgrade to Starter ($9.99/mo or $39.90/6mo) for "
+        "10,000 API calls/mo, or pay per call via x402."
     )

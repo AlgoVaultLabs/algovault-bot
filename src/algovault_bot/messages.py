@@ -73,7 +73,8 @@ WELCOME_MESSAGE: Final = (
     "❓ Every command → /help\n"
     "✅ Live, on-chain-verified results → algovault.com/track-record\n"
     "\n"
-    "Free: 100 calls/month. Want more? Starter is $9.99/mo for 3,000 calls, or pay per call with x402."
+    "Free: 100 alerts/month here. Want more? Starter is $9.99/mo or $39.90/6mo for 10,000 API "
+    "calls/mo, or pay per call with x402."
 )
 
 

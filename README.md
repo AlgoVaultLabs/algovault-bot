@@ -12,8 +12,8 @@ Two kinds of alerts pushed to your watchlist, automatically:
 
 | Alert | Free? | Cadence |
 |---|---|---|
-| 📊 **Regime shifts** (`TRENDING_UP` / `TRENDING_DOWN` / `RANGING` / `VOLATILE`) | Counts toward your free **100 calls/month** | Per chosen TF, fired only after 2 confirming cycles (no flap) |
-| 📈 **Trade calls** (BUY / SELL only — HOLD verdicts are silent) | Counts against your free **100 calls/month** cap | Per chosen TF, real-time |
+| 📊 **Regime shifts** (`TRENDING_UP` / `TRENDING_DOWN` / `RANGING` / `VOLATILE`) | Counts toward your free **100 alerts/month** | Per chosen TF, fired only after 2 confirming cycles (no flap) |
+| 📈 **Trade calls** (BUY / SELL only — HOLD verdicts are silent) | Counts against your free **100 alerts/month** cap | Per chosen TF, real-time |
 
 Free tier covers **all 720+ assets** and **all 11 timeframes** (1m → 1d). You pick what to watch — more assets + lower timeframes = faster quota burn.
 
@@ -62,7 +62,7 @@ The bot is a thin client over the [`crypto-quant-signal-mcp`](https://github.com
 
 ## Quota burn — the math
 
-Trade-call alerts on busier (lower-TF) pairs consume your free 100 calls/month faster:
+Trade-call alerts on busier (lower-TF) pairs consume your free 100 alerts/month faster:
 
 | Watch | Approx. burn |
 |---|---|
@@ -73,11 +73,13 @@ Trade-call alerts on busier (lower-TF) pairs consume your free 100 calls/month f
 
 **Smart routing:**
 
-- HOLD verdicts are silent + free (no alert, no quota tick).
+- HOLD verdicts are silent, so there is no alert to meter and no quota tick. This bot bills
+  DELIVERED ALERTS; the API bills every verdict, HOLD included. The divergence is deliberate
+  and declared — see [docs/METERING-DIVERGENCE.md](docs/METERING-DIVERGENCE.md).
 - Regime alerts count toward your 100/mo (parity with the AlgoVault API/MCP, which meters `get_market_regime`); no rate cap beyond 20/24h anti-abuse.
 - Trade-call alerts (BUY/SELL only) tick your 100/mo counter.
 
-When you hit the cap, [upgrade to Starter ($9.99 → 3,000 calls/mo)](https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=readme) or pay per call via [x402.org](https://x402.org).
+When you hit the cap, [upgrade to Starter ($9.99/mo or $39.90/6mo → 10,000 API calls/mo)](https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=readme) or pay per call via [x402.org](https://x402.org).
 
 ---
 
