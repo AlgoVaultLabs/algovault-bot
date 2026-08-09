@@ -30,10 +30,15 @@ def test_parse_comma_list() -> None:
     assert batch.parse_timeframes("15m, 1h") == ["15m", "1h"]  # whitespace-tolerant
 
 
-def test_parse_all_timeframes_is_11() -> None:
+def test_parse_all_timeframes_is_the_push_set() -> None:
+    # SIGNAL-CLOSEDBAR-FLIP-W1 CH3: `/watch ... all` expands to the PUSH-eligible set, not
+    # every timeframe the engine can answer on demand. Asserted against the derived tuple
+    # rather than a literal count, so adding or retiring a push timeframe cannot leave this
+    # test passing against a stale number.
     tfs = batch.parse_timeframes("all")
-    assert len(tfs) == 11
-    assert tfs[0] == "1m" and tfs[-1] == "1d"  # canonical ascending order
+    assert tfs == list(batch.PUSH_TF_ORDER)
+    assert "1m" not in tfs, "1m cannot be SCHEDULED — see validators.PUSH_TIMEFRAMES"
+    assert tfs[0] == "3m" and tfs[-1] == "1d"  # canonical ascending order, push floor at 3m
 
 
 def test_parse_all_exchanges_is_12() -> None:
@@ -60,9 +65,10 @@ def test_expand_dedup() -> None:
 
 
 def test_expand_all_all_all_for_one_coin() -> None:
-    # AC1.1 shape: BTC all all = 1 × 11 × 12 = 132 (TG-COPY-DEFAULTS-VENUES-W1: 5 → 12 venues)
+    # AC1.1 shape: BTC all all = 1 × |push TFs| × 12 venues. Was 11 TFs (=132) until
+    # SIGNAL-CLOSEDBAR-FLIP-W1 CH3 dropped 1m from the push set → 10 TFs (=120).
     combos = batch.expand_watch_spec("BTC", "all", "all", universe=[])
-    assert len(combos) == 132
+    assert len(combos) == len(batch.PUSH_TF_ORDER) * 12 == 120
 
 
 def test_expand_invalid_token_raises() -> None:
@@ -86,8 +92,8 @@ def test_should_confirm_coins_all_even_if_small() -> None:
 
 
 def test_should_confirm_bounded_btc_all_does_not_nudge() -> None:
-    # /watch BTC all = 11 combos, coins != "all" → commit inline, NO nudge.
-    assert batch.should_confirm(11, "BTC", 50) is False
+    # /watch BTC all = |push TFs| combos, coins != "all" → commit inline, NO nudge.
+    assert batch.should_confirm(len(batch.PUSH_TF_ORDER), "BTC", 50) is False
 
 
 def test_should_confirm_comma_list_under_threshold() -> None:
@@ -183,19 +189,21 @@ def test_handle_watch_comma_list_commits_no_nudge(tmp_db: Database) -> None:
 
 
 def test_handle_watch_all_dim_triggers_nudge_no_insert(tmp_db: Database) -> None:
-    # AC1.1 — BTC all all = 132 combos > threshold → nudge, nothing inserted yet.
+    # AC1.1 — BTC all all = 1 x |push TFs| x 12 venues > threshold → nudge, nothing
+    # inserted yet. 132 → 120 since CH3 dropped 1m from the push set.
     reply = handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC", "all", "all"])
     assert reply.confirm is True
-    assert reply.combos == 132
+    assert reply.combos == len(batch.PUSH_TF_ORDER) * 12 == 120
     assert tmp_db.count_watches(1) == 0
     assert reply.pending is not None
 
 
 def test_handle_watch_btc_all_commits_inline(tmp_db: Database) -> None:
-    # adjustment 3 — /watch BTC all = 11 combos ≤ threshold, coins != all → commit, no nudge.
+    # adjustment 3 — /watch BTC all = |push TFs| combos <= threshold, coins != all →
+    # commit, no nudge. 11 → 10 since CH3 dropped 1m from the push set.
     reply = handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC", "all"])
     assert reply.confirm is False
-    assert tmp_db.count_watches(1) == 11
+    assert tmp_db.count_watches(1) == len(batch.PUSH_TF_ORDER)
 
 
 def test_handle_watch_all_coins_triggers_nudge(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,7 +240,7 @@ def test_commit_watch_batch_top_n_clamps(tmp_db: Database, monkeypatch: pytest.M
 
 def test_handle_unwatch_coin_wildcard(tmp_db: Database) -> None:
     # AC1.6 — /unwatch BTC all removes every BTC row.
-    handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC", "all"])  # 11 BTC rows
+    handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC", "all"])  # |push TFs| BTC rows
     handlers.handle_watch(tmp_db, 1, "u", "en", ["ETH", "4h", "BINANCE"])
     reply = handlers.handle_unwatch(tmp_db, 1, "u", "en", ["BTC", "all"])
     assert "🗑️" in reply
@@ -240,17 +248,21 @@ def test_handle_unwatch_coin_wildcard(tmp_db: Database) -> None:
 
 
 def test_handle_unwatch_tf_wildcard(tmp_db: Database) -> None:
-    # AC1.6 — /unwatch all 1m removes every 1m row.
-    handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC,ETH", "1m", "BINANCE"])
+    # AC1.6 — /unwatch all <TF> removes every row on that TF. Subject moved 1m → 3m by
+    # SIGNAL-CLOSEDBAR-FLIP-W1 CH3: 1m can no longer be watched, so a 1m fixture would be
+    # testing the rejection path, not the wildcard.
+    handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC,ETH", "3m", "BINANCE"])
     handlers.handle_watch(tmp_db, 1, "u", "en", ["SOL", "4h", "BINANCE"])
-    reply = handlers.handle_unwatch(tmp_db, 1, "u", "en", ["all", "1m"])
+    reply = handlers.handle_unwatch(tmp_db, 1, "u", "en", ["all", "3m"])
     assert "🗑️" in reply
     assert tmp_db.count_watches(1) == 1
 
 
 def test_handle_unwatchall_confirms_then_commits(tmp_db: Database) -> None:
-    # AC1.5 — /unwatchall confirms, then deletes everything.
-    handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC,ETH", "1m", "BINANCE"])
+    # AC1.5 — /unwatchall confirms, then deletes everything. Fixture TF moved off 1m by
+    # SIGNAL-CLOSEDBAR-FLIP-W1 CH3 — a 1m watch is now refused, so the old fixture created
+    # ZERO rows and the test passed vacuously on an empty watchlist.
+    handlers.handle_watch(tmp_db, 1, "u", "en", ["BTC,ETH", "3m", "BINANCE"])
     reply = handlers.handle_unwatchall(tmp_db, 1, "u", "en")
     assert reply.confirm is True
     assert tmp_db.count_watches(1) == 2  # not deleted yet
