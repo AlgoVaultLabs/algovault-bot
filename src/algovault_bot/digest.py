@@ -55,6 +55,13 @@ class DigestMetrics:
     # have never been told. `walled_silent > 0` is by definition a seam defect.
     walled_now: int
     walled_silent: int
+    # OPS-DIGEST-TGBOT-TIER-AND-WALLED-W1: delivered calls whose owner is on a PAID tier.
+    # Bot traffic authenticates as `tier:'internal'`, so a paying subscriber's alerts can
+    # never reach the operator digest's 💳 Paid row (which counts direct API/MCP calls and
+    # excludes `is_bot_internal`). Without this the digest reads "Paid: 0" on a day when
+    # paying users took 205 alerts. Reported in the BOT's unit — delivered alerts — beside
+    # the TG bot row, never folded into the API's Paid count: different quantities.
+    calls_paid_linked: int
     generated_at: str  # ISO-8601 UTC
 
 
@@ -98,6 +105,16 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         calls_scan = src_counts.get("scan", 0)
         calls_24h = calls_watch + calls_scanwatch + calls_scan
 
+        # Same window + same predicate as the per-source counts above, split by the owner's
+        # tier. `linked_tier IS NOT NULL` is the paid predicate: quota.PAID_TIERS is the SoT
+        # for which tiers bypass, and every value that column holds is in it.
+        cur.execute(
+            "SELECT COUNT(*) FROM alerts_fired a JOIN subscribers s ON s.chat_id = a.chat_id "
+            "WHERE a.kind='call' AND a.fired_at >= datetime('now', '-1 day') "
+            "AND s.linked_tier IS NOT NULL"
+        )
+        calls_paid_linked = int(cur.fetchone()[0])
+
         # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: reachable watchers only.
         cur.execute(
             "SELECT COUNT(*) FROM watchlists w "
@@ -133,6 +150,7 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         quota_notices_24h=quota_notices_24h,
         walled_now=walled_now,
         walled_silent=walled_silent,
+        calls_paid_linked=calls_paid_linked,
         generated_at=now.isoformat(),
     )
 
@@ -175,8 +193,9 @@ _BOT_METRICS_UPSERT_SQL = """
 INSERT INTO bot_daily_metrics
   (metric_date, calls_total, calls_watch, calls_scanwatch, calls_scan,
    alerts_regime, subscribers, new_subscribers_24h, blocked_subscribers,
-   watchlist_entries, quota_exhausted_notices, generated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+   watchlist_entries, quota_exhausted_notices,
+   calls_paid_linked, walled_now, walled_silent, generated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
 ON CONFLICT (metric_date) DO UPDATE SET
   calls_total=EXCLUDED.calls_total,
   calls_watch=EXCLUDED.calls_watch,
@@ -188,6 +207,9 @@ ON CONFLICT (metric_date) DO UPDATE SET
   blocked_subscribers=EXCLUDED.blocked_subscribers,
   watchlist_entries=EXCLUDED.watchlist_entries,
   quota_exhausted_notices=EXCLUDED.quota_exhausted_notices,
+  calls_paid_linked=EXCLUDED.calls_paid_linked,
+  walled_now=EXCLUDED.walled_now,
+  walled_silent=EXCLUDED.walled_silent,
   generated_at=EXCLUDED.generated_at
 """.strip()
 
@@ -208,6 +230,9 @@ def _bot_metrics_upsert(m: DigestMetrics) -> tuple[str, tuple]:
         m.blocked,
         m.watch_total,
         m.quota_notices_24h,
+        m.calls_paid_linked,
+        m.walled_now,
+        m.walled_silent,
     )
     return _BOT_METRICS_UPSERT_SQL, params
 
