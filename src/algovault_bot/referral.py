@@ -81,7 +81,7 @@ def format_share_text(terms: dict[str, Any], lang_code: str | None = None) -> st
         )
     return (
         f"I'm using AlgoVault for AI quant crypto trade signals. "
-        f"Use my link and get {bonus} free calls 👇"
+        f"Use my link and get {bonus} free alerts 👇"
     )
 
 

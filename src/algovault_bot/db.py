@@ -228,6 +228,15 @@ PAYWALL_HOOK_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN quota_hit_block_at TIMESTAMP",
 )
 
+# BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): the wall's own notice stamp. Completes
+# the quota_<threshold>_last_fired_at family (75 / 90 existed; 100 did not, which
+# is why ``mark_quota_cta_fired('100', …)`` was a silent no-op). Compared against
+# ``alerts_window_start`` so the notice re-arms once per exhaustion window with no
+# timer. NULL = this subscriber has never been told they hit the wall.
+QUOTA_WALL_NOTICE_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN quota_100_last_fired_at TIMESTAMP",
+)
+
 # TG-BROADCAST-STACK-W1 C4 (2026-05-28): viral /unlock_premium_alerts state
 # machine. unlock_status enum: 'not_started' | 'pending_x_screenshot' |
 # 'pending_npm_call' | 'verified' | 'expired'. unlock_method: 'x_follow'
@@ -486,6 +495,8 @@ class Database:
                 # GROWTH-TG-CHANNEL-ACQUISITION-W1 (2026-08-05, CH1): first-touch
                 # acquisition channel from ?start=src_<channel>.
                 *ACQUISITION_SOURCE_MIGRATIONS,
+                # BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): the wall's notice stamp.
+                *QUOTA_WALL_NOTICE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1241,19 +1252,41 @@ class Database:
     def mark_quota_cta_fired(self, chat_id: int, threshold: str, now_iso: str) -> None:
         """Record that the {threshold}% trade-call CTA was just shown to the user.
 
-        ``threshold`` ∈ {'75', '90'}. Writes ``quota_<threshold>_last_fired_at``.
+        ``threshold`` ∈ {'75', '90', '100'}. Writes ``quota_<threshold>_last_fired_at``.
+
+        BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): '100' used to fall through to a
+        SILENT no-op ("not throttled"), so any caller stamping the wall wrote
+        nothing and got no error. The wall IS throttled now — once per exhaustion
+        window, keyed on ``alerts_window_start`` (see ``quota._notice_due``) —
+        so '100' is a real column. An unknown threshold still no-ops, but loudly.
         """
-        if threshold == "75":
-            col = "quota_75_last_fired_at"
-        elif threshold == "90":
-            col = "quota_90_last_fired_at"
-        else:
-            return  # '100' is not throttled — no-op
+        col = {
+            "75": "quota_75_last_fired_at",
+            "90": "quota_90_last_fired_at",
+            "100": "quota_100_last_fired_at",
+        }.get(threshold)
+        if col is None:
+            log.warning("mark_quota_cta_fired: unknown threshold %r — no-op", threshold)
+            return
         with self._cursor() as cur:
             cur.execute(
                 f"UPDATE subscribers SET {col} = ? WHERE chat_id = ?",
                 (now_iso, chat_id),
             )
+
+    def get_active_chat_ids(self) -> list[int]:
+        """Every REACHABLE subscriber's chat_id (excludes bot-blocked).
+
+        BOT-QUOTA-REFUSAL-SEAM-W1: the iteration set for ``quota.count_walled_now``.
+        Deliberately returns ids only — the caller projects each one through
+        ``evaluate_delivery`` so the walled count derives from the SAME decision
+        the seam enforces, never from a second ``alert_count >= 100`` in SQL.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT chat_id FROM subscribers WHERE bot_blocked_at IS NULL"
+            )
+            return [int(r[0]) for r in cur.fetchall()]
 
     # ── BOT-ZOMBIE-W1: bot-blocked subscriber bookkeeping ────────────
 

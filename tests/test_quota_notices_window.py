@@ -152,17 +152,78 @@ def test_admin_top_assets_excludes_blocked_owner(tmp_db: Database) -> None:
 # ── engine wiring guard (by-construction) ─────────────────────
 
 
-def test_engine_records_quota_notice_in_exhausted_branch() -> None:
-    """Guard against fake coverage: the helper tests above prove
-    ``record_quota_notice_fired`` works, but only the engine's exhausted
-    branch feeds it at runtime. Assert the call site exists in
-    ``process_one_row`` so a future refactor that drops it fails here."""
-    import inspect
+def test_refusal_seam_records_the_notice_a_real_caller_would_get(tmp_db: Database) -> None:
+    """The notice is recorded by the SEAM a real refusal routes through.
 
-    from algovault_bot import alert_engine
+    BOT-QUOTA-REFUSAL-SEAM-W1 replaced this test's previous body, which grepped
+    ``inspect.getsource(process_one_row)`` for the recorder name. That form is the
+    weak one CLAUDE.md names outright — "a unit test calling a helper directly
+    cannot prove anything CALLS it" — and it was green for the entire period in
+    which the branch it grepped was UNREACHABLE, because the scheduler's pre-skip
+    dropped the row before that function ran. A string in a source file is not a
+    caller. Drive the seam instead, and assert the record it leaves behind.
+    """
+    import asyncio
+    from datetime import datetime, timezone
 
-    src = inspect.getsource(alert_engine.process_one_row)
-    assert "record_quota_notice_fired" in src
+    from algovault_bot.quota import FREE_TIER_MONTHLY_QUOTA, refuse_and_notify
+
+    tmp_db.upsert_subscriber(4242, "walled", "en")
+    with tmp_db._cursor() as cur:
+        cur.execute(
+            "UPDATE subscribers SET alert_count=?, alerts_window_start=? WHERE chat_id=?",
+            (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 4242),
+        )
+    sent: list[str] = []
+
+    async def _send(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    delivered = asyncio.run(refuse_and_notify(tmp_db, 4242, "watch", send=_send))
+    assert delivered is True
+    assert len(sent) == 1
+    assert tmp_db.count_quota_notices_last_24h() == 1
+
+    # Second refusal in the same window: silent, and no second record.
+    again = asyncio.run(refuse_and_notify(tmp_db, 4242, "watch", send=_send))
+    assert again is False
+    assert len(sent) == 1
+    assert tmp_db.count_quota_notices_last_24h() == 1
+
+
+def test_refusal_notice_not_recorded_when_send_fails(tmp_db: Database) -> None:
+    """A blocked subscriber must not burn the one notice of the episode.
+
+    Otherwise the user is marked "told" by a message Telegram never delivered, and
+    the episode goes silent for the remaining ~30 days of the window.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from algovault_bot.quota import FREE_TIER_MONTHLY_QUOTA, refuse_and_notify
+
+    tmp_db.upsert_subscriber(4343, "blocked", "en")
+    with tmp_db._cursor() as cur:
+        cur.execute(
+            "UPDATE subscribers SET alert_count=?, alerts_window_start=? WHERE chat_id=?",
+            (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 4343),
+        )
+
+    async def _fails(text: str) -> bool:
+        return False
+
+    assert asyncio.run(refuse_and_notify(tmp_db, 4343, "watch", send=_fails)) is False
+    assert tmp_db.count_quota_notices_last_24h() == 0
+    # Still eligible — a later successful send must be able to deliver it.
+    sent: list[str] = []
+
+    async def _ok(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    assert asyncio.run(refuse_and_notify(tmp_db, 4343, "watch", send=_ok)) is True
+    assert len(sent) == 1
 
 
 def test_record_quota_notice_rejects_bad_chat_via_fk(tmp_db: Database) -> None:

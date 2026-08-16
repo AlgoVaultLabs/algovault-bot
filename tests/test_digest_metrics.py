@@ -79,7 +79,13 @@ def test_upsert_sql_column_param_arity() -> None:
     m = digest.DigestMetrics(
         metric_date="2026-07-06", total_subs=0, new_subs_24h=0, blocked=0, regime_24h=0,
         calls_watch=0, calls_scanwatch=0, calls_scan=0, calls_24h=0, watch_total=0,
-        quota_notices_24h=0, generated_at="2026-07-06T03:00:00+00:00",
+        quota_notices_24h=0,
+        # BOT-QUOTA-REFUSAL-SEAM-W1: rendered in the digest TEXT but deliberately NOT
+        # bridged to `bot_daily_metrics` — that table is a daily time-series of 24h
+        # counters, and `walled_now` is instantaneous state whose value at 03:00 would
+        # not mean the same thing as the rows beside it. Arity stays 11.
+        walled_now=0, walled_silent=0,
+        generated_at="2026-07-06T03:00:00+00:00",
     )
     sql, params = digest._bot_metrics_upsert(m)
     assert sql.count("%s") == len(params)  # 11 bound params; generated_at = now() literal

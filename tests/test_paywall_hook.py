@@ -95,21 +95,21 @@ def test_format_paywall_body_block_en_under_300_chars():
 
 def test_format_paywall_body_trilingual_id():
     body = format_paywall_body("soft", 75, 100, "https://example.com", "id")
-    assert "Upgrade ke Pro" in body
+    assert "Upgrade ke Starter" in body
     assert "/unlock_premium_alerts" in body
     assert len(body) <= 300
 
 
 def test_format_paywall_body_trilingual_zh_hans():
     body = format_paywall_body("soft", 75, 100, "https://example.com", "zh-hans")
-    assert "升级到 Pro" in body
+    assert "升级到 Starter" in body
     assert "/unlock_premium_alerts" in body
     assert len(body) <= 300
 
 
 def test_format_paywall_body_unknown_lang_falls_back_to_en():
     body = format_paywall_body("soft", 75, 100, "https://example.com", "fr")
-    assert "Upgrade to Pro" in body
+    assert "Upgrade to Starter" in body
 
 
 def test_format_paywall_body_invalid_level_raises():

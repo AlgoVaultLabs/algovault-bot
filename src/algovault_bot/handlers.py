@@ -471,7 +471,7 @@ def handle_scan(
         # on the one path where conversion actually happens.
         src = db.get_acquisition_source(chat_id)
         return (
-            f"You've used all {state.total} free calls this month. "
+            f"You've used all {state.total} free alerts. "
             f"Upgrade for more: {messages.signup_url('scan_quota_exhausted', src)}"
         )
     try:
@@ -617,7 +617,7 @@ def handle_regime(
     if state.exhausted:
         src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
         return (
-            f"You've used all {state.total} free calls this month. "
+            f"You've used all {state.total} free alerts. "
             f"Upgrade for more: {messages.signup_url('regime_quota_exhausted', src)}"
         )
     regime_tf = timeframe if timeframe in REGIME_TFS else "1h"
@@ -683,7 +683,7 @@ def handle_call(
         if state.exhausted:
             src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
             return (
-                f"You've used all {state.total} free calls this month. "
+                f"You've used all {state.total} free alerts. "
                 f"Upgrade for more: {messages.signup_url('call_quota_exhausted', src)}"
             )
         consume_quota(db, chat_id, units=1)
@@ -779,7 +779,7 @@ def handle_funding(
     if state.exhausted:
         src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
         return (
-            f"You've used all {state.total} free calls this month. "
+            f"You've used all {state.total} free alerts. "
             f"Upgrade for more: {messages.signup_url('funding_quota_exhausted', src)}"
         )
     try:

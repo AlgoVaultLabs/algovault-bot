@@ -23,6 +23,13 @@ calls** stay free (silent, no tick), mirroring signal-MCP's free-HOLD policy in
 QUOTA-CONSISTENCY-COUNT-ALL-W1 (2026-06-08): corrected the prior premise that
 regime alerts were free. (Funding-arb / market-scan are not yet bot features —
 metering for those is deferred to a follow-up wave.)
+
+BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): this module also owns the REFUSAL
+side of the meter. See ``refuse_and_notify`` below — before it, three push
+lanes each re-derived "is this user out of quota?" independently and drifted
+to three different answers (silent-refuse / silent-refuse-and-invisible /
+never-refuse-at-all), leaving two walled users refused ~10,000 times without
+ever being told. Both halves of the meter now live here.
 """
 
 from __future__ import annotations
@@ -30,9 +37,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Final
+from typing import Awaitable, Callable, Final, Literal
 
 from .db import Database
+from .messages import signup_url
+from .paywall import format_paywall_body
 
 
 log = logging.getLogger(__name__)
@@ -64,6 +73,11 @@ class QuotaState:
     # per day. Both are ``None`` until the threshold first fires.
     quota_75_last_fired_at: datetime | None = None
     quota_90_last_fired_at: datetime | None = None
+    # BOT-QUOTA-REFUSAL-SEAM-W1 — when this subscriber was last TOLD they hit the
+    # wall. Compared against ``window_start`` by ``_notice_due`` so the notice fires
+    # once per exhaustion episode. None = never told (a walled user with None here
+    # is the exact population this wave found refused ~10,000 times in silence).
+    quota_100_last_fired_at: datetime | None = None
     # TG-REFERRAL-W1 (C2) — bot-side referee bonus-call pool (persistent; NOT
     # window-reset). Drawn AFTER the monthly free `total` by consume_quota, and
     # it extends `remaining`/`exhausted`. 0 for everyone who wasn't referred →
@@ -126,6 +140,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     linked_tier = row["linked_tier"]
     last_75 = _parse_ts(row["quota_75_last_fired_at"]) if "quota_75_last_fired_at" in row.keys() else None
     last_90 = _parse_ts(row["quota_90_last_fired_at"]) if "quota_90_last_fired_at" in row.keys() else None
+    last_100 = _parse_ts(row["quota_100_last_fired_at"]) if "quota_100_last_fired_at" in row.keys() else None
     bonus = int(row["referral_bonus_remaining"] or 0) if "referral_bonus_remaining" in row.keys() else 0
     nudge_last = _parse_ts(row["referral_nudge_last_at"]) if "referral_nudge_last_at" in row.keys() else None
 
@@ -150,6 +165,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
         linked_tier=linked_tier,
         quota_75_last_fired_at=last_75,
         quota_90_last_fired_at=last_90,
+        quota_100_last_fired_at=last_100,
         referral_bonus_remaining=bonus,
         referral_nudge_last_at=nudge_last,
     )
@@ -243,3 +259,184 @@ def record_regime_delivered(db: Database, chat_id: int, source: str) -> None:
     QUOTA-CONSISTENCY-COUNT-ALL-W1). Bot regime pushes are ``source='watch'``."""
     db.record_alert_fired(chat_id, "regime", source)
     consume_quota(db, chat_id)
+
+
+# ── BOT-QUOTA-REFUSAL-SEAM-W1: the single REFUSAL seam ───────────────────────
+# The symmetric counterpart of the delivery seam above. Every lane that can be
+# refused for quota routes through ``evaluate_delivery`` (the ONE derivation) and,
+# if it is a PUSH lane, through ``refuse_and_notify`` (the ONE notice). Before this
+# wave three push lanes each re-derived the decision and drifted to three different
+# behaviours; `scripts/check-quota-refusal-seam.py` now makes that unwritable.
+
+# The lane table IS the gate's source of truth. A lane is keyed by the name of the
+# function that reads the decision, and its VALUE declares how it refuses:
+#   'push' — the user is ABSENT. Refusing silently is invisible to them, so the lane
+#            MUST call ``refuse_and_notify``.
+#   'pull' — the user is PRESENT and waiting on a reply. The returned message IS the
+#            notice, so the lane MUST return a value from the refusal branch.
+# Adding a lane without declaring it here FAILS the gate; declaring one that no
+# longer reads the decision FAILS it too (a stale entry rots into a permission slip
+# — that is exactly how the dark `paywall.py` survived 80 days).
+REFUSAL_LANES: Final[dict[str, Literal["push", "pull"]]] = {
+    "process_one_row": "push",
+    "run_cycle": "push",
+    "process_scan_digests": "push",
+    "handle_scan": "pull",
+    "handle_regime": "pull",
+    "handle_call": "pull",
+    "handle_funding": "pull",
+}
+
+
+@dataclass(frozen=True)
+class QuotaDecision:
+    """The ONE derivation of "may this user be served?".
+
+    Consumers PROJECT from these fields; they never re-read ``.exhausted``
+    themselves (the gate enforces it). ``state`` is carried so a caller that
+    needs the numbers renders them from the same snapshot the decision was
+    made on, rather than issuing a second read that can disagree.
+    """
+
+    allowed: bool
+    state: QuotaState
+    notify: bool
+
+
+def _notice_due(state: QuotaState) -> bool:
+    """Has this exhaustion EPISODE already been announced?
+
+    Window-scoped rather than time-throttled: the key is the window the user is
+    currently walled in, so a new 30-day window re-arms the notice by itself with
+    no timer and no cleanup job. A walled user stays walled for up to 30 days —
+    a 24h-style throttle (the shape used by the 75%/90% CTAs) would send the same
+    "you are out" message ~21 times and earn the bot a block.
+    """
+    if state.window_start is None:
+        return False  # never consumed anything ⇒ cannot be exhausted
+    last = state.quota_100_last_fired_at
+    return last is None or last < state.window_start
+
+
+def evaluate_delivery(db: Database, chat_id: int) -> QuotaDecision:
+    """THE decision. Pure read — no writes, safe to call on every cycle."""
+    state = get_quota_state(db, chat_id)
+    exhausted = state.exhausted
+    return QuotaDecision(
+        allowed=not exhausted,
+        state=state,
+        notify=exhausted and _notice_due(state),
+    )
+
+
+def build_refusal_text(db: Database, chat_id: int, state: QuotaState) -> str:
+    """The ONE walled-user message, shared by every push lane.
+
+    BOT-QUOTA-REFUSAL-SEAM-W1 R-4(a): reuses ``paywall.format_paywall_body`` —
+    trilingual, ≤300 chars, already tested — but fed from the BOT's own meter
+    (``state.used``/``state.total``) instead of the MCP ``_algovault.tier_warning``
+    it originally keyed on. That field is unreachable here by construction: the bot
+    authenticates with ``X-AlgoVault-Internal-Key`` → ``tier:'internal'``, and
+    signal-MCP's ``withTierWarning`` returns the meta unchanged for bot-internal
+    callers, so the module never once fired in ~80 days live (0/57 subscribers ever
+    stamped). Rewiring it to the meter we actually enforce is what makes it reachable.
+
+    ``referral_link``/``bonus_calls`` are deliberately omitted: sourcing them needs a
+    network call to the engine SoT, and this runs on the dispatch loop's refusal path
+    where a guard must be cheap and must not throw. ``format_paywall_body`` documents
+    the absent-referral fallback as the verbatim block copy. Follow-up flagged.
+    """
+    row = db.get_subscriber(chat_id)
+    lang_code = None
+    if row is not None and "lang_code" in row.keys():
+        lang_code = row["lang_code"]
+    src = db.get_acquisition_source(chat_id)
+    # The REAL horizon, not "next month": this meter is a rolling 30-day window
+    # anchored on `alerts_window_start`, so the reset date is a property of when the
+    # user first consumed, not of the calendar.
+    resets_at = None
+    if state.window_start is not None:
+        resets_at = (state.window_start + WINDOW).strftime("%d %b %Y")
+    return format_paywall_body(
+        "block",
+        state.used,
+        state.total,
+        signup_url("quota_exhausted_push", src),
+        lang_code,
+        resets_at=resets_at,
+    )
+
+
+async def refuse_and_notify(
+    db: Database,
+    chat_id: int,
+    source: str,
+    *,
+    send: Callable[[str], Awaitable[bool]],
+    decision: QuotaDecision | None = None,
+) -> bool:
+    """Refuse ONE push-lane delivery, and tell the user the first time it happens.
+
+    Returns True iff a notice was delivered on this call.
+
+    ``send`` is INJECTED rather than imported so this module stays a leaf — importing
+    ``alert_engine._push`` here would close a cycle (alert_engine already imports this
+    module). ``decision`` may be passed by a caller that already evaluated, so a lane
+    never derives the decision twice within one cycle.
+
+    Telemetry is a LOG LINE, never a table row: refusals run at ~10k/week and a row
+    per refusal is write amplification for a quantity that is a STATE, not an event.
+    The digest renders that state live (``walled_now``).
+
+    Refuses, never throws (`build-and-runtime.md`: a guard on a live serving path
+    REFUSES, it does not THROW). A failure to render or send a notice must not take
+    the dispatch loop down for every other subscriber.
+    """
+    d = decision if decision is not None else evaluate_delivery(db, chat_id)
+    notified = False
+    try:
+        if d.notify:
+            text = build_refusal_text(db, chat_id, d.state)
+            if await send(text):
+                # Stamp ONLY after a delivered send — a blocked or rate-limited
+                # subscriber must not silently burn the one notice of the episode
+                # (the discipline the pre-seam watch lane already applied to
+                # ``quota_notices_fired``, preserved here).
+                db.mark_quota_cta_fired(chat_id, "100", _now().isoformat())
+                db.record_quota_notice_fired(chat_id)
+                db.increment_total_ctas_shown(chat_id)
+                notified = True
+    except Exception as err:  # noqa: BLE001 — never break the dispatch loop
+        log.warning(
+            "refusal notice failed chat_id=%s source=%s err=%s", chat_id, source, err
+        )
+    log.info(
+        '{"event": "quota_refused", "chat_id": %d, "source": "%s", '
+        '"used": %d, "total": %d, "notified": %s}',
+        chat_id,
+        source,
+        d.state.used,
+        d.state.total,
+        "true" if notified else "false",
+    )
+    return notified
+
+
+def count_walled_now(db: Database) -> tuple[int, int]:
+    """``(walled, silent)`` across live free subscribers, RIGHT NOW.
+
+    Projects from ``evaluate_delivery`` — never a re-implemented ``alert_count >=
+    100`` in SQL, which would be a second derivation of the very decision this
+    module exists to own. ``silent`` counts walled users who have not been told;
+    it is 0 in a healthy system and any non-zero value is a seam defect, which is
+    precisely the signal the digest was missing.
+    """
+    walled = silent = 0
+    for chat_id in db.get_active_chat_ids():
+        d = evaluate_delivery(db, chat_id)
+        if d.allowed:
+            continue
+        walled += 1
+        if d.state.quota_100_last_fired_at is None:
+            silent += 1
+    return walled, silent

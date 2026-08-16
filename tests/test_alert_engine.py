@@ -126,7 +126,7 @@ def test_trade_call_alert_includes_quota_line() -> None:
     assert "🟢 BUY: ETH 1h on BINANCE" in msg
     assert "Confidence: 78" in msg
     assert "$84,250.50" in msg
-    assert "📊 Quota: 47/100 free calls used this month" in msg
+    assert "📊 Quota: 47/100 free alerts used" in msg
 
 
 # ── bot-side quota counter ─────────────────────────────────────

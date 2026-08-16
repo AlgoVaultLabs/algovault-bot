@@ -107,7 +107,7 @@ def test_verdict_line_is_first_line_when_cta_present() -> None:
     # AC3: verdict line 1, CTA below (e.g. a quota_90 nudge).
     verdict = format_verdict_caption_line("LTC", "15m", "BUY", 76, "BINANCE")
     cta = (
-        "🔥 Only 5 free calls left. Upgrade now to keep getting calls:\n"
+        "🔥 Only 5 free alerts left. Upgrade now to keep getting them:\n"
         "→ https://api.algovault.com/signup?utm_campaign=quota_90"
     )
     caption = compose_caption(verdict, cta)

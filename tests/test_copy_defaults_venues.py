@@ -47,7 +47,7 @@ def test_help_upgrade_is_inline_button_utm_intact() -> None:
     # URL in the body); the utm-tagged signup URL is byte-identical (utm_campaign=help_message).
     from algovault_bot import keyboards
     assert "Upgrade → " not in HELP_MESSAGE
-    assert "Need more than 100 calls a month?" in HELP_MESSAGE
+    assert "Need more than 100 alerts a month?" in HELP_MESSAGE
     assert keyboards.upgrade_button("help_message").url == (
         "https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=help_message"
     )

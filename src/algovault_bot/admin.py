@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from .db import Database
+from .quota import count_walled_now
 
 
 log = logging.getLogger(__name__)
@@ -142,6 +143,11 @@ def render_stats(db: Database) -> str:
         )
         new_subs_24h = int(cur.fetchone()[0])
 
+    # BOT-QUOTA-REFUSAL-SEAM-W1: /stats stays aligned with the daily digest.
+    # Point-in-time state, projected through the seam's own decision. Outside the
+    # cursor block on purpose — it opens its own reads per subscriber.
+    walled_now, walled_silent = count_walled_now(db)
+
     # BOT-W2 conversion attribution. Compute ratio CTAs-shown → signups-linked.
     conversion_ratio = (
         f"{(linked_total / ctas_total * 100):.1f}%"
@@ -165,6 +171,8 @@ def render_stats(db: Database) -> str:
         f"  📈 Calls: {calls_24h}  "
         f"(👁 Watch {calls_watch} · 🔭 Scanwatch {calls_scanwatch} · 🔎 Scan {calls_scan})",
         f"  🔒 Quota-exhausted notices: {quota_notices_24h}",
+        f"  🚧 Walled now: {walled_now}"
+        f"  (notified {walled_now - walled_silent} · silent {walled_silent})",
         "",
         "🔔 Alerts (lifetime, per-user counters):",
         f"  📊 Regime shifts   : {regime_alerts_total}",

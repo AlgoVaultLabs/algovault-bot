@@ -35,6 +35,8 @@ The two numbers are both "100" in places and that is a coincidence of history, n
 ## Rules that follow
 
 1. **Bot-facing copy states the bot's units.** "Your free 100 alerts/month" — never "100 calls/month", which reads as the API's meter and is now a different number (200). Any figure quoted from the API ladder must name it as the API's.
+
+   > **This rule is now GATE-ENFORCED, because it never once held as prose.** `BOT-QUOTA-REFUSAL-SEAM-W1` (2026-08-16) found it violated in **nine** live surfaces on the day it was audited — including the footer of every trade-call card image — i.e. it was already false when it was written here. `scripts/check-quota-refusal-seam.py` leg **L3** now bans the collision across every module in the package, matching only real string literals (docstrings and comments excluded via AST, so prose *about* the rule is not judged *by* it). "API calls" stays legal; "free calls" does not. Per the Completeness Standard: a rule that has once failed as prose must be retired into a gate or deleted. Note the shape of the near-miss — L3's first cut scanned a hand-listed three files and reported PASS over the six surfaces it never looked at.
 2. **A change to `plans.ts` does not imply a change here.** There is no parity test between the two, deliberately, because there is no invariant to hold.
 3. **If this bot ever delivers a HOLD** — a "nothing to do" digest, a silence-confirmation — that is the moment to revisit, because a delivered HOLD *is* a delivery. Reopen this document then.
 

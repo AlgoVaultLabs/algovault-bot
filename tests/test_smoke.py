@@ -11,7 +11,7 @@ from algovault_bot.messages import WELCOME_MESSAGE
 def test_welcome_plain_language_intro() -> None:
     assert "👋 Welcome to AlgoVault, the brain layer for AI trading agents." in WELCOME_MESSAGE
     assert (
-        "You get 100 free calls a month. Each alert uses one call. Silent HOLDs are always free."
+        "You get 100 free alerts a month. Each alert I send uses one. Silent HOLDs are always free."
         in WELCOME_MESSAGE
     )
     assert "📊 Regime: the market's mood flips" in WELCOME_MESSAGE

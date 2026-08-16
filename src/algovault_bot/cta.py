@@ -110,7 +110,7 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
             return ""
         remaining = state.remaining
         return (
-            f"🔥 Only {remaining} free calls left. Upgrade now to keep getting calls:\n"
+            f"🔥 Only {remaining} free alerts left. Upgrade now to keep getting them:\n"
             f"→ {signup_url('quota_90')}"
         )
 

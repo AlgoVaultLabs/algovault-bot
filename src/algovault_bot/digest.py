@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from .db import Database, DEFAULT_DB_PATH
+from .quota import count_walled_now
 
 
 log = logging.getLogger("algovault_bot.digest")
@@ -49,6 +50,11 @@ class DigestMetrics:
     calls_24h: int  # = watch + scanwatch + scan
     watch_total: int
     quota_notices_24h: int
+    # BOT-QUOTA-REFUSAL-SEAM-W1: point-in-time STATE, not a 24h window — how many
+    # free subscribers are sitting behind the wall right now, and how many of those
+    # have never been told. `walled_silent > 0` is by definition a seam defect.
+    walled_now: int
+    walled_silent: int
     generated_at: str  # ISO-8601 UTC
 
 
@@ -107,6 +113,12 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         )
         quota_notices_24h = int(cur.fetchone()[0])
 
+    # BOT-QUOTA-REFUSAL-SEAM-W1: derived by projecting every reachable subscriber
+    # through `evaluate_delivery` — the SAME decision the seam enforces. Never a
+    # re-implemented `alert_count >= 100` in SQL, which would be a second derivation
+    # of the very thing this wave exists to make single.
+    walled_now, walled_silent = count_walled_now(db)
+
     return DigestMetrics(
         metric_date=now.strftime("%Y-%m-%d"),
         total_subs=total_subs,
@@ -119,6 +131,8 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         calls_24h=calls_24h,
         watch_total=watch_total,
         quota_notices_24h=quota_notices_24h,
+        walled_now=walled_now,
+        walled_silent=walled_silent,
         generated_at=now.isoformat(),
     )
 
@@ -143,6 +157,8 @@ def _format_digest(m: DigestMetrics) -> str:
         f"  📈 Calls: {m.calls_24h}  "
         f"(👁 Watch {m.calls_watch} · 🔭 Scanwatch {m.calls_scanwatch} · 🔎 Scan {m.calls_scan})",
         f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}",
+        f"  🚧 Walled now: {m.walled_now}"
+        f"  (notified {m.walled_now - m.walled_silent} · silent {m.walled_silent})",
         "",
     ])
     return "\n".join(lines)

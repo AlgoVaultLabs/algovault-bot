@@ -99,6 +99,7 @@ def format_paywall_body(
     lang_code: str | None = None,
     referral_link: str | None = None,
     bonus_calls: int | None = None,
+    resets_at: str | None = None,
 ) -> str:
     """Render the T1-voice paywall DM body (≤300 chars per spec).
 
@@ -118,6 +119,15 @@ def format_paywall_body(
     total = monthly_limit if monthly_limit is not None else 100
     url = suggested_upgrade_url or "https://api.algovault.com/signup?plan=starter&upgrade_from=tg_quota"
     lang = (lang_code or "en").lower().replace("_", "-")
+    # BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): the bot's window is a ROLLING 30 days
+    # from `alerts_window_start`, not a calendar month, so "Resets next month" was a
+    # wrong horizon — the same defect class as PRICING-FOLLOWUPS-GENERATOR-W1 CH1,
+    # where production told a caller walled for two hours to come back in 30 days.
+    # Callers pass the real reset date; the vaguer fallback survives only for callers
+    # that genuinely do not know it.
+    resets = f"Resets {resets_at}." if resets_at else "Resets when your 30-day window rolls."
+    resets_id = f"Direset {resets_at}." if resets_at else "Direset saat jendela 30 hari Anda berputar."
+    resets_zh = f"{resets_at} 重置。" if resets_at else "您的 30 天周期结束后重置。"
 
     if level == "block" and referral_link and bonus_calls:
         # The wall, referral-PROMINENT (lead) + upgrade-RETAINED + the existing
@@ -135,7 +145,7 @@ def format_paywall_body(
                 f"或 /unlock_premium_alerts，或升级：{url}"
             )
         return (
-            f"Out of verdicts ({used}/{total}) this month. "
+            f"Out of alerts ({used}/{total}). "
             f"Keep going free: refer a friend — you both get {bonus_calls} bonus calls → {referral_link}. "
             f"Or /unlock_premium_alerts, or upgrade: {url}"
         )
@@ -143,56 +153,56 @@ def format_paywall_body(
     if level == "soft":
         if lang.startswith("id"):
             return (
-                f"Anda telah memakai {used}/{total} verdict bulan ini. "
-                f"Upgrade ke Pro ($49/bln, 15K panggilan): {url}, "
+                f"Anda telah memakai {used}/{total} alert. "
+                f"Upgrade ke Starter ($9,99/bln, 10.000 panggilan API): {url}, "
                 f"ATAU dapatkan 30 hari Pro gratis via /unlock_premium_alerts."
             )
         if lang.startswith("zh"):
             return (
-                f"您本月已使用 {used}/{total} 次验证。"
-                f"升级到 Pro（$49/月、15K 次）：{url}，"
+                f"您已使用 {used}/{total} 次提醒。"
+                f"升级到 Starter（$9.99/月、10,000 次 API 调用）：{url}，"
                 f"或通过 /unlock_premium_alerts 免费获取 30 天 Pro。"
             )
         return (
-            f"You've used {used}/{total} verdicts this month. "
-            f"Upgrade to Pro ($49/mo, 15K calls): {url}, "
+            f"You've used {used}/{total} alerts. "
+            f"Upgrade to Starter ($9.99/mo, 10,000 API calls): {url}, "
             f"OR earn 30 days free Pro via /unlock_premium_alerts."
         )
     if level == "hard":
         if lang.startswith("id"):
             return (
-                f"⚠️ {used}/{total} verdict bulan ini sudah dipakai. "
+                f"⚠️ {used}/{total} alert sudah dipakai. "
                 f"Tinggal sedikit lagi sebelum quota habis. "
                 f"Upgrade: {url} · ATAU /unlock_premium_alerts gratis."
             )
         if lang.startswith("zh"):
             return (
-                f"⚠️ 本月已使用 {used}/{total} 次。"
+                f"⚠️ 已使用 {used}/{total} 次提醒。"
                 f"额度即将耗尽。升级：{url} · "
                 f"或使用 /unlock_premium_alerts 免费。"
             )
         return (
-            f"⚠️ Used {used}/{total} verdicts this month. "
+            f"⚠️ Used {used}/{total} alerts. "
             f"Approaching quota. Upgrade: {url} · "
             f"OR /unlock_premium_alerts for 30 days free."
         )
     if level == "block":
         if lang.startswith("id"):
             return (
-                f"Quota habis: {used}/{total} verdict bulan ini. "
-                f"Reset bulan depan. Upgrade sekarang: {url} · "
-                f"ATAU /unlock_premium_alerts untuk 30 hari Pro gratis."
+                f"Kuota habis: {used}/{total} alert. "
+                f"{resets_id} Upgrade: {url} · "
+                f"ATAU /unlock_premium_alerts · atau bayar per panggilan via x402."
             )
         if lang.startswith("zh"):
             return (
-                f"本月额度已用完：{used}/{total}。"
-                f"下月重置。立即升级：{url} · "
-                f"或 /unlock_premium_alerts 免费获取 30 天 Pro。"
+                f"提醒额度已用完：{used}/{total}。"
+                f"{resets_zh}升级：{url} · "
+                f"或 /unlock_premium_alerts · 或通过 x402 按次付费。"
             )
         return (
-            f"You've used all {used}/{total} free verdicts this month. "
-            f"Resets next month. Upgrade now: {url} · "
-            f"OR /unlock_premium_alerts for 30 days free."
+            f"You've used all {used}/{total} free alerts. "
+            f"{resets} Upgrade: {url} · "
+            f"OR /unlock_premium_alerts · or pay per call via x402."
         )
     raise ValueError(f"invalid paywall level: {level!r}")
 

@@ -175,10 +175,46 @@ def test_producer_exhausted_owner_skips_push_but_advances_bucket(tmp_db, monkeyp
 
     counts = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now))
     assert counts["scan_skipped_exhausted"] == 1
-    assert pushed == []  # exhausted → no push, no charge
+    # BOT-QUOTA-REFUSAL-SEAM-W1: exhausted → still no DIGEST and no charge, but the
+    # owner is now TOLD. This assertion used to read `pushed == []`, which pinned the
+    # defect: it made "the user hears nothing" the documented contract, and the lane
+    # honoured it for two subscribers across ~10,000 refusals.
+    assert len(pushed) == 1, "walled owner must receive exactly one refusal notice"
+    chat, body = pushed[0]
+    assert chat == 222
+    assert "alerts" in body, "notice must state the BOT's unit, not the API's 'calls'"
+    assert "upgrade" in body.lower()
+    # No charge: the refusal must not consume quota (it is not a delivery).
+    assert tmp_db.get_subscriber(222)["alert_count"] == FREE_TIER_MONTHLY_QUOTA
     # Bucket advanced → not due on the next tick in the same bucket (no re-scan storm).
     c2 = asyncio.run(alert_engine.process_scan_digests("tok", tmp_db.path, "http://x/mcp", "key", now_epoch=now + 60))
     assert c2["scan_due"] == 0
+
+
+def test_producer_walled_owner_is_told_once_per_window(tmp_db, monkeypatch):
+    """The episode is announced ONCE, not once per cycle.
+
+    A walled user stays walled for up to 30 days at a 1-minute dispatch cadence.
+    Announcing on every refusal would be ~43,000 messages per window; announcing on
+    none is the bug this wave fixed. Exactly one, re-armed by the next window.
+    """
+    tmp_db.upsert_subscriber(223, "u", "en")
+    tmp_db.add_scan_watch(223, 20, "15m", "BINANCE", "1h")
+    with tmp_db._cursor() as cur:
+        cur.execute(
+            "UPDATE subscribers SET alert_count=?, alerts_window_start=? WHERE chat_id=?",
+            (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 223),
+        )
+    pushed: list = []
+    _mock_engine(monkeypatch, _result(THREE), pushed)
+
+    for i in range(4):
+        asyncio.run(
+            alert_engine.process_scan_digests(
+                "tok", tmp_db.path, "http://x/mcp", "key", now_epoch=1_700_003_600 + i * 900
+            )
+        )
+    assert len(pushed) == 1, f"expected 1 notice across 4 refusals, got {len(pushed)}"
 
 
 def test_producer_all_hold_round_suppressed_no_push_no_charge(tmp_db, monkeypatch):

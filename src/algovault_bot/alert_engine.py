@@ -24,7 +24,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from telegram import Bot
 from telegram.error import Forbidden, TelegramError
@@ -36,7 +36,6 @@ from .alert_image import SeeAlsoCell, TradeCallView, render_trade_call_card
 from .capabilities import rank_label  # SCAN-RANKBY-W1: shared lens display label
 from .caption import compose_caption, format_verdict_caption_line
 from .cta import (
-    quota_exhausted_message,
     quota_threshold,
     regime_alert_should_show_cta,
     regime_cta_text,
@@ -46,18 +45,12 @@ from .cta import (
 from .db import Database, DEFAULT_DB_PATH
 from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
-from .paywall import (
-    extract_tier_warning,
-    format_paywall_body,
-    mark_fired as paywall_mark_fired,
-    should_fire_paywall_dm,
-)
-from . import referral_client  # REFERRAL-INPRODUCT-NUDGE-W1 / C2: wall referral link (fail-soft)
 from .quota import (
     QuotaState,
-    get_quota_state,
+    evaluate_delivery,
     record_call_delivered,
     record_regime_delivered,
+    refuse_and_notify,
 )
 from .rate_limit import TELEGRAM_GLOBAL_SEMAPHORE
 from .validators import TF_SECONDS
@@ -155,30 +148,30 @@ def format_trade_call_alert(
     if quota.is_paid and quota.linked_tier:
         parts.append(f"💎 {quota.linked_tier.capitalize()} plan — unlimited via bot")
     else:
-        parts.append(f"📊 Quota: {quota.used}/{quota.total} free calls used this month")
+        parts.append(f"📊 Quota: {quota.used}/{quota.total} free alerts used")
     if cta:
         parts.append("")
         parts.append(cta)
     return "\n".join(parts)
 
 
-def format_quota_exhausted_alert(row: WatchRow, call: str, cta: str) -> str:
-    """Sent in place of the trade-call alert when the user hit 100% quota.
+def _sender(bot: Bot, chat_id: int, db: Database) -> Callable[[str], Awaitable[bool]]:
+    """Bind a push target for `quota.refuse_and_notify`.
 
-    Spec C4 lines 357-361: "bot relays signal-MCP's existing exhausted message
-    + adds quota_100 CTA + x402 fallback line". Under D1-C, signal-MCP doesn't
-    see this user's quota — the bot owns the gate, and we craft the same
-    message shape locally (mirrored from src/lib/license.ts:getQuotaExhaustedMessage).
+    A named factory rather than a `lambda text, _cid=cid: ...`: the default-arg
+    capture is a late-binding footgun when the call site sits in a loop, and mypy
+    cannot infer the lambda's type at all.
+
+    BOT-QUOTA-REFUSAL-SEAM-W1 also RETIRED `format_quota_exhausted_alert` from this
+    spot. It rendered the walled-user message for the one lane that had one, which is
+    precisely how three lanes ended up with three behaviours. The body now comes from
+    `quota.build_refusal_text` — one message, every push lane.
     """
-    glyph = "🟢" if call == "BUY" else "🔴"
-    return "\n".join(
-        [
-            f"{glyph} {call} signal blocked — {row.coin} {row.timeframe} on {row.exchange}",
-            quota_exhausted_message(),
-            "",
-            cta,
-        ]
-    )
+
+    async def send(text: str) -> bool:
+        return await _push(bot, chat_id, text, db=db)
+
+    return send
 
 
 # ── one-shot cron tick ─────────────────────────────────────────
@@ -400,40 +393,61 @@ async def process_one_row(
 
                 # Flap suppression: only fire when streak >= 2 AND it differs from last_seen.
                 if new_streak >= 2 and current_regime != row.regime_last_seen:
-                    # C4 frequency-driven soft CTA on alerts #1, 3, 7, 15, then every 10.
-                    # No 24h cap — Telegram doesn't impose one, neither do we.
-                    next_count = db.increment_total_regime_alerts(row.chat_id)
-                    cta = regime_cta_text() if regime_alert_should_show_cta(next_count) else None
-                    text = format_regime_alert(
-                        row, row.regime_last_seen, current_regime, confidence, cta=cta,
-                    )
-                    if await _push(bot, row.chat_id, text, db=db):
-                        regime_seen = current_regime
-                        fetched["regime"] = "fired"
-                        # QUOTA-CONSISTENCY-COUNT-ALL-W1 (2026-06-08): regime
-                        # alerts now count toward the shared 100/mo free quota —
-                        # parity with signal-MCP, which meters get_market_regime.
-                        # Only HOLD *trade calls* stay free. Paid-linked users are
-                        # a no-op inside consume_quota (PAID_TIERS bypass).
-                        # BOT-DIGEST-COUNT-ALL-CALLS-W1: ONE delivery seam —
-                        # alerts_fired INSERT + consume_quota together (recorded
-                        # only after _push returned True, so failed sends don't
-                        # inflate the 24h count). source='watch'.
-                        record_regime_delivered(db, row.chat_id, "watch")
-                        if cta:
-                            db.increment_total_ctas_shown(row.chat_id)
-                        log_alert_event(
-                            "regime_alert_fired",
-                            chat_id=row.chat_id,
-                            coin=row.coin,
-                            timeframe=row.timeframe,
-                            exchange=row.exchange,
-                            from_regime=row.regime_last_seen,
-                            to_regime=current_regime,
-                            confidence=confidence,
-                            total_regime_alerts=next_count,
-                            cta_shown=bool(cta),
+                    # BOT-QUOTA-REFUSAL-SEAM-W1 (R-1a): the regime lane CHARGES quota
+                    # (QUOTA-CONSISTENCY-COUNT-ALL-W1) but never enforced it — `run_cycle`
+                    # builds its pre-skip set from `alert_type == "calls"` only, and this
+                    # branch read the decision nowhere. Measured: one walled free user took
+                    # 11 regime pushes AFTER crossing the wall, each charging quota and
+                    # driving the counter to 110/100. Charge-without-enforce was the only
+                    # incoherent option of the three; ruled to enforce.
+                    regime_decision = evaluate_delivery(db, row.chat_id)
+                    if not regime_decision.allowed:
+                        # Refuse, but do NOT return — `regime_seen` / streak
+                        # bookkeeping below this block is flap-suppression state and
+                        # must persist whether or not the alert was delivered.
+                        await refuse_and_notify(
+                            db,
+                            row.chat_id,
+                            "watch",
+                            send=_sender(bot, row.chat_id, db),
+                            decision=regime_decision,
                         )
+                        fetched["regime"] = "refused_quota"
+                    else:
+                        # C4 frequency-driven soft CTA on alerts #1, 3, 7, 15, then every 10.
+                        # No 24h cap — Telegram doesn't impose one, neither do we.
+                        next_count = db.increment_total_regime_alerts(row.chat_id)
+                        cta = regime_cta_text() if regime_alert_should_show_cta(next_count) else None
+                        text = format_regime_alert(
+                            row, row.regime_last_seen, current_regime, confidence, cta=cta,
+                        )
+                        if await _push(bot, row.chat_id, text, db=db):
+                            regime_seen = current_regime
+                            fetched["regime"] = "fired"
+                            # QUOTA-CONSISTENCY-COUNT-ALL-W1 (2026-06-08): regime
+                            # alerts now count toward the shared 100/mo free quota —
+                            # parity with signal-MCP, which meters get_market_regime.
+                            # Only HOLD *trade calls* stay free. Paid-linked users are
+                            # a no-op inside consume_quota (PAID_TIERS bypass).
+                            # BOT-DIGEST-COUNT-ALL-CALLS-W1: ONE delivery seam —
+                            # alerts_fired INSERT + consume_quota together (recorded
+                            # only after _push returned True, so failed sends don't
+                            # inflate the 24h count). source='watch'.
+                            record_regime_delivered(db, row.chat_id, "watch")
+                            if cta:
+                                db.increment_total_ctas_shown(row.chat_id)
+                            log_alert_event(
+                                "regime_alert_fired",
+                                chat_id=row.chat_id,
+                                coin=row.coin,
+                                timeframe=row.timeframe,
+                                exchange=row.exchange,
+                                from_regime=row.regime_last_seen,
+                                to_regime=current_regime,
+                                confidence=confidence,
+                                total_regime_alerts=next_count,
+                                cta_shown=bool(cta),
+                            )
         except McpError as e:
             log.warning(
                 json.dumps({"event": "mcp_get_market_regime_failed", "err": str(e)[:200]})
@@ -453,80 +467,40 @@ async def process_one_row(
             call = (tc_result.get("call") or "").upper()
             fetched["trade_call"] = "ok"
 
-            # TG-BROADCAST-STACK-W1 CH3 (2026-05-28): paywall-at-quota hook.
-            # Inspect MCP `_algovault.tier_warning` for 75% / 90% / 100% quota
-            # crossings on subscriber's linked_api_key; fire one-time DM per
-            # level per calendar month (UTC). Idempotent via paywall.mark_fired.
-            # Fail-open: any error swallowed; alert flow continues unaffected.
-            try:
-                paywall_warning = extract_tier_warning(tc_result)
-                if paywall_warning is not None:
-                    fire, level = should_fire_paywall_dm(
-                        db.path, row.chat_id, paywall_warning
-                    )
-                    if fire and level:
-                        sub = db.get_subscriber(row.chat_id)
-                        lang_code = sub["lang_code"] if sub else None
-                        # REFERRAL-INPRODUCT-NUDGE-W1 / C2: at the WALL (block), lead
-                        # with the user's referral free path (link + SoT bonus from the
-                        # engine). Only fetched for `block` (the limit moment, mirroring
-                        # C1); fail-soft — get_code returns None → existing copy.
-                        referral_link = None
-                        referral_bonus = None
-                        if level == "block":
-                            code_data = referral_client.get_code(row.chat_id)
-                            if code_data:
-                                referral_link = code_data.get("share_url")
-                                referral_bonus = (code_data.get("terms") or {}).get("bonus_calls")
-                        paywall_body = format_paywall_body(
-                            level,
-                            paywall_warning.get("current_usage"),
-                            paywall_warning.get("monthly_limit"),
-                            paywall_warning.get("suggested_upgrade_url"),
-                            lang_code,
-                            referral_link,
-                            referral_bonus,
-                        )
-                        if await _push(bot, row.chat_id, paywall_body, db=db):
-                            paywall_mark_fired(db.path, row.chat_id, level)
-                            log_alert_event(
-                                "tg_paywall_dm_fired",
-                                chat_id=row.chat_id,
-                                level=level,
-                                lang_code=lang_code,
-                                current_usage=paywall_warning.get("current_usage"),
-                                monthly_limit=paywall_warning.get("monthly_limit"),
-                            )
-            except Exception as paywall_err:  # noqa: BLE001
-                log.warning(
-                    "paywall hook error chat_id=%s err=%s",
-                    row.chat_id, paywall_err,
-                )
+            # BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): the TG-BROADCAST-STACK-W1 CH3
+            # paywall-at-quota hook stood here and was DARK for ~80 days — 0 of 57
+            # subscribers ever stamped, 0 `tg_paywall_dm_fired` events. It keyed on
+            # the MCP `_algovault.tier_warning`, but the bot authenticates with
+            # `X-AlgoVault-Internal-Key` → `tier:'internal'`, and signal-MCP's
+            # `withTierWarning` returns the meta unchanged for bot-internal callers.
+            # The field could never arrive. Its copy was not wasted: `paywall.py`'s
+            # `format_paywall_body` is now the walled-user body for EVERY push lane,
+            # fed from the meter this bot actually enforces (see `quota.build_refusal_text`).
 
             if call in ("BUY", "SELL"):
                 # No 24h cap — only the 100/mo quota gate applies.
-                state = get_quota_state(db, row.chat_id)
+                decision = evaluate_delivery(db, row.chat_id)
+                state = decision.state
                 now = datetime.now(timezone.utc)
-                if state.exhausted:
-                    # C4: send the exhausted-quota notice + quota_100 CTA + x402 fallback.
-                    cta = trade_call_cta_text(state, now=now)
-                    text = format_quota_exhausted_alert(row, call, cta)
-                    if await _push(bot, row.chat_id, text, db=db):
-                        fetched["trade_call"] = "exhausted_alert_sent"
-                        db.increment_total_ctas_shown(row.chat_id)
-                        # BOT-DIGEST-QUOTA-NOTICES-W1 (2026-06-15): count the
-                        # delivered quota-exhausted notice for the digest's
-                        # rolling-24h "Quota-exhausted notices" line. Recorded
-                        # ONLY after _push returned True (notice delivered);
-                        # separate table from alerts_fired — UX nudge, not
-                        # signal volume.
-                        db.record_quota_notice_fired(row.chat_id)
+                if not decision.allowed:
+                    # ONE refusal seam. It owns whether this exhaustion episode has
+                    # already been announced, sends the shared walled body if not, and
+                    # stamps only on a delivered send. Pre-seam, this branch re-derived
+                    # the decision AND was unreachable for an already-walled user,
+                    # because `run_cycle`'s pre-skip dropped the row before it ran.
+                    notified = await refuse_and_notify(
+                        db,
+                        row.chat_id,
+                        "watch",
+                        send=_sender(bot, row.chat_id, db),
+                        decision=decision,
+                    )
+                    fetched["trade_call"] = "refused_quota"
+                    if notified:
                         # ACTIVATION-FUNNEL-AUDIT-W1 (2026-05-28): funnel stage 13.
-                        # Q-C Option α: emit to alerts.log JSON-line stream; the
-                        # snapshot reader greps for "event": "tg_bot_quota_hit"
-                        # within the window. Fire ONLY when _push returned True
-                        # (Telegram message actually delivered) — no event for
-                        # blocked-subscriber or rate-limit-suppressed cases.
+                        # Fires ONLY on a delivered notice — no event for a blocked
+                        # subscriber, and none for the ~10k silent re-refusals that
+                        # follow the one announcement of an episode.
                         log_alert_event(
                             "tg_bot_quota_hit",
                             chat_id=row.chat_id,
@@ -714,7 +688,26 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     # they stay due and are picked up next tick.
     budget = counts["budget"]
     calls_owners = {r.chat_id for r in due_rows if r.alert_type == "calls"}
-    exhausted = {cid for cid in calls_owners if get_quota_state(db, cid).exhausted}
+    # BOT-QUOTA-REFUSAL-SEAM-W1: evaluate ONCE per distinct owner and project from
+    # that decision — both the scheduler's skip set and the notice below read the
+    # same snapshot rather than deriving it twice.
+    decisions = {cid: evaluate_delivery(db, cid) for cid in calls_owners}
+    exhausted = {cid for cid, d in decisions.items() if not d.allowed}
+    # This pre-skip is a FETCH-BUDGET optimisation, and it must never again be the
+    # thing that decides a user hears nothing. It drops the row before
+    # `process_one_row` runs, which is exactly why that function's refusal branch was
+    # unreachable for an already-walled user and why two subscribers were refused
+    # ~10,000 times in silence. Announce the episode HERE, before dropping the rows.
+    # `refuse_and_notify` no-ops once the episode is announced, so the cost is one
+    # message per user per 30-day window — not one per cycle.
+    for cid in sorted(exhausted):
+        await refuse_and_notify(
+            db,
+            cid,
+            "watch",
+            send=_sender(bot, cid, db),
+            decision=decisions[cid],
+        )
     sched = fetch_budget.schedule(
         due_rows, budget=budget, is_exhausted=lambda cid: cid in exhausted
     )
@@ -883,8 +876,20 @@ async def process_scan_digests(
                 for r in grp:
                     chat_id = r["chat_id"]
                     # Exhausted free owner → skip push+charge, advance the bucket, LEAVE the sig.
-                    if get_quota_state(db, chat_id).exhausted:
+                    # BOT-QUOTA-REFUSAL-SEAM-W1: route the refusal through the seam so the
+                    # owner is TOLD (once per window). This lane was the worst of the three
+                    # — it refused silently AND wrote no telemetry, so a scanwatch owner
+                    # hitting the wall was invisible on every operator surface.
+                    scan_decision = evaluate_delivery(db, chat_id)
+                    if not scan_decision.allowed:
                         counts["scan_skipped_exhausted"] += 1
+                        await refuse_and_notify(
+                            db,
+                            chat_id,
+                            "scanwatch",
+                            send=_sender(bot, chat_id, db),
+                            decision=scan_decision,
+                        )
                         db.mark_scan_watch_fired(chat_id, top_n, tf, exchange, bucket, rank_by)
                         continue
                     # Content-dedup: the actionable set is UNCHANGED since last delivery →

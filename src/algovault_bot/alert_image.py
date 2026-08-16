@@ -473,7 +473,7 @@ def render_trade_call_card(view: TradeCallView) -> bytes:
             fill=tier_color,
         )
     elif view.quota_used is not None and view.quota_total is not None:
-        text = f"Quota: {view.quota_used}/{view.quota_total} free calls used this month"
+        text = f"Quota: {view.quota_used}/{view.quota_total} free alerts used"
         draw.text((PAD_X, y), text, font=f_footer, fill=TEXT_MUTED)
 
     buf = io.BytesIO()

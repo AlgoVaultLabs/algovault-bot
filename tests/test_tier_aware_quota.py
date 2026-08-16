@@ -147,5 +147,5 @@ def test_alert_format_free_shows_quota_line() -> None:
     msg = format_trade_call_alert(
         _row(), "BUY", 78, 84250.50, "TRENDING_UP", "NORMAL", None, s, cta=None,
     )
-    assert "📊 Quota: 47/100 free calls used this month" in msg
+    assert "📊 Quota: 47/100 free alerts used" in msg
     assert "💎" not in msg

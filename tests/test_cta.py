@@ -66,13 +66,13 @@ def test_trade_call_cta_quota_75_at_89pct_first_fire() -> None:
 
 def test_trade_call_cta_quota_90_at_90pct_first_fire() -> None:
     cta = trade_call_cta_text(_state(90), now=_NOW)
-    assert "Only 10 free calls left" in cta
+    assert "Only 10 free alerts left" in cta
     assert "utm_campaign=quota_90" in cta
 
 
 def test_trade_call_cta_quota_90_at_99pct_first_fire() -> None:
     cta = trade_call_cta_text(_state(99), now=_NOW)
-    assert "Only 1 free calls left" in cta
+    assert "Only 1 free alerts left" in cta
     assert "utm_campaign=quota_90" in cta
 
 

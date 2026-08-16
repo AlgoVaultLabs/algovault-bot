@@ -54,7 +54,7 @@ WELCOME_MESSAGE: Final = (
     "\n"
     "I watch the markets for you and message you the moment something changes.\n"
     "\n"
-    "You get 100 free calls a month. Each alert uses one call. Silent HOLDs are always free.\n"
+    "You get 100 free alerts a month. Each alert I send uses one. Silent HOLDs are always free.\n"
     "\n"
     "Two kinds of alerts:\n"
     "📊 Regime: the market's mood flips (trending, ranging, or wild)\n"
@@ -136,11 +136,11 @@ HELP_MESSAGE: Final = (
     "   /watch BTC,ETH,SOL 15m    three coins at once\n"
     "   /unwatch BTC all          remove every BTC watch\n"
     "\n"
-    "Free tier: 100 calls a month. Regime and BUY/SELL alerts each use one call. Silent HOLDs are free.\n"
+    "Free tier: 100 alerts a month. Regime and BUY/SELL alerts each use one. Silent HOLDs are free.\n"
     "Informational analytics, not financial advice.\n"
     # TG-SCANWATCH-TF-CADENCE-W1 (B): CTA lead-in → the inline Upgrade button renders below
     # (attached as reply_markup by _help); the raw signup URL line is gone.
-    "Need more than 100 calls a month?"
+    "Need more than 100 alerts a month?"
 )
 
 
@@ -193,7 +193,7 @@ def format_subscription_confirmation(
         return (
             "✅ You're now watching\n"
             f"{coin} · {tf} · {exch} · {mode_label}\n"
-            "📊 Regime shifts — free · 📈 BUY/SELL count toward your 100/mo\n"
+            "📊 Regime + 📈 BUY/SELL alerts both count toward your 100/mo\n"
             "Manage: /list · /unwatch"
         )
     if kind == "scanwatch":
@@ -201,7 +201,7 @@ def format_subscription_confirmation(
         return (
             f"✅ Standing scan: top {top_n} · {tf} · {exch}\n"
             f"🔁 I'll re-check every {tf} and message only NEW BUY/SELL — repeats + HOLD rounds stay silent + free.\n"
-            "📈 Actionable digests count toward your 100/mo. Manage: /list · /unscanwatch"
+            "📈 Actionable digests count toward your 100 alerts/mo. Manage: /list · /unscanwatch"
         )
     raise ValueError(f"unknown subscription kind: {kind!r}")
 
@@ -304,7 +304,7 @@ def batch_watch_added_message(
 def batch_confirm_message(n_combos: int, n_coins: int, n_tfs: int, n_exch: int) -> str:
     return (
         f"⚠️ That's {n_combos} combos ({n_coins} coins × {n_tfs} TFs × {n_exch} exchanges) "
-        f"→ expect a lot of alerts and your 100 free calls/month can go fast. "
+        f"→ expect a lot of alerts and your 100 free alerts/month can go fast. "
         f"Add all, or start with the Top {DEFAULT_TOP_N} most-active?"
     )
 
