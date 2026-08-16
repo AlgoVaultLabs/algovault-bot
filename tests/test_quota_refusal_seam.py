@@ -117,3 +117,55 @@ def test_mark_quota_cta_fired_100_actually_writes(walled_db: Database) -> None:
     stamp = datetime.now(timezone.utc).isoformat()
     walled_db.mark_quota_cta_fired(1, "100", stamp)
     assert get_quota_state(walled_db, 1).quota_100_last_fired_at is not None
+
+
+# ── the notify set is not the skip set ───────────────────────────────────────
+
+
+def test_walled_owner_of_a_non_calls_row_is_still_notified(tmp_path: Path) -> None:
+    """A `both`-type owner must be told, not left waiting for an actionable signal.
+
+    Regression for a hole this wave shipped in its own fix: the announcement sweep
+    reused `alert_type == "calls"`, which is a fetch-BUDGET criterion. Measured live
+    26 minutes after deploy — two `calls`-type walled users notified within 63s, a
+    third (`both`) had zero refusal telemetry, because its in-row refusal fires only
+    on a BUY/SELL and every verdict was HOLD. Being walled is precisely the state in
+    which no signal arrives, so gating the notice on a signal never resolves.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from algovault_bot import alert_engine
+
+    db = Database(str(tmp_path / "t.db"))
+    db.upsert_subscriber(77, "both-type", "en")
+    db.add_watch(77, "BTC", "5m", "BINANCE", "both")
+    with db._cursor() as cur:
+        cur.execute(
+            "UPDATE subscribers SET alert_count=?, alerts_window_start=? WHERE chat_id=?",
+            (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 77),
+        )
+
+    sent: list[tuple[int, str]] = []
+
+    async def _fake_push(bot, chat_id, text, db=None):  # noqa: ANN001
+        sent.append((chat_id, text))
+        return True
+
+    class _Bot:
+        pass
+
+    with patch.object(alert_engine, "_push", _fake_push), patch.object(
+        alert_engine, "Bot", lambda *a, **k: _Bot()
+    ), patch.object(alert_engine, "McpClient", None):
+        try:
+            asyncio.run(
+                alert_engine.run_cycle("tok", db.path, "http://x/mcp", "key")
+            )
+        except Exception:
+            # The MCP client is stubbed out; the announcement sweep runs BEFORE any
+            # MCP work, so a later failure does not invalidate what we assert here.
+            pass
+
+    assert sent, "a walled `both`-type owner received no refusal notice"
+    assert sent[0][0] == 77

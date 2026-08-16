@@ -691,8 +691,18 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     # BOT-QUOTA-REFUSAL-SEAM-W1: evaluate ONCE per distinct owner and project from
     # that decision — both the scheduler's skip set and the notice below read the
     # same snapshot rather than deriving it twice.
-    decisions = {cid: evaluate_delivery(db, cid) for cid in calls_owners}
-    exhausted = {cid for cid, d in decisions.items() if not d.allowed}
+    # The NOTIFY set is every due owner; the SKIP set stays `calls`-only. Those are
+    # two different questions and conflating them is how this wave shipped a hole in
+    # its own fix: `alert_type == "calls"` is a fetch-BUDGET criterion (which rows are
+    # worth an MCP call), and reusing it for the announcement left `both`-type and
+    # regime-only owners unreachable. Measured 26 minutes after the first deploy —
+    # two `calls`-type walled users notified within 63s, while a third (`both`, fetched
+    # every 5 min) had ZERO refusal telemetry, because its in-row refusal only fires on
+    # an actionable BUY/SELL and its verdicts were all HOLD. A walled user must not
+    # wait for a signal they are barred from receiving in order to learn they are barred.
+    notify_owners = {r.chat_id for r in due_rows}
+    decisions = {cid: evaluate_delivery(db, cid) for cid in notify_owners}
+    exhausted = {cid for cid in calls_owners if not decisions[cid].allowed}
     # This pre-skip is a FETCH-BUDGET optimisation, and it must never again be the
     # thing that decides a user hears nothing. It drops the row before
     # `process_one_row` runs, which is exactly why that function's refusal branch was
@@ -700,7 +710,7 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     # ~10,000 times in silence. Announce the episode HERE, before dropping the rows.
     # `refuse_and_notify` no-ops once the episode is announced, so the cost is one
     # message per user per 30-day window — not one per cycle.
-    for cid in sorted(exhausted):
+    for cid in sorted(cid for cid, d in decisions.items() if not d.allowed):
         await refuse_and_notify(
             db,
             cid,
