@@ -55,6 +55,10 @@ class DigestMetrics:
     # have never been told. `walled_silent > 0` is by definition a seam defect.
     walled_now: int
     walled_silent: int
+    # PRICING-BOT-DELIVERY-METERING-W1 CH5f — of the walled, how many are PAYING. A walled paid
+    # subscriber is revenue at its ceiling, not a conversion opportunity: a different signal.
+    # No default: every field after it lacks one, and a defaulted field cannot precede those.
+    walled_paid: int
     # OPS-DIGEST-TGBOT-TIER-AND-WALLED-W1: delivered calls whose owner is on a PAID tier.
     # Bot traffic authenticates as `tier:'internal'`, so a paying subscriber's alerts can
     # never reach the operator digest's 💳 Paid row (which counts direct API/MCP calls and
@@ -134,7 +138,7 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
     # through `evaluate_delivery` — the SAME decision the seam enforces. Never a
     # re-implemented `alert_count >= 100` in SQL, which would be a second derivation
     # of the very thing this wave exists to make single.
-    walled_now, walled_silent = count_walled_now(db)
+    walled_now, walled_silent, walled_paid = count_walled_now(db)
 
     return DigestMetrics(
         metric_date=now.strftime("%Y-%m-%d"),
@@ -150,6 +154,7 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         quota_notices_24h=quota_notices_24h,
         walled_now=walled_now,
         walled_silent=walled_silent,
+        walled_paid=walled_paid,
         calls_paid_linked=calls_paid_linked,
         generated_at=now.isoformat(),
     )

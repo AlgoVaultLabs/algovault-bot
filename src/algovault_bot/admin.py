@@ -146,7 +146,7 @@ def render_stats(db: Database) -> str:
     # BOT-QUOTA-REFUSAL-SEAM-W1: /stats stays aligned with the daily digest.
     # Point-in-time state, projected through the seam's own decision. Outside the
     # cursor block on purpose — it opens its own reads per subscriber.
-    walled_now, walled_silent = count_walled_now(db)
+    walled_now, walled_silent, walled_paid = count_walled_now(db)
 
     # BOT-W2 conversion attribution. Compute ratio CTAs-shown → signups-linked.
     conversion_ratio = (

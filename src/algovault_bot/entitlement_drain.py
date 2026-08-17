@@ -23,11 +23,11 @@ or crash the drain.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from .db import Database, DEFAULT_DB_PATH
 from .entitlement_client import consume, read_state
-from .quota import PAID_TIERS
+from .quota import PAID_TIERS, PLAN_MIRROR_STALE_AFTER
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,10 @@ BATCH_LIMIT = 200
 MAX_ATTEMPTS = 8
 #: A mirror older than this is INDETERMINATE to CH5's wall, which SERVES on it (never wall on a
 #: measurement we could not take). The poll below exists to keep mirrors inside this window.
-STALENESS_MINUTES = 90
+#: IMPORTED, not redeclared: `quota.PLAN_MIRROR_STALE_AFTER` is the SoT, because the drainer's
+#: refresh cadence and the wall's trust window are the SAME number wearing two names, and two
+#: names is how they drift apart.
+STALENESS = PLAN_MIRROR_STALE_AFTER
 
 
 def _is_stale(as_of: str | None, now: datetime) -> bool:
@@ -53,7 +56,7 @@ def _is_stale(as_of: str | None, now: datetime) -> bool:
             dt = dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return True
-    return (now - dt) > timedelta(minutes=STALENESS_MINUTES)
+    return (now - dt) > STALENESS
 
 
 def drain_entitlement_debits(

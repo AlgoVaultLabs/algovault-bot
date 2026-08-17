@@ -89,7 +89,7 @@ def test_upsert_sql_column_param_arity() -> None:
         # bridged to `bot_daily_metrics` — that table is a daily time-series of 24h
         # counters, and `walled_now` is instantaneous state whose value at 03:00 would
         # not mean the same thing as the rows beside it. Arity stays 11.
-        walled_now=0, walled_silent=0, calls_paid_linked=0,
+        walled_now=0, walled_silent=0, walled_paid=0, calls_paid_linked=0,
         generated_at="2026-07-06T03:00:00+00:00",
     )
     sql, params = digest._bot_metrics_upsert(m)
