@@ -2,7 +2,7 @@
 
 **Declared:** 2026-08-09 · **Architect:** Mr.1, ruling G-C of `PRICING-FOLLOWUPS-GENERATOR-W1`
 **API-side SoT:** `crypto-quant-signal-mcp` → `src/lib/plans.ts`
-**Status:** deliberate divergence, no alignment planned. This document IS the decision.
+**Status:** deliberate divergence for the FREE lane. The PAID lane was unified on 2026-08-17 — see the amendment directly below, which scopes everything after it.
 
 ## The question that produced this
 
@@ -31,6 +31,42 @@ That is the whole divergence, and it follows from the products differing, not fr
 | enforcement | `plans.ts` → `license.ts` | `quota.py`, this repo's SQLite |
 
 The two numbers are both "100" in places and that is a coincidence of history, not a shared source. **Do not wire one to the other.**
+
+## AMENDED 2026-08-17 — the PAID lane is now UNIFIED. This document is scoped to the FREE lane.
+
+`PRICING-BOT-DELIVERY-METERING-W1` (architect rulings R-1/R-2/R-3) changed what a **paid-linked**
+delivery costs. Everything below this section was written when BOTH lanes diverged; it is now true
+of the **free** lane only. Nothing below is deleted, because the free lane is still the majority of
+this bot's traffic and the reasoning still governs it.
+
+**What changed.** A delivery to a subscriber whose Telegram chat is linked to a paid API key now
+DEBITS that subscriber's plan allowance on signal-MCP, through the channel-agnostic
+`consumeEntitlement` primitive, and the subscriber is **hard walled** at the plan ceiling. The bot
+enqueues the debit locally and a drainer sends it out of band, so a delivery is never blocked by a
+metering call.
+
+**What did NOT change, and must not be "tidied" into the new model:**
+
+| | free lane | paid-linked lane |
+|---|---|---|
+| billable unit | a **delivered alert** | a **delivered alert** — unchanged |
+| HOLD | silent, so nothing to meter | silent, so nothing to meter — **Rule 3 below is untouched** |
+| ledger | this bot's own SQLite, 100 alerts / rolling 30d | signal-MCP `quota_usage`, via `entitlement_debits` |
+| wall | 100 alerts, one notice per window | the plan ceiling, one notice per episode (monthly OR daily) |
+
+**The billable unit is STILL a delivered alert, not a poll.** That is the load-bearing half of this
+document and the paid lane inherits it rather than replacing it: measured 2026-08-16, the bot makes
+~4,038 MCP requests to deliver ~211 alerts, and polls are unattributable per subscriber by
+construction because one scanwatch call serves every subscriber watching that group. Charging polls
+was considered and rejected for exactly that reason.
+
+**The parity question is now real for one lane and still absent for the other.** The line below
+saying *"there is no parity test … deliberately, because there is no invariant to hold"* remains
+correct for the free lane. For the paid lane there IS an invariant — a delivered paid alert must
+produce exactly one `entitlement_debits` row — and it is held by the idempotency key
+`bot:<chat_id>:<alerts_fired.id>`, not by a test comparing two numbers.
+
+---
 
 ## Rules that follow
 

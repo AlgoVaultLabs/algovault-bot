@@ -47,6 +47,7 @@ from __future__ import annotations
 import ast
 import re
 import sys
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,12 +80,30 @@ COPY_BANS = (
 # `referral.py` — a gate reporting PASS over copy it never looked at.
 
 
+# ── L4: the bot may not hand-type the plan ladder ────────────────────────────
+# PRICING-BOT-DELIVERY-METERING-W1 CH6b. `messages._TIER_QUOTA` hard-typed
+# {"starter": 3_000, "pro": 15_000, "enterprise": 100_000} while the live ladder was
+# 10,000/100,000/100,000 — wrong for every linked subscriber from the day the ladder moved, with
+# nothing able to notice. Plan figures now come from the server mirror; a literal is the defect.
+PAID_TIER_NAMES = frozenset({"starter", "pro", "enterprise", "x402"})
+
+# L4b: an `ast` walk CANNOT SEE A COMMENT, and the stale ladder also lived in one
+# ("real Stripe-backed quota (3K/15K/100K)"). L4 alone would have left it. Matches on the SHAPE of
+# a ladder — two or more grouped figures separated by / or · — so `3K/15K/100K` and
+# `3,000/15,000/100,000` both fail. Scanning source but not comments is the same partial-corpus
+# near-miss L3's first cut already made; it is not repeated here.
+LADDER_IN_COMMENT = re.compile(
+    r"\b\d{1,3}(?:[,_]?\d{3}|K)\b(?:\s*[/·]\s*\b\d{1,3}(?:[,_]?\d{3}|K)\b){1,}"
+)
+
+
 @dataclass
 class Findings:
     undeclared: list[str] = field(default_factory=list)
     wrong_shape: list[str] = field(default_factory=list)
     orphan_lanes: list[str] = field(default_factory=list)
     copy_violations: list[str] = field(default_factory=list)
+    ladder_violations: list[str] = field(default_factory=list)
     lanes_seen: dict[str, list[str]] = field(default_factory=dict)
     corpus_files: int = 0
 
@@ -92,6 +111,7 @@ class Findings:
     def failures(self) -> list[str]:
         return (
             self.undeclared + self.wrong_shape + self.orphan_lanes + self.copy_violations
+            + self.ladder_violations
         )
 
 
@@ -233,6 +253,45 @@ def scan_copy(pkg_dir: Path) -> list[str]:
     return out
 
 
+def scan_ladder(pkg_dir: Path) -> list[str]:
+    """L4 (AST) + L4b (tokenize) — no hand-typed plan ladder, in code OR in a comment."""
+    out: list[str] = []
+    for path in sorted(pkg_dir.glob("*.py")):
+        name = path.name
+        src = path.read_text()
+        # L4 — a dict whose string keys intersect the paid tiers and whose values are numbers.
+        try:
+            tree = ast.parse(src, filename=str(path))
+        except SyntaxError as e:
+            raise RuntimeError(f"cannot parse {name}: {e}") from e
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Dict):
+                continue
+            keys = {k.value for k in n.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            if not (keys & PAID_TIER_NAMES):
+                continue
+            if any(isinstance(v, ast.Constant) and isinstance(v.value, (int, float)) for v in n.values):
+                out.append(
+                    f"L4 {name}:{n.lineno} hand-types the plan ladder — plan figures come from the "
+                    f"server mirror, never a literal: {sorted(keys & PAID_TIER_NAMES)}"
+                )
+        # L4b — the same ladder hiding in a comment, which the AST above is blind to.
+        with path.open("rb") as fh:
+            try:
+                for tok in tokenize.tokenize(fh.readline):
+                    if tok.type != tokenize.COMMENT:
+                        continue
+                    m = LADDER_IN_COMMENT.search(tok.string)
+                    if m:
+                        out.append(
+                            f"L4b {name}:{tok.start[0]} states a plan ladder in a COMMENT — a "
+                            f"restated number goes stale with nothing able to notice: {m.group(0)!r}"
+                        )
+            except tokenize.TokenError:
+                pass
+    return out
+
+
 def load_lanes() -> dict[str, str]:
     sys.path.insert(0, str(REPO / "src"))
     from algovault_bot.quota import REFUSAL_LANES  # noqa: PLC0415
@@ -322,6 +381,30 @@ def self_test(tmp: Path) -> bool:
             failed += 1
             print(f"  ✗ {label}: expected {expected}, got {got}")
 
+    # ── L4 / L4b: the plan ladder, in code and in comments ──────────────────
+    ladder_cases = [
+        ("L4  a hand-typed tier->allowance dict", 'X = {"starter": 3000, "pro": 15000}\n', 1),
+        ("L4  a dict with no tier keys is fine", 'X = {"alpha": 3000, "beta": 15000}\n', 0),
+        ("L4  tier keys with non-numeric values are fine", 'X = {"starter": "a", "pro": "b"}\n', 0),
+        ("L4b a ladder in a COMMENT (K form)", "# real quota (3K/15K/100K)\n", 1),
+        ("L4b a ladder in a COMMENT (comma form)", "# quota 3,000/15,000/100,000\n", 1),
+        ("L4b ordinary prose with one figure is fine", "# about 10,000 alerts\n", 0),
+    ]
+    for label, body, expected in ladder_cases:
+        ld = tmp / ("ladder_" + label.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "").replace(">", ""))
+        ld.mkdir(parents=True, exist_ok=True)
+        (ld / "m.py").write_text(body)
+        try:
+            got = len(scan_ladder(ld))
+        except Exception as e:
+            got = f"CRASH({e})"
+        if got == expected:
+            passed += 1
+            print(f"  \u2713 {label}: {got} finding(s)")
+        else:
+            failed += 1
+            print(f"  \u2717 {label}: expected {expected}, got {got}")
+
     # Vacuity guard, at the CONSTRUCTION site: in --self-test WE build the corpus,
     # so an empty scan means the test built nothing — a defect in the test itself.
     empty = tmp / "empty"
@@ -373,6 +456,7 @@ def main() -> int:
         lanes = load_lanes()
         f = scan(PKG, lanes)
         f.copy_violations = scan_copy(PKG)
+        f.ladder_violations = scan_ladder(PKG)
     except Exception as e:
         # Input we were HANDED and could not parse is INDETERMINATE, always.
         print(f"could not evaluate: {e}")

@@ -466,9 +466,14 @@ def render_trade_call_card(view: TradeCallView) -> bytes:
             (cx - d_size // 2, cy),
         ]
         draw.polygon(diamond, fill=tier_color)
+        # CH6a: when the plan mirror is known, the badge states the ALLOWANCE, not just the
+        # tier — a bare tier name is what implied an uncapped allowance before this wave.
+        label = f"{view.tier_label} Plan"
+        if view.quota_used is not None and view.quota_total is not None:
+            label = f"{label} · {view.quota_used:,}/{view.quota_total:,}"
         draw.text(
             (PAD_X + d_size + 14, y),
-            f"{view.tier_label} Plan",
+            label,
             font=f_footer,
             fill=tier_color,
         )

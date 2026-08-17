@@ -2,7 +2,7 @@
 
 Paid-tier-linked users:
 - ``QuotaState.is_paid`` is True; ``exhausted`` is always False; ``remaining``
-  is effectively unlimited.
+  is gated by the PLAN mirror, not the free meter.
 - ``consume_quota`` is a no-op (counter doesn't tick).
 - ``trade_call_cta_text`` returns '' (CTAs suppressed; user is already paying).
 - ``format_trade_call_alert`` renders a tier badge instead of "X/100".
@@ -138,7 +138,10 @@ def test_alert_format_paid_shows_tier_badge() -> None:
     msg = format_trade_call_alert(
         _row(), "BUY", 78, 84250.50, "TRENDING_UP", "NORMAL", "trend up", s, cta=None,
     )
-    assert "💎 Pro plan — unlimited via bot" in msg
+    # CH6a: "unlimited via bot" became false the day paid deliveries began debiting the plan.
+    # With no mirror observed, the badge states the tier and NO fabricated figure.
+    assert "💎 Pro plan" in msg
+    assert "via bot" not in msg
     assert "Quota:" not in msg
 
 

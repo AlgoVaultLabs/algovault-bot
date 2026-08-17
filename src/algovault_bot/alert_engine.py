@@ -146,7 +146,13 @@ def format_trade_call_alert(
         parts.append(f"Reasoning: {reasoning[:280]}{'...' if len(reasoning) > 280 else ''}")
     # BOT-W2 C3: paid-tier-linked users see a tier badge instead of "47/100".
     if quota.is_paid and quota.linked_tier:
-        parts.append(f"💎 {quota.linked_tier.capitalize()} plan — unlimited via bot")
+        # CH6a: the old "via bot, uncapped" claim became FALSE the day paid deliveries began debiting the
+        # plan. Same treatment as the live image path above: the plan's own figures from the
+        # mirror, or the tier alone when the mirror is unobserved/uncapped — never a literal.
+        if quota.plan_used is not None and quota.plan_total is not None:
+            parts.append(f"💎 {quota.linked_tier.capitalize()} plan — {quota.plan_used:,}/{quota.plan_total:,} used")
+        else:
+            parts.append(f"💎 {quota.linked_tier.capitalize()} plan")
     else:
         parts.append(f"📊 Quota: {quota.used}/{quota.total} free alerts used")
     if cta:
@@ -310,7 +316,16 @@ def _build_trade_call_view(
     quota_used: int | None = None
     quota_total: int | None = None
     if state.is_paid and state.linked_tier:
+        # PRICING-BOT-DELIVERY-METERING-W1 CH6a — the LIVE badge. It used to read
+        # "💎 Starter Plan", which implied an uncapped alert allowance; since this wave a paid delivery
+        # DEBITS the subscriber's plan, so the badge shows the plan's own figures. They come from
+        # the MIRROR (the server's answer), never a local ladder — `messages._TIER_QUOTA` was a
+        # hand-typed ladder and was wrong for every linked subscriber from the day it moved.
+        # An unobserved or uncapped mirror shows the tier alone rather than a fabricated number.
         tier_label = state.linked_tier.capitalize()
+        if state.plan_used is not None and state.plan_total is not None:
+            quota_used = state.plan_used
+            quota_total = state.plan_total
     else:
         quota_used = state.used
         quota_total = state.total

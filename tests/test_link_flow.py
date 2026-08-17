@@ -91,7 +91,9 @@ def test_handle_link_first_time_starter(tmp_db: Database, _valid_starter: Valida
         reply = handle_link(tmp_db, 42, "alice", "en", TEST_KEY)
     assert "✅ Linked!" in reply
     assert "starter" in reply
-    assert "3,000 calls/mo" in reply
+    # PRICING-BOT-DELIVERY-METERING-W1 CH6a: the bot no longer states an allowance it was never
+    # told. `_TIER_QUOTA` hard-typed one and had been wrong since the ladder moved.
+    assert "draw down your plan allowance" in reply
     api_key, tier = tmp_db.get_linked_state(42)
     assert api_key == TEST_KEY
     assert tier == "starter"
@@ -123,7 +125,9 @@ def test_handle_link_tier_upgrade(
     with patch("algovault_bot.handlers.validate_api_key", return_value=_valid_pro):
         reply = handle_link(tmp_db, 42, "alice", "en", "av_live_NEW")
     assert "starter → pro" in reply
-    assert "15,000 calls/mo" in reply
+    # CH6a: the tier CHANGE is stated; the allowance is not, because the bot has no ladder to
+    # state it from. 15,000 was the retired dict's figure and had been wrong for a long time.
+    assert "draw down your plan allowance" in reply
     api_key, tier = tmp_db.get_linked_state(42)
     assert api_key == "av_live_NEW"
     assert tier == "pro"

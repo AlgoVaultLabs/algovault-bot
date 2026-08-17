@@ -52,10 +52,19 @@ FREE_TIER_MONTHLY_QUOTA: Final = 100
 WINDOW_DAYS: Final = 30
 WINDOW = timedelta(days=WINDOW_DAYS)
 
-# BOT-W2 C3 — paid tiers bypass the bot-side 100/mo cap entirely. The user's
-# real Stripe-backed quota (3K/15K/100K) is enforced server-side by signal-MCP
-# on their direct API calls; bot-driven calls go through tier:'internal' which
-# doesn't tick any counter. Net: paid users get unlimited bot pushes.
+# BOT-W2 C3, amended by PRICING-BOT-DELIVERY-METERING-W1 (2026-08-17).
+#
+# Paid tiers bypass the bot-side 100/mo cap — that part is unchanged, and it is why the free
+# meter never ticks for them. What changed is the other half: a paid-linked delivery now DEBITS
+# the subscriber's plan allowance through the entitlement primitive, and the subscriber is HARD
+# WALLED at the plan ceiling (architect ruling R-1). The old claim here — that paid users got
+# uncapped bot pushes — is retired, and so are the per-tier figures that used to sit in this
+# comment: they named a ladder the server had already moved past, i.e. they had been wrong for
+# every linked subscriber since.
+#
+# The ladder's SoT is signal-MCP's `src/lib/plans.ts`, reached through the entitlement API. It is
+# deliberately NOT restated here — a restated number is a number that goes stale, which is the
+# whole reason gate leg L4b now fails a ladder-shaped run of figures in a comment.
 PAID_TIERS: Final[frozenset[str]] = frozenset({"starter", "pro", "enterprise", "x402"})
 
 # PRICING-BOT-DELIVERY-METERING-W1 CH5 — how old a plan mirror may be before the wall stops
@@ -141,7 +150,7 @@ class QuotaState:
         if self.linked_tier in PAID_TIERS:
             # Project the PLAN's headroom when the mirror is fresh and the tier is capped.
             # `plan_total is None` means NO CEILING — never zero — so it falls through to the
-            # effectively-unlimited sentinel rather than rendering a wall.
+            # effectively-uncapped sentinel rather than rendering a wall.
             if (
                 self.plan_state is not PlanState.INDETERMINATE
                 and self.plan_total is not None
@@ -188,9 +197,10 @@ def _parse_ts(raw: str | None) -> datetime | None:
 def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     """Read the user's current quota state. Auto-rolls expired window.
 
-    BOT-W2 C3: when the subscriber is linked to a paid tier, the QuotaState's
-    ``linked_tier`` field is populated and the engine treats the user as
-    unlimited (skips the gate, omits the quota line, suppresses CTAs).
+    BOT-W2 C3: when the subscriber is linked to a paid tier, the QuotaState's ``linked_tier``
+    field is populated and the FREE meter is skipped. Since
+    PRICING-BOT-DELIVERY-METERING-W1 that no longer means "served without limit": the paid lane is
+    gated by the PLAN mirror instead (see ``plan_state`` / ``exhausted``).
     """
     row = db.get_subscriber(chat_id)
     if row is None:

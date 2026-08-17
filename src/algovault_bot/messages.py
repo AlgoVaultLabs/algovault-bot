@@ -404,18 +404,27 @@ def symbol_unknown_message(coin: str, exchange: str) -> str:
 # ── BOT-W2 link confirmation messages ──────────────────────────
 
 
-_TIER_QUOTA = {"starter": 3_000, "pro": 15_000, "enterprise": 100_000}
-
-
-def _quota_str(tier: str) -> str:
-    n = _TIER_QUOTA.get(tier)
-    return f"{n:,}" if n else "unlimited"
+# PRICING-BOT-DELIVERY-METERING-W1 CH6a — `_TIER_QUOTA` is DELETED.
+#
+# It hard-typed a per-tier allowance dict that the server's ladder had long since moved past, so
+# it had been wrong for every linked subscriber from the day it drifted — and `_quota_str`
+# rendered a bare "no ceiling" word for any tier absent from that dict, which included `x402`
+# (a member of PAID_TIERS), so an x402 subscriber was told they had no cap.
+#
+# The figures are deliberately NOT restated here, not even as history: gate leg L4b fails a
+# ladder-shaped run of numbers in a comment, and it caught this very block on its first run. A
+# comment that restates a ladder is a ladder that goes stale with nothing able to notice. The
+# live values live in signal-MCP's `src/lib/plans.ts` and reach the bot only via the mirror.
+#
+# The bot no longer states a plan allowance it has not been told. Figures come from the server
+# mirror; when there is no mirror the clause is OMITTED rather than guessed. Gate leg L4 makes a
+# replacement dict unwritable.
 
 
 def link_first_time_message(tier: str) -> str:
     return (
         f"✅ Linked! Your AlgoVault {tier} subscription is connected to this Telegram chat.\n"
-        f"Bot-side quota refreshed to {_quota_str(tier)} calls/mo — the 100/mo cap no longer applies here."
+        "Alerts here now draw down your plan allowance instead of the free 100/mo cap."
     )
 
 
@@ -423,14 +432,14 @@ def link_tier_changed_message(prev_tier: str | None, new_tier: str) -> str:
     prev = prev_tier or "free"
     return (
         f"✅ Subscription updated: {prev} → {new_tier}.\n"
-        f"Bot-side quota refreshed to {_quota_str(new_tier)} calls/mo."
+        "Alerts here draw down your plan allowance."
     )
 
 
 def link_already_linked_message(tier: str) -> str:
     return (
         f"This Telegram chat is already linked to your {tier} subscription. "
-        f"Quota: {_quota_str(tier)} calls/mo."
+        "Alerts here draw down your plan allowance."
     )
 
 
