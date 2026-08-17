@@ -237,6 +237,60 @@ QUOTA_WALL_NOTICE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN quota_100_last_fired_at TIMESTAMP",
 )
 
+# PRICING-BOT-DELIVERY-METERING-W1 CH4a — the PLAN MIRROR.
+#
+# A paid-linked subscriber's allowance lives on signal-MCP (`quota_usage`), reachable only over
+# HTTP. `evaluate_delivery` runs O(subscribers)/minute on the dispatch loop and is contractually a
+# PURE LOCAL READ — so the wall cannot ask the network. These columns are a local copy of the
+# server's answer, refreshed by the drainer whenever it debits or polls.
+#
+# They live ON `subscribers` rather than in a side table for one reason: `get_subscriber` already
+# returns the whole row, so the mirror costs ZERO extra queries in the hot path.
+#
+# `plan_state_as_of IS NULL` means NEVER OBSERVED, which is distinct from "observed as zero" — CH5
+# serves on it rather than walling, because you must never wall a paying customer on a measurement
+# you could not take.
+PLAN_MIRROR_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN plan_used INTEGER",
+    "ALTER TABLE subscribers ADD COLUMN plan_total INTEGER",          # NULL = no ceiling
+    "ALTER TABLE subscribers ADD COLUMN plan_allowed INTEGER",        # 0/1
+    "ALTER TABLE subscribers ADD COLUMN plan_limit_kind TEXT",        # 'monthly' | 'daily' | NULL
+    "ALTER TABLE subscribers ADD COLUMN plan_period_start TEXT",      # monthly episode key
+    "ALTER TABLE subscribers ADD COLUMN plan_daily_day TEXT",         # daily episode key
+    "ALTER TABLE subscribers ADD COLUMN plan_next_json TEXT",         # verbatim next_plan JSON
+    "ALTER TABLE subscribers ADD COLUMN plan_state_as_of TIMESTAMP",  # NULL = never observed
+    "ALTER TABLE subscribers ADD COLUMN plan_state_source TEXT",      # 'debit' | 'poll'
+    "ALTER TABLE subscribers ADD COLUMN plan_wall_notice_day TEXT",   # UTC date of last DAILY notice
+)
+
+# PRICING-BOT-DELIVERY-METERING-W1 CH4a — the DEBIT OUTBOX.
+#
+# A delivery must never be blocked, delayed or lost by a metering call. The recorder enqueues here
+# (local SQLite, same autocommitting path as the alerts_fired INSERT it sits beside — it cannot
+# fail the delivery), and a cron drainer POSTs to the server out of band.
+#
+# 🛑 `api_key` is deliberately NOT a column. The drainer reads `subscribers.linked_api_key` at SEND
+# time. A key copied into a queue row would survive an unlink and charge a revoked key — the row
+# stores `chat_id`, an identity to resolve, never a credential to replay.
+#
+# `idem_key` is UNIQUE: it is `bot:<chat_id>:<alerts_fired.id>`, so the delivery ledger IS the
+# idempotency source. No clock, no UUID, no counter.
+ENTITLEMENT_OUTBOX_MIGRATIONS = (
+    """CREATE TABLE IF NOT EXISTS entitlement_outbox (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      idem_key   TEXT NOT NULL UNIQUE,
+      chat_id    INTEGER NOT NULL,
+      channel    TEXT NOT NULL,
+      kind       TEXT NOT NULL CHECK (kind IN ('regime','call')),
+      units      INTEGER NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+      sent_at    TIMESTAMP,
+      attempts   INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_entitlement_outbox_pending ON entitlement_outbox(sent_at, id)",
+)
+
 # TG-BROADCAST-STACK-W1 C4 (2026-05-28): viral /unlock_premium_alerts state
 # machine. unlock_status enum: 'not_started' | 'pending_x_screenshot' |
 # 'pending_npm_call' | 'verified' | 'expired'. unlock_method: 'x_follow'
@@ -497,6 +551,9 @@ class Database:
                 *ACQUISITION_SOURCE_MIGRATIONS,
                 # BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): the wall's notice stamp.
                 *QUOTA_WALL_NOTICE_MIGRATIONS,
+                # PRICING-BOT-DELIVERY-METERING-W1 (2026-08-17): plan mirror + debit outbox.
+                *PLAN_MIRROR_MIGRATIONS,
+                *ENTITLEMENT_OUTBOX_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1288,6 +1345,119 @@ class Database:
             )
             return [int(r[0]) for r in cur.fetchall()]
 
+    # ── PRICING-BOT-DELIVERY-METERING-W1 CH4: outbox + plan mirror ───
+
+    def enqueue_entitlement_debit(
+        self, idem_key: str, chat_id: int, kind: str, units: int = 1, channel: str = "bot"
+    ) -> bool:
+        """Queue ONE plan debit. Returns True if this call enqueued it.
+
+        `INSERT OR IGNORE` on the UNIQUE `idem_key`: a duplicate is a no-op, not an error, because
+        the same delivery must never be queued twice. Swallows nothing else — a real failure
+        raises to the recorder, which is inside the delivery path's existing try/except.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO entitlement_outbox(idem_key, chat_id, channel, kind, units) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (idem_key, chat_id, channel, kind, units),
+            )
+            return cur.rowcount > 0
+
+    def pending_entitlement_debits(self, limit: int = 100) -> list[sqlite3.Row]:
+        """Oldest-first pending batch, joined to the identity the drainer needs.
+
+        `linked_api_key` is read HERE, at send time, never from the queue row — so an unlinked
+        subscriber's queued rows resolve to NULL and terminate rather than charging a revoked key.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT o.*, s.linked_api_key, s.linked_tier FROM entitlement_outbox o "
+                "LEFT JOIN subscribers s ON s.chat_id = o.chat_id "
+                "WHERE o.sent_at IS NULL ORDER BY o.id LIMIT ?",
+                (limit,),
+            )
+            return list(cur.fetchall())
+
+    def mark_entitlement_debit_sent(self, row_id: int, last_error: str | None = None) -> None:
+        """Terminal: stamp `sent_at`. `last_error` carries a terminal REASON (e.g. 'unlinked',
+        'REFUSED') — a stamped row with a reason is a decision, not a silent drop."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE entitlement_outbox SET sent_at = datetime('now'), last_error = ? WHERE id = ?",
+                (last_error, row_id),
+            )
+
+    def bump_entitlement_debit_attempt(self, row_id: int, last_error: str) -> None:
+        """Non-terminal: the row stays pending and is retried with backoff."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE entitlement_outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?",
+                (last_error, row_id),
+            )
+
+    def count_pending_entitlement_debits(self) -> int:
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM entitlement_outbox WHERE sent_at IS NULL")
+            return int(cur.fetchone()[0])
+
+    def count_plan_units_debited_last_24h(self) -> int:
+        """Units the drainer CONFIRMED charged in the last 24h — `sent_at` set with no terminal
+        error, i.e. CHARGED or ALREADY_CHARGED. A REFUSED or unlinked row carries a reason and is
+        excluded: it is a decision, not a debit."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(units), 0) FROM entitlement_outbox "
+                "WHERE sent_at >= datetime('now', '-1 day') AND last_error IS NULL"
+            )
+            return int(cur.fetchone()[0])
+
+    def update_plan_mirror(self, chat_id: int, state: dict, source: str) -> None:
+        """Write the server's answer into the local mirror.
+
+        `total`/`remaining` arrive as JSON `null` for an uncapped tier — stored as NULL, which CH5
+        reads as "no ceiling", NEVER as zero. `plan_state_as_of` is stamped here and ONLY here: it
+        is the freshness key the wall's three-state decision turns on.
+        """
+        import json as _json
+        nxt = state.get("next_plan")
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET plan_used = ?, plan_total = ?, plan_allowed = ?, "
+                "plan_limit_kind = ?, plan_period_start = ?, plan_daily_day = ?, "
+                "plan_next_json = ?, plan_state_as_of = datetime('now'), plan_state_source = ? "
+                "WHERE chat_id = ?",
+                (
+                    state.get("used"),
+                    state.get("total"),
+                    1 if state.get("allowed") else 0,
+                    state.get("limit"),
+                    state.get("period_start"),
+                    state.get("daily_day"),
+                    _json.dumps(nxt) if nxt is not None else None,
+                    source,
+                    chat_id,
+                ),
+            )
+
+    def paid_linked_chat_ids(self) -> list[sqlite3.Row]:
+        """Reachable subscribers with a linked key — the poll set that keeps idle mirrors warm."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT chat_id, linked_api_key, linked_tier, plan_state_as_of FROM subscribers "
+                "WHERE linked_api_key IS NOT NULL AND bot_blocked_at IS NULL"
+            )
+            return list(cur.fetchall())
+
+    def mark_plan_wall_notice_day(self, chat_id: int, day: str) -> None:
+        """Stamp the DAILY wall's episode key. Separate from `quota_100_last_fired_at` because the
+        daily cap re-arms every UTC day — reusing the monthly stamp would send at most one notice
+        ever (CH5c)."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET plan_wall_notice_day = ? WHERE chat_id = ?", (day, chat_id)
+            )
+
     # ── BOT-ZOMBIE-W1: bot-blocked subscriber bookkeeping ────────────
 
     def mark_subscriber_blocked(self, chat_id: int, now_iso: str) -> None:
@@ -1326,13 +1496,19 @@ class Database:
 
     # ── BOT-DIGEST-LAST24H-W1: per-alert log for rolling-24h digest ──
 
-    def record_alert_fired(self, chat_id: int, kind: str, source: str = "watch") -> None:
+    def record_alert_fired(self, chat_id: int, kind: str, source: str = "watch") -> int:
         """Record one successful Telegram alert delivery for the rolling-24h
         digest count. ``kind`` ∈ {'regime', 'call'}; ``source`` ∈
         ALLOWED_ALERT_SOURCES discriminates the delivery path (watch push /
         scanwatch digest / on-demand scan; webhook+batch reserved). Quota-
         exhausted notices are operator UX nudges, not signal volume, so they are
         NOT recorded. ``fired_at`` defaults to ``datetime('now')`` (UTC).
+
+        RETURNS the new ``alerts_fired.id`` (PRICING-BOT-DELIVERY-METERING-W1 CH4b). That id IS
+        the entitlement idempotency source: ``bot:<chat_id>:<id>``. It is an
+        INTEGER PRIMARY KEY AUTOINCREMENT written on exactly the event being billed, so it is
+        globally unique per bot and monotonic — no clock, no UUID, no counter. Existing callers
+        that ignore the return value are unaffected.
         Prefer the ``quota.record_call_delivered`` / ``record_regime_delivered``
         recorders (BOT-DIGEST-COUNT-ALL-CALLS-W1) so every delivery both logs
         here AND meters quota from ONE seam — do not call this raw on a new path."""
@@ -1347,6 +1523,7 @@ class Database:
                 "INSERT INTO alerts_fired(chat_id, kind, source) VALUES (?, ?, ?)",
                 (chat_id, kind, source),
             )
+            return int(cur.lastrowid or 0)
 
     def count_alerts_fired_last_24h(self) -> tuple[int, int]:
         """Return ``(regime_count, call_count)`` for the rolling-24h window
