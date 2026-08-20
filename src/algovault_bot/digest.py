@@ -66,6 +66,11 @@ class DigestMetrics:
     # paying users took 205 alerts. Reported in the BOT's unit — delivered alerts — beside
     # the TG bot row, never folded into the API's Paid count: different quantities.
     calls_paid_linked: int
+    # PRICING-BOT-DELIVERY-METERING-W1 CH6e — the plan-metering rail's own health.
+    # `outbox_pending` is the one to watch: a queue that stops draining is revenue quietly
+    # not being charged, and it is invisible everywhere else.
+    plan_units_debited: int
+    outbox_pending: int
     generated_at: str  # ISO-8601 UTC
 
 
@@ -139,6 +144,8 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
     # re-implemented `alert_count >= 100` in SQL, which would be a second derivation
     # of the very thing this wave exists to make single.
     walled_now, walled_silent, walled_paid = count_walled_now(db)
+    plan_units_debited = db.count_plan_units_debited_last_24h()
+    outbox_pending = db.count_pending_entitlement_debits()
 
     return DigestMetrics(
         metric_date=now.strftime("%Y-%m-%d"),
@@ -156,6 +163,8 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         walled_silent=walled_silent,
         walled_paid=walled_paid,
         calls_paid_linked=calls_paid_linked,
+        plan_units_debited=plan_units_debited,
+        outbox_pending=outbox_pending,
         generated_at=now.isoformat(),
     )
 
@@ -180,6 +189,7 @@ def _format_digest(m: DigestMetrics) -> str:
         f"  📈 Calls: {m.calls_24h}  "
         f"(👁 Watch {m.calls_watch} · 🔭 Scanwatch {m.calls_scanwatch} · 🔎 Scan {m.calls_scan})",
         f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}",
+        f"  💳 Plan debits 24h: {m.plan_units_debited}  (⏳ {m.outbox_pending} queued)",
         f"  🚧 Walled now: {m.walled_now}"
         f"  (notified {m.walled_now - m.walled_silent} · silent {m.walled_silent})",
         "",
@@ -199,8 +209,9 @@ INSERT INTO bot_daily_metrics
   (metric_date, calls_total, calls_watch, calls_scanwatch, calls_scan,
    alerts_regime, subscribers, new_subscribers_24h, blocked_subscribers,
    watchlist_entries, quota_exhausted_notices,
-   calls_paid_linked, walled_now, walled_silent, generated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+   calls_paid_linked, walled_now, walled_silent,
+   plan_units_debited, outbox_pending, walled_paid_now, generated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
 ON CONFLICT (metric_date) DO UPDATE SET
   calls_total=EXCLUDED.calls_total,
   calls_watch=EXCLUDED.calls_watch,
@@ -215,6 +226,9 @@ ON CONFLICT (metric_date) DO UPDATE SET
   calls_paid_linked=EXCLUDED.calls_paid_linked,
   walled_now=EXCLUDED.walled_now,
   walled_silent=EXCLUDED.walled_silent,
+  plan_units_debited=EXCLUDED.plan_units_debited,
+  outbox_pending=EXCLUDED.outbox_pending,
+  walled_paid_now=EXCLUDED.walled_paid_now,
   generated_at=EXCLUDED.generated_at
 """.strip()
 
@@ -238,6 +252,9 @@ def _bot_metrics_upsert(m: DigestMetrics) -> tuple[str, tuple]:
         m.calls_paid_linked,
         m.walled_now,
         m.walled_silent,
+        m.plan_units_debited,
+        m.outbox_pending,
+        m.walled_paid,
     )
     return _BOT_METRICS_UPSERT_SQL, params
 

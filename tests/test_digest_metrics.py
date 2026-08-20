@@ -57,7 +57,7 @@ def test_single_derivation_row_equals_rendered(tmp_db: Database) -> None:
     # walled_now, walled_silent. The seeded fixture has no linked_tier and no walled
     # subscriber, so all three are 0 — asserted explicitly rather than sliced off, since
     # a silently-truncated comparison is how a dropped bridge column would pass.
-    assert params == (m.metric_date, 3, 2, 1, 0, 1, 2, 2, 1, 2, 2, 0, 0, 0)
+    assert params == (m.metric_date, 3, 2, 1, 0, 1, 2, 2, 1, 2, 2, 0, 0, 0, 0, 0, 0)
     assert (m.calls_paid_linked, m.walled_now, m.walled_silent) == (0, 0, 0)
     rendered = digest._format_digest(m)
     # the row's numbers appear verbatim in the string rendered from the same m
@@ -90,10 +90,11 @@ def test_upsert_sql_column_param_arity() -> None:
         # counters, and `walled_now` is instantaneous state whose value at 03:00 would
         # not mean the same thing as the rows beside it. Arity stays 11.
         walled_now=0, walled_silent=0, walled_paid=0, calls_paid_linked=0,
+        plan_units_debited=0, outbox_pending=0,
         generated_at="2026-07-06T03:00:00+00:00",
     )
     sql, params = digest._bot_metrics_upsert(m)
-    assert sql.count("%s") == len(params)  # 14 bound params; generated_at = now() literal
+    assert sql.count("%s") == len(params)  # 17 bound params; generated_at = now() literal
 
 
 def test_write_fail_soft_when_dsn_unset(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
