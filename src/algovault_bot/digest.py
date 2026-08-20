@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,31 @@ from .quota import count_walled_now
 
 
 log = logging.getLogger("algovault_bot.digest")
+
+
+#: OPS-DEPLOY-PROVENANCE-AND-VERDICT-CLASS-W1 CH3c — where host-deploy.sh stamps the deployed
+#: commit. The bot is the WEAKER of the two deploy paths (manual, no GHA), so its provenance is
+#: the one more likely to go stale unnoticed.
+DEPLOYED_SHA_PATH = "/opt/algovault-bot/DEPLOYED_SHA"
+
+
+def read_deployed_sha(path: str = DEPLOYED_SHA_PATH) -> str | None:
+    """The commit this bot's code was deployed from, or None.
+
+    None means "no provenance recorded" — a real, detectable state the drift canary alerts on.
+    It is NEVER substituted with a plausible value: a ref name, a version, or the string "unknown"
+    standing in for a commit would recreate the exact defect the provenance surface exists to
+    remove. A malformed stamp is also None: a 40-hex sha or nothing.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("sha="):
+                    sha = line.split("=", 1)[1].strip()
+                    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None
+    except OSError:
+        return None
+    return None
 
 
 @dataclass(frozen=True)
@@ -71,6 +97,9 @@ class DigestMetrics:
     # not being charged, and it is invisible everywhere else.
     plan_units_debited: int
     outbox_pending: int
+    # CH3c — the commit this bot's running code was deployed from. None = no provenance recorded,
+    # never a plausible substitute.
+    deployed_sha: str | None
     generated_at: str  # ISO-8601 UTC
 
 
@@ -146,6 +175,7 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
     walled_now, walled_silent, walled_paid = count_walled_now(db)
     plan_units_debited = db.count_plan_units_debited_last_24h()
     outbox_pending = db.count_pending_entitlement_debits()
+    deployed_sha = read_deployed_sha()
 
     return DigestMetrics(
         metric_date=now.strftime("%Y-%m-%d"),
@@ -165,6 +195,7 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         calls_paid_linked=calls_paid_linked,
         plan_units_debited=plan_units_debited,
         outbox_pending=outbox_pending,
+        deployed_sha=deployed_sha,
         generated_at=now.isoformat(),
     )
 
@@ -210,8 +241,8 @@ INSERT INTO bot_daily_metrics
    alerts_regime, subscribers, new_subscribers_24h, blocked_subscribers,
    watchlist_entries, quota_exhausted_notices,
    calls_paid_linked, walled_now, walled_silent,
-   plan_units_debited, outbox_pending, walled_paid_now, generated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+   plan_units_debited, outbox_pending, walled_paid_now, deployed_sha, generated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
 ON CONFLICT (metric_date) DO UPDATE SET
   calls_total=EXCLUDED.calls_total,
   calls_watch=EXCLUDED.calls_watch,
@@ -229,6 +260,7 @@ ON CONFLICT (metric_date) DO UPDATE SET
   plan_units_debited=EXCLUDED.plan_units_debited,
   outbox_pending=EXCLUDED.outbox_pending,
   walled_paid_now=EXCLUDED.walled_paid_now,
+  deployed_sha=EXCLUDED.deployed_sha,
   generated_at=EXCLUDED.generated_at
 """.strip()
 
@@ -255,6 +287,7 @@ def _bot_metrics_upsert(m: DigestMetrics) -> tuple[str, tuple]:
         m.plan_units_debited,
         m.outbox_pending,
         m.walled_paid,
+        m.deployed_sha,
     )
     return _BOT_METRICS_UPSERT_SQL, params
 

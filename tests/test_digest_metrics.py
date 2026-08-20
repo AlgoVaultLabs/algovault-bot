@@ -46,9 +46,15 @@ def test_compute_metrics_numbers(tmp_db: Database) -> None:
     assert m.quota_notices_24h == 2
 
 
-def test_single_derivation_row_equals_rendered(tmp_db: Database) -> None:
+def test_single_derivation_row_equals_rendered(
+    tmp_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The upsert row and the Telegram string derive from the SAME snapshot → they
     can never disagree (the whole point of the bridge)."""
+    # Pin the provenance stamp to a path that cannot exist. Without this the expected tuple
+    # would depend on whether the machine running the test happens to be a deploy host — a test
+    # that passes on CI and fails on the box it describes.
+    monkeypatch.setattr(digest, "DEPLOYED_SHA_PATH", "/nonexistent/DEPLOYED_SHA")
     _seed(tmp_db)
     m = digest.compute_digest_metrics(tmp_db)
     sql, params = digest._bot_metrics_upsert(m)
@@ -57,7 +63,8 @@ def test_single_derivation_row_equals_rendered(tmp_db: Database) -> None:
     # walled_now, walled_silent. The seeded fixture has no linked_tier and no walled
     # subscriber, so all three are 0 — asserted explicitly rather than sliced off, since
     # a silently-truncated comparison is how a dropped bridge column would pass.
-    assert params == (m.metric_date, 3, 2, 1, 0, 1, 2, 2, 1, 2, 2, 0, 0, 0, 0, 0, 0)
+    # The trailing None is `deployed_sha` (CH3c): no stamp on this machine, so no provenance.
+    assert params == (m.metric_date, 3, 2, 1, 0, 1, 2, 2, 1, 2, 2, 0, 0, 0, 0, 0, 0, None)
     assert (m.calls_paid_linked, m.walled_now, m.walled_silent) == (0, 0, 0)
     rendered = digest._format_digest(m)
     # the row's numbers appear verbatim in the string rendered from the same m
@@ -85,16 +92,17 @@ def test_upsert_sql_column_param_arity() -> None:
         metric_date="2026-07-06", total_subs=0, new_subs_24h=0, blocked=0, regime_24h=0,
         calls_watch=0, calls_scanwatch=0, calls_scan=0, calls_24h=0, watch_total=0,
         quota_notices_24h=0,
-        # BOT-QUOTA-REFUSAL-SEAM-W1: rendered in the digest TEXT but deliberately NOT
-        # bridged to `bot_daily_metrics` — that table is a daily time-series of 24h
-        # counters, and `walled_now` is instantaneous state whose value at 03:00 would
-        # not mean the same thing as the rows beside it. Arity stays 11.
+        # NOTE: this comment previously said `walled_now` was deliberately NOT bridged and that
+        # "arity stays 11". Both statements stopped being true when PRICING-BOT-DELIVERY-
+        # METERING-W1 CH5f/CH6e widened the bridge; the stale text survived because nothing
+        # asserts on a comment. Current truth: the point-in-time walled state IS bridged (as
+        # `walled_paid_now`) and the arity is asserted below rather than stated here.
         walled_now=0, walled_silent=0, walled_paid=0, calls_paid_linked=0,
-        plan_units_debited=0, outbox_pending=0,
+        plan_units_debited=0, outbox_pending=0, deployed_sha=None,
         generated_at="2026-07-06T03:00:00+00:00",
     )
     sql, params = digest._bot_metrics_upsert(m)
-    assert sql.count("%s") == len(params)  # 17 bound params; generated_at = now() literal
+    assert sql.count("%s") == len(params)  # generated_at is a now() literal, not a param
 
 
 def test_write_fail_soft_when_dsn_unset(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,3 +136,71 @@ def test_redact_scrubs_dsn_and_password() -> None:
     out = digest._redact(f"boom {dsn} tail pw_ABC", dsn)
     assert "pw_ABC" not in out
     assert dsn not in out
+
+
+# ---------------------------------------------------------------------------
+# OPS-DEPLOY-PROVENANCE-AND-VERDICT-CLASS-W1 CH3c — deployed-commit provenance.
+#
+# The property under test is NOT "it reads a file". It is that every failure mode produces None
+# rather than a plausible-looking value: a bot reporting a sha it is not running is strictly worse
+# than a bot reporting nothing, because the first is believed.
+# ---------------------------------------------------------------------------
+
+SHA = "af995e5c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60"
+
+
+def test_deployed_sha_reads_the_host_stamp(tmp_path) -> None:
+    p = tmp_path / "DEPLOYED_SHA"
+    p.write_text(f"sha={SHA}\nshort=af995e5\nref=main\n", encoding="utf-8")
+    assert digest.read_deployed_sha(str(p)) == SHA
+
+
+def test_deployed_sha_is_none_when_the_stamp_is_absent(tmp_path) -> None:
+    # A bot deployed before the stamp existed. Absent, not zero, not "unknown".
+    assert digest.read_deployed_sha(str(tmp_path / "nope")) is None
+
+
+def test_deployed_sha_is_none_when_the_file_is_unreadable(tmp_path) -> None:
+    d = tmp_path / "adir"
+    d.mkdir()
+    assert digest.read_deployed_sha(str(d)) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "sha=not-a-sha\n",                 # not hex
+        "sha=af995e5\n",                   # short sha, not the full 40
+        f"sha={SHA.upper()}\n",            # uppercase — one canonical form only
+        f"sha={SHA}extra\n",               # too long
+        "ref=main\nshort=af995e5\n",       # a stamp with everything BUT the sha
+        "",                                # empty file
+    ],
+)
+def test_a_malformed_stamp_is_none_never_passed_through(tmp_path, body: str) -> None:
+    p = tmp_path / "DEPLOYED_SHA"
+    p.write_text(body, encoding="utf-8")
+    assert digest.read_deployed_sha(str(p)) is None
+
+
+def test_deployed_sha_rides_the_bridge_and_keeps_arity(tmp_db: Database, tmp_path) -> None:
+    # The whole point of the column: it must actually reach the upsert, and adding it must not
+    # desync the placeholder/param counts the way a hand-widened INSERT usually does.
+    p = tmp_path / "DEPLOYED_SHA"
+    p.write_text(f"sha={SHA}\n", encoding="utf-8")
+    _seed(tmp_db)
+    m = digest.compute_digest_metrics(tmp_db)
+    m = type(m)(**{**m.__dict__, "deployed_sha": digest.read_deployed_sha(str(p))})
+    sql, params = digest._bot_metrics_upsert(m)
+    assert sql.count("%s") == len(params)
+    assert "deployed_sha" in sql
+    assert SHA in params
+
+
+def test_the_bridge_carries_none_when_there_is_no_provenance(tmp_db: Database) -> None:
+    _seed(tmp_db)
+    m = digest.compute_digest_metrics(tmp_db)
+    m = type(m)(**{**m.__dict__, "deployed_sha": None})
+    _sql, params = digest._bot_metrics_upsert(m)
+    # None -> SQL NULL. Never "" and never "unknown": the canary distinguishes them.
+    assert None in params
