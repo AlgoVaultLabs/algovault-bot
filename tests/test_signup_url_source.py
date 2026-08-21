@@ -1,7 +1,7 @@
 """GROWTH-TG-CHANNEL-ACQUISITION-W1 / CH2 — signup_url carries the source.
 
 Two ORTHOGONAL dimensions ride the outbound URL and must never collapse into one:
-    utm_campaign -> WHICH in-bot CTA converted  (the 11 live tags)
+    utm_campaign -> WHICH in-bot CTA converted  (the declared inventory below)
     utm_medium   -> HOW the user found the bot  (this wave)
 
 utm_source stays `tg_bot` forever: signal-MCP's deriveChannel keys the channel slug
@@ -29,7 +29,14 @@ DIRECT_TAGS = {            # signup_url('<tag>') literals
     "watchlist_cap",                                              # messages.py
 }
 BUTTON_TAGS = {"start_welcome", "help_message"}   # via upgrade_button/upgrade_markup
-ALL_TAGS = DIRECT_TAGS | BUTTON_TAGS
+# OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice's reactivation link. It is a
+# real conversion surface and so belongs in this inventory, but NOTHING SENDS IT YET: the
+# copy is PENDING-MR1 and the send is gated off behind
+# `ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED`. The tag is declared here because the call site
+# exists in messages.py; declaring it is what keeps this gate meaningful rather than
+# something a wave routes around.
+GATED_TAGS = {"link_downgraded"}
+ALL_TAGS = DIRECT_TAGS | BUTTON_TAGS | GATED_TAGS
 
 
 # ── AC 2.2 — untagged is BYTE-IDENTICAL to before the wave ────────────────
@@ -65,19 +72,23 @@ def test_source_rides_utm_medium_which_was_verified_free():
     assert signup_url("quota_100", "devto").endswith("&utm_medium=devto")
 
 
-# ── AC 2.3 — all 11 tags still emit their existing values ─────────────────
+# ── AC 2.3 — every declared tag still emits its existing value ────────────
 
 
-def test_all_eleven_campaign_tags_still_emit_unchanged():
+def test_all_campaign_tags_still_emit_unchanged():
     for tag in ALL_TAGS:
         assert f"utm_campaign={tag}" in signup_url(tag)
         # and adding a source never disturbs the campaign
         assert f"utm_campaign={tag}" in signup_url(tag, "x")
 
 
-def test_campaign_tag_inventory_is_still_eleven_in_the_source():
-    """Guards the count itself: a 12th tag (or a deleted one) must fail loudly
-    rather than silently widen/narrow the readout's campaign dimension."""
+def test_campaign_tag_inventory_matches_the_source():
+    """Guards the inventory itself: a new tag (or a deleted one) must fail loudly rather
+    than silently widen/narrow the readout's campaign dimension.
+
+    The assertion is `found == ALL_TAGS` — the ENUMERATION, not a numeral. A hardcoded
+    count here read `== 11` and had to be edited by this wave anyway, which is the whole
+    argument against duplicating a fact that the set beside it already states."""
     found = set()
     for name in ("cta.py", "handlers.py", "messages.py", "keyboards.py"):
         text = (SRC / name).read_text(encoding="utf-8")
@@ -90,7 +101,9 @@ def test_campaign_tag_inventory_is_still_eleven_in_the_source():
             re.findall(r"upgrade_(?:button|markup)\(\s*['\"]([a-z0-9_]+)['\"]", code)
         )
     assert found == ALL_TAGS, f"campaign inventory drifted: {found ^ ALL_TAGS}"
-    assert len(ALL_TAGS) == 11
+    # The groups must stay disjoint: a tag appearing in two of them would make the union
+    # smaller than the sum and quietly hide a deletion.
+    assert len(ALL_TAGS) == len(DIRECT_TAGS) + len(BUTTON_TAGS) + len(GATED_TAGS)
 
 
 # ── the CTA button paths thread the source through ────────────────────────

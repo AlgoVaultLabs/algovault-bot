@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import Final
 
 from .batch import DEFAULT_TOP_N, TF_ORDER
+# `unlock` imports nothing local, so this cannot cycle — same edge `referral.py` uses.
+from .unlock import normalize_lang
 
 
 SIGNUP_BASE: Final = "api.algovault.com/signup?plan=starter"
@@ -451,6 +453,39 @@ def link_invalid_key_message() -> str:
         "❌ That signup link wasn't recognized. The API key in the link is "
         "either expired or doesn't match an active subscription.\n"
         "Sign up or recover your key: https://api.algovault.com/signup?plan=starter"
+    )
+
+
+def link_downgraded_message(lang_code: str | None = None) -> str:
+    """OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice.
+
+    🛑 PENDING-MR1. This wording is NEW USER-FACING COPY and is NOT ratified. The mechanism
+    that would send it is built and gated OFF behind
+    `ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED`; nothing sends this string until the architect
+    ratifies it. Do not flip the flag as part of a code wave.
+
+    Shape, for the ratification conversation: state the fact, assign no blame, give ONE
+    action, and say explicitly what did NOT change — a subscriber whose watchlist silently
+    vanished would read this as data loss on top of a billing problem. Trilingual through
+    the existing `normalize_lang` path, each under 300 characters.
+    """
+    lang = normalize_lang(lang_code)
+    url = signup_url("link_downgraded")
+    if lang == "id":
+        return (
+            "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
+            "tier gratis (100 alert/bulan). Watchlist Anda tidak berubah. "
+            f"Aktifkan kembali kapan saja: {url}"
+        )
+    if lang == "zh-hans":
+        return (
+            "你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 100 条提醒）。"
+            f"你的自选列表未受影响。随时可重新订阅：{url}"
+        )
+    return (
+        "Your AlgoVault subscription no longer appears active, so this chat has moved back "
+        "to the free tier (100 alerts/month). Your watchlist is unchanged. "
+        f"Reactivate any time: {url}"
     )
 
 

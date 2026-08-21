@@ -282,6 +282,30 @@ LINKED_TIER_MIRROR_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN plan_tier TEXT",  # NULL = unobserved
 )
 
+# OPS-BOT-LINKED-TIER-REFRESH-W1 CH3 — THE LINK GETS A LIFECYCLE.
+#
+# Until now a link had creation and no other state: nothing ever re-asked the server, so a
+# revoked key kept paid treatment forever. Chat 1793689937 has been in exactly that state
+# since 2026-05-08 — `linked_tier='starter'`, `validate-key` answering 404 — and because
+# `linked_tier in PAID_TIERS` makes `consume_quota` a no-op, the bot-side 100/mo wall never
+# applied to them. Revenue leakage with no detector.
+#
+# The counter measures SUSTAINED DETERMINED INVALIDITY and nothing else:
+#   `link_invalid_streak`  consecutive determined-INVALID observations. ANY `VALID` or
+#                          `INDETERMINATE` resets it to 0.
+#   `link_invalid_since`   when the CURRENT streak began. NULL whenever the streak is 0.
+#   `link_downgrade_notice_at`  the episode stamp for 3d's notice — one per downgrade.
+#
+# 🛑 `link_invalid_streak` IS NOT A TIMER. The grace window is measured from
+# `link_invalid_since`, not from the count, because the drain cadence is 10 fires/hour with
+# a 16-minute gap at the top of the hour — a count would silently mean different amounts of
+# wall-clock depending on where in the hour the streak started.
+LINK_LIFECYCLE_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN link_invalid_since TIMESTAMP",
+    "ALTER TABLE subscribers ADD COLUMN link_invalid_streak INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subscribers ADD COLUMN link_downgrade_notice_at TIMESTAMP",
+)
+
 # PRICING-BOT-DELIVERY-METERING-W1 CH4a — the DEBIT OUTBOX.
 #
 # A delivery must never be blocked, delayed or lost by a metering call. The recorder enqueues here
@@ -576,6 +600,7 @@ class Database:
                 # OPS-BOT-LINKED-TIER-REFRESH-W1 (2026-08-21): server-authoritative tier,
                 # stamped by the plan mirror's existing as_of.
                 *LINKED_TIER_MIRROR_MIGRATIONS,
+                *LINK_LIFECYCLE_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1114,19 +1139,80 @@ class Database:
         return previous_tier, is_new_link
 
     def unlink_subscriber(self, chat_id: int) -> None:
+        """Return this chat to the free tier.
+
+        OPS-BOT-LINKED-TIER-REFRESH-W1 CH3 gave this its first production caller. The
+        lifecycle counters are cleared in the SAME statement: a streak that survived an
+        unlink would carry into whatever link came next and could downgrade a brand-new
+        subscription on someone else's history. The plan mirror is left alone — it is
+        already unreadable without a `linked_api_key`, and clearing it here would be a
+        second place that decides what "unlinked" means.
+        """
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE subscribers SET linked_api_key = NULL, linked_tier = NULL, "
-                "linked_at = NULL WHERE chat_id = ?",
+                "linked_at = NULL, link_invalid_streak = 0, link_invalid_since = NULL "
+                "WHERE chat_id = ?",
                 (chat_id,),
             )
 
-    def get_linked_state(self, chat_id: int) -> tuple[str | None, str | None]:
-        """Return ``(linked_api_key, linked_tier)`` for the chat, or (None, None)."""
-        row = self.get_subscriber(chat_id)
+    # OPS-BOT-LINKED-TIER-REFRESH-W1 CH3 — `get_linked_state` was DELETED here.
+    #
+    # P5 measured it callerless in `src/` (tests only) after two prior waves, and 3c is
+    # explicit: wire it or delete it, never leave it as-is. Nothing in this chapter needed
+    # it — the revalidation loop already holds the row from `paid_linked_chat_ids()` — and
+    # dark code that LOOKS wired is the L2b hazard this repo names: a stale entry rots into
+    # a permission slip. Callers wanting the pair read `get_subscriber(chat_id)`, which
+    # returns the whole row and costs the same one query.
+    #
+    # `unlink_subscriber` above got its first real caller in the same chapter: the
+    # downgrade transition in `entitlement_drain._apply_link_observation`.
+
+    # ── CH3: the link lifecycle counters ────────────────────────────────
+
+    def advance_link_invalid_streak(self, chat_id: int) -> tuple[int, str | None]:
+        """Record ONE determined-invalid observation. Returns ``(streak, since)``.
+
+        `link_invalid_since` is stamped only when the streak starts, so the grace window
+        measures WALL-CLOCK from the first determined negative rather than counting drain
+        passes — see the note on LINK_LIFECYCLE_MIGRATIONS for why that distinction matters.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET "
+                "link_invalid_streak = COALESCE(link_invalid_streak, 0) + 1, "
+                "link_invalid_since = COALESCE(link_invalid_since, datetime('now')) "
+                "WHERE chat_id = ?",
+                (chat_id,),
+            )
+            cur.execute(
+                "SELECT link_invalid_streak, link_invalid_since FROM subscribers "
+                "WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cur.fetchone()
         if row is None:
-            return None, None
-        return row["linked_api_key"], row["linked_tier"]
+            return 0, None
+        return int(row["link_invalid_streak"] or 0), row["link_invalid_since"]
+
+    def reset_link_invalid_streak(self, chat_id: int) -> None:
+        """Clear the streak. Called on ANY `VALID` or `INDETERMINATE` observation —
+        the counter measures sustained determined invalidity, so anything else ends it."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET link_invalid_streak = 0, link_invalid_since = NULL "
+                "WHERE chat_id = ? AND (link_invalid_streak != 0 OR link_invalid_since IS NOT NULL)",
+                (chat_id,),
+            )
+
+    def mark_link_downgrade_notified(self, chat_id: int) -> None:
+        """Stamp the downgrade-notice episode, like `quota_100_last_fired_at`."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET link_downgrade_notice_at = datetime('now') "
+                "WHERE chat_id = ?",
+                (chat_id,),
+            )
 
     # ── C4: per-subscriber counters for CTA logic + admin stats ─────
 
@@ -1473,7 +1559,8 @@ class Database:
         """Reachable subscribers with a linked key — the poll set that keeps idle mirrors warm."""
         with self._cursor() as cur:
             cur.execute(
-                "SELECT chat_id, linked_api_key, linked_tier, plan_tier, plan_state_as_of "
+                "SELECT chat_id, linked_api_key, linked_tier, plan_tier, plan_state_as_of, "
+                "lang_code, link_invalid_since, link_invalid_streak, link_downgrade_notice_at "
                 "FROM subscribers "
                 "WHERE linked_api_key IS NOT NULL AND bot_blocked_at IS NULL"
             )
