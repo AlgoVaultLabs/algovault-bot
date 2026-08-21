@@ -25,12 +25,33 @@ def test_stats_with_linked_users_renders_breakdown(tmp_db: Database) -> None:
     tmp_db.link_subscriber(3, "av_live_ccc", "pro")
     text = render_stats(tmp_db)
     assert "Linked subscribers : 3" in text
-    assert "starter" in text
-    assert "pro" in text
+    # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2: the breakdown projects through `effective_tier`
+    # and carries the SOURCE. These three were linked but never mirrored, so every row is
+    # "(link)" — last known, explicitly labelled as such rather than implied to be current.
+    assert "starter (link)" in text
+    assert "pro (link)" in text
     # 'starter' has 2 linked → larger count → appears before 'pro' (count desc)
-    starter_idx = text.find("starter")
-    pro_idx = text.find("pro     ")
+    starter_idx = text.find("starter (link)")
+    pro_idx = text.find("pro (link)")
     assert starter_idx > 0 and pro_idx > starter_idx
+
+
+def test_stats_breakdown_prefers_a_FRESH_mirror_over_the_stale_link_copy(
+    tmp_db: Database,
+) -> None:
+    """The defect, at the admin surface: chat 1061466212's exact shape.
+
+    `linked_tier='starter'` (written at /link, June) + a fresh mirror saying `pro`. The
+    operator must be shown Pro, and must be able to see that the server said so.
+    """
+    tmp_db.upsert_subscriber(1, "alice", "en")
+    tmp_db.link_subscriber(1, "av_live_aaa", "starter")
+    tmp_db.update_plan_mirror(
+        1, {"tier": "pro", "used": 5294, "total": 100000, "allowed": True}, source="debit"
+    )
+    text = render_stats(tmp_db)
+    assert "pro (mirror)" in text
+    assert "starter" not in text
 
 
 def test_stats_conversion_ratio_with_ctas(tmp_db: Database) -> None:

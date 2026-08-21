@@ -263,6 +263,25 @@ PLAN_MIRROR_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN plan_wall_notice_day TEXT",   # UTC date of last DAILY notice
 )
 
+# OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — THE MIRROR CARRIES TIER.
+#
+# `linked_tier` was written once at /link and never re-read, while the server's CURRENT tier
+# arrived in every entitlement response and was thrown away. Two copies of one fact, and the stale
+# copy was the one every label read: chat 1061466212 upgraded to `pro` on the server, kept
+# `linked_tier='starter'` in the bot, and was shown "Starter plan" on every trade-call card while
+# its debits correctly charged the Pro allowance — the mirror already carried server truth for the
+# FIGURES and `linked_tier` never got the same discipline.
+#
+# 🛑 NO SECOND FRESHNESS CLOCK. This column is stamped by the EXISTING `plan_state_as_of` /
+# `plan_state_source`, because one `as_of` for the whole mirror row cannot disagree with itself
+# about how fresh a single response was, and two of them eventually would.
+#
+# NULL = UNOBSERVED, which is distinct from "observed as free". `quota.effective_tier` falls back
+# to `linked_tier` on NULL or stale, so the floor of this change is exactly the prior behaviour.
+LINKED_TIER_MIRROR_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN plan_tier TEXT",  # NULL = unobserved
+)
+
 # PRICING-BOT-DELIVERY-METERING-W1 CH4a — the DEBIT OUTBOX.
 #
 # A delivery must never be blocked, delayed or lost by a metering call. The recorder enqueues here
@@ -554,6 +573,9 @@ class Database:
                 # PRICING-BOT-DELIVERY-METERING-W1 (2026-08-17): plan mirror + debit outbox.
                 *PLAN_MIRROR_MIGRATIONS,
                 *ENTITLEMENT_OUTBOX_MIGRATIONS,
+                # OPS-BOT-LINKED-TIER-REFRESH-W1 (2026-08-21): server-authoritative tier,
+                # stamped by the plan mirror's existing as_of.
+                *LINKED_TIER_MIRROR_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1425,7 +1447,8 @@ class Database:
             cur.execute(
                 "UPDATE subscribers SET plan_used = ?, plan_total = ?, plan_allowed = ?, "
                 "plan_limit_kind = ?, plan_period_start = ?, plan_daily_day = ?, "
-                "plan_next_json = ?, plan_state_as_of = datetime('now'), plan_state_source = ? "
+                "plan_next_json = ?, plan_tier = ?, "
+                "plan_state_as_of = datetime('now'), plan_state_source = ? "
                 "WHERE chat_id = ?",
                 (
                     state.get("used"),
@@ -1435,6 +1458,12 @@ class Database:
                     state.get("period_start"),
                     state.get("daily_day"),
                     _json.dumps(nxt) if nxt is not None else None,
+                    # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2: same 200 body, same call, same cadence.
+                    # `tier` has been arriving in every consume/state response all along —
+                    # verified live on both routes 2026-08-21 — and was simply discarded.
+                    # A body without it stores NULL, which reads as UNOBSERVED and falls back;
+                    # it never overwrites a known tier with nothing.
+                    state.get("tier"),
                     source,
                     chat_id,
                 ),
@@ -1444,7 +1473,8 @@ class Database:
         """Reachable subscribers with a linked key — the poll set that keeps idle mirrors warm."""
         with self._cursor() as cur:
             cur.execute(
-                "SELECT chat_id, linked_api_key, linked_tier, plan_state_as_of FROM subscribers "
+                "SELECT chat_id, linked_api_key, linked_tier, plan_tier, plan_state_as_of "
+                "FROM subscribers "
                 "WHERE linked_api_key IS NOT NULL AND bot_blocked_at IS NULL"
             )
             return list(cur.fetchall())

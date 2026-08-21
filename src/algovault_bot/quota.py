@@ -39,7 +39,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Awaitable, Callable, Final, Literal
+from typing import Any, Awaitable, Callable, Final, Literal, NamedTuple
 
 from .db import Database
 from .messages import signup_url
@@ -71,6 +71,10 @@ PAID_TIERS: Final[frozenset[str]] = frozenset({"starter", "pro", "enterprise", "
 # trusting it. THE SoT: `entitlement_drain` imports this rather than keeping its own copy, because
 # two thresholds that must agree are two thresholds that will drift.
 PLAN_MIRROR_STALE_AFTER: Final = timedelta(minutes=90)
+
+#: Where an effective tier came from. Carried beside the value so a caller can say "last
+#: known" rather than implying the server confirmed it a moment ago.
+TierSource = Literal["mirror", "link", "unknown"]
 
 
 class PlanState(Enum):
@@ -130,6 +134,10 @@ class QuotaState:
     plan_next_json: str | None = None      # verbatim next_plan JSON from the server
     plan_state_as_of: datetime | None = None   # None = NEVER OBSERVED
     plan_wall_notice_day: str | None = None    # UTC date of the last DAILY-wall notice
+    # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — the server's CURRENT tier, from the same response
+    # and stamped by the same `plan_state_as_of`. None = unobserved. Read it through
+    # `effective_tier`, never directly: the fallback to `linked_tier` is the whole contract.
+    plan_tier: str | None = None
 
     @property
     def plan_state(self) -> PlanState:
@@ -144,6 +152,28 @@ class QuotaState:
         if (_now() - self.plan_state_as_of) > PLAN_MIRROR_STALE_AFTER:
             return PlanState.INDETERMINATE
         return PlanState.ALLOW if self.plan_allowed else PlanState.REFUSE
+
+    @property
+    def effective_tier(self) -> EffectiveTier:
+        """THE tier of this subscriber, and where it came from. See `_derive_tier`.
+
+        🛑 THIS IS FOR LABELS, NOT FOR ENTITLEMENT. `is_paid` / `remaining` / `exhausted`
+        below deliberately keep reading `linked_tier`, and that is not an oversight to be
+        tidied up later:
+
+          - The two agree on PAID_TIERS MEMBERSHIP in every reachable state, so nothing is
+            gained. `plan_tier` is only ever written from an entitlement 200, whose `tier`
+            comes from the same `validateApiKey` that must have returned a paid tier for the
+            call to succeed at all — a 404 never reaches `update_plan_mirror`.
+          - What WOULD change is the failure mode. Routing entitlement through the mirror
+            means any future server response carrying a non-paid `tier` instantly strips paid
+            treatment, with no grace window and no notice — a downgrade on a single
+            observation, which is precisely what Build Rule 5 and CH3's 72h streak exist to
+            prevent. Membership must move only through the lifecycle.
+
+        The defect this wave fixes is a wrong LABEL, and the label is what re-points here.
+        """
+        return _derive_tier(self.plan_tier, self.plan_state_as_of, self.linked_tier)
 
     @property
     def remaining(self) -> int:
@@ -172,6 +202,54 @@ class QuotaState:
     @property
     def is_paid(self) -> bool:
         return self.linked_tier in PAID_TIERS
+
+
+class EffectiveTier(NamedTuple):
+    """A tier and the provenance of that answer. Unpacks as ``(tier, source)``."""
+
+    tier: str | None
+    source: TierSource
+
+
+def _derive_tier(
+    plan_tier: str | None,
+    plan_state_as_of: datetime | None,
+    linked_tier: str | None,
+) -> EffectiveTier:
+    """THE SINGLE DERIVATION of "what tier is this subscriber".
+
+    OPS-BOT-LINKED-TIER-REFRESH-W1 CH2. Every tier-labelled surface — the card badge, the
+    link messages, the CTAs, the digest, admin stats — projects from this one function.
+    There is no second copy, because a second copy is exactly what this wave retired:
+    `linked_tier` was written once at /link and never refreshed while the server's answer
+    arrived every few minutes and was discarded.
+
+        fresh mirror        -> (plan_tier,   "mirror")   server truth
+        absent/stale mirror -> (linked_tier, "link")     last known, LABELLED as such
+        no link at all      -> (None,        "unknown")
+
+    🛑 A STALE MIRROR FALLS BACK; it never renders blank and never fabricates. That is why
+    this change cannot make anything worse than the behaviour it replaces: the floor is
+    exactly `linked_tier`, which is what every surface read before.
+
+    Freshness is `PLAN_MIRROR_STALE_AFTER` — the SAME window the wall's three-state decision
+    turns on, not a second one. Two windows that must agree are two windows that will drift.
+    """
+    if plan_tier and plan_state_as_of is not None:
+        if (_now() - plan_state_as_of) <= PLAN_MIRROR_STALE_AFTER:
+            return EffectiveTier(plan_tier, "mirror")
+    if linked_tier:
+        return EffectiveTier(linked_tier, "link")
+    return EffectiveTier(None, "unknown")
+
+
+def effective_tier(row: Any) -> EffectiveTier:
+    """Row adapter for `_derive_tier` — for callers holding a `subscribers` row rather than
+    a QuotaState. Tolerant of a DB predating either migration."""
+    keys = row.keys() if hasattr(row, "keys") else ()
+    def _c(col: str) -> Any:
+        return row[col] if col in keys else None
+    return _derive_tier(_c("plan_tier"), _parse_ts(_c("plan_state_as_of")), _c("linked_tier"))
 
 
 def _now() -> datetime:
@@ -242,6 +320,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
         quota_100_last_fired_at=last_100,
         referral_bonus_remaining=bonus,
         referral_nudge_last_at=nudge_last,
+        plan_tier=_m("plan_tier"),
         plan_used=_m("plan_used"),
         plan_total=_m("plan_total"),
         plan_allowed=_m("plan_allowed"),
@@ -547,7 +626,8 @@ def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> st
     used = state.plan_used
     total = state.plan_total
     limit = state.plan_limit_kind or "monthly"
-    tier = (state.linked_tier or "").capitalize()
+    # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — same single derivation as every other label.
+    tier = (state.effective_tier.tier or "").capitalize()
 
     row = db.get_subscriber(chat_id)
     lang = None
@@ -661,7 +741,7 @@ async def refuse_and_notify(
         d.state.used,
         d.state.total,
         "true" if notified else "false",
-        d.state.linked_tier or "free",
+        d.state.effective_tier.tier or "free",
         d.state.plan_limit_kind or "",
     )
     return notified

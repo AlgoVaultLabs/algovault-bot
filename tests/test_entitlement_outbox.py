@@ -37,7 +37,9 @@ def test_migrations_are_idempotent_across_reinit(tmp_path: Path) -> None:
         cols = {r[1] for r in cur.fetchall()}
     for c in ("plan_used", "plan_total", "plan_allowed", "plan_limit_kind", "plan_period_start",
               "plan_daily_day", "plan_next_json", "plan_state_as_of", "plan_state_source",
-              "plan_wall_notice_day"):
+              "plan_wall_notice_day",
+              # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — the tier joins the mirror it belongs to.
+              "plan_tier"):
         assert c in cols, f"mirror column {c} missing"
 
 
@@ -218,3 +220,67 @@ def test_telemetry_counters(db: Database) -> None:
     with db._cursor() as cur:
         cur.execute("UPDATE entitlement_outbox SET sent_at=datetime('now'), last_error='REFUSED' WHERE idem_key='bot:2:777'")
     assert db.count_plan_units_debited_last_24h() == 1
+
+
+# ── OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — the drainer carries TIER, on the same call ────
+#
+# 2b's whole claim is that no new transport, call or cadence is needed: `tier` has been in
+# the 200 body all along (verified live on both routes 2026-08-21) and was discarded. These
+# assert it end-to-end through the drainer rather than through `update_plan_mirror` alone.
+
+
+@pytest.mark.parametrize("outcome", ["CHARGED", "ALREADY_CHARGED", "REFUSED"])
+def test_the_DEBIT_path_writes_plan_tier(db: Database, outcome: str) -> None:
+    from algovault_bot import entitlement_drain
+    record_call_delivered(db, 2, "watch")
+    with patch.object(entitlement_drain, "consume", return_value=_resp(outcome, tier="pro")), \
+         patch.object(entitlement_drain, "read_state", return_value=None):
+        entitlement_drain.drain_entitlement_debits(db.path)
+    row = db.get_subscriber(2)
+    assert row["plan_tier"] == "pro"
+    assert row["linked_tier"] == "starter", "the write-once copy is deliberately left alone"
+
+
+def test_the_IDLE_POLL_path_writes_plan_tier(db: Database) -> None:
+    from algovault_bot import entitlement_drain
+    with patch.object(entitlement_drain, "read_state", return_value=_resp("READ", tier="pro")), \
+         patch.object(entitlement_drain, "consume", return_value=None):
+        entitlement_drain.drain_entitlement_debits(db.path)
+    row = db.get_subscriber(2)
+    assert row["plan_tier"] == "pro"
+    assert row["plan_state_source"] == "poll"
+
+
+def test_an_upgrade_reaches_the_label_within_one_drain_cycle(db: Database) -> None:
+    """Chat 1061466212's defect, reproduced and then closed.
+
+    Linked as `starter`; the server now says `pro`. One ordinary drain pass — no new
+    schedule, no new call — and every tier-labelled surface reads Pro.
+    """
+    from algovault_bot import entitlement_drain
+    from algovault_bot.quota import get_quota_state
+
+    assert get_quota_state(db, 2).effective_tier == ("starter", "link")
+
+    record_call_delivered(db, 2, "watch")
+    with patch.object(entitlement_drain, "consume", return_value=_resp("CHARGED", tier="pro")), \
+         patch.object(entitlement_drain, "read_state", return_value=None):
+        entitlement_drain.drain_entitlement_debits(db.path)
+
+    assert get_quota_state(db, 2).effective_tier == ("pro", "mirror")
+
+
+def test_a_body_without_tier_does_not_erase_the_last_known_one(db: Database) -> None:
+    """Fail-open, same shape as the rest of the mirror: an absent field is UNOBSERVED,
+    never a downgrade. The label falls back to `linked_tier` rather than blanking."""
+    from algovault_bot import entitlement_drain
+    from algovault_bot.quota import get_quota_state
+
+    body = _resp("READ")
+    del body["tier"]
+    with patch.object(entitlement_drain, "read_state", return_value=body), \
+         patch.object(entitlement_drain, "consume", return_value=None):
+        entitlement_drain.drain_entitlement_debits(db.path)
+
+    assert db.get_subscriber(2)["plan_tier"] is None
+    assert get_quota_state(db, 2).effective_tier == ("starter", "link")

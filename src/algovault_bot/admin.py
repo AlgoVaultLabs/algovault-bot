@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from .db import Database
-from .quota import count_walled_now
+from .quota import count_walled_now, effective_tier
 
 
 log = logging.getLogger(__name__)
@@ -106,16 +106,35 @@ def render_stats(db: Database) -> str:
             "SELECT COUNT(*) FROM subscribers WHERE linked_api_key IS NOT NULL"
         )
         linked_total = int(cur.fetchone()[0])
+        # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — projected in PYTHON, not GROUP BY.
+        #
+        # The old query grouped on `linked_tier`, the write-once copy, so admin stats
+        # reported the same stale label the card badge did. Re-pointing it in SQL would mean
+        # `COALESCE(plan_tier, linked_tier)` — a SECOND derivation with no freshness check,
+        # which is the exact drift this wave exists to retire. So the rows are fetched and
+        # projected through the one `effective_tier`, and the SOURCE is carried into the
+        # label: an operator reading "starter (link)" can see the mirror has not confirmed
+        # it, which a bare tier name cannot say. The linked population is single-digit; this
+        # is not a hot path.
         cur.execute(
             """
-            SELECT COALESCE(linked_tier, '?') AS tier, COUNT(*) AS c
+            SELECT linked_tier, plan_tier, plan_state_as_of
             FROM subscribers
             WHERE linked_api_key IS NOT NULL
-            GROUP BY linked_tier
-            ORDER BY c DESC, tier ASC
             """
         )
-        linked_by_tier = list(cur.fetchall())
+        _tier_counts: dict[str, int] = {}
+        for _row in cur.fetchall():
+            _tier, _source = effective_tier(_row)
+            _tier_counts[f"{_tier or '?'} ({_source})"] = (
+                _tier_counts.get(f"{_tier or '?'} ({_source})", 0) + 1
+            )
+        linked_by_tier = [
+            {"tier": _label, "c": _count}
+            for _label, _count in sorted(
+                _tier_counts.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+        ]
 
         # Top 10 watched assets
         cur.execute(
