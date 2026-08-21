@@ -60,14 +60,27 @@ STALENESS = PLAN_MIRROR_STALE_AFTER
 #: longer. Only one of those is worth avoiding.
 LINK_INVALID_GRACE = timedelta(hours=72)
 
-#: 3d's notice is NEW USER-FACING COPY and is PENDING-MR1. The mechanism is built; the send
-#: is off. Absent or anything other than "1" keeps it off — an unset env var must never mean
-#: "ship unratified copy to paying customers".
-DOWNGRADE_NOTICE_FLAG = "ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED"
+#: 3d's notice. RATIFIED BY THE ARCHITECT 2026-08-21, copy approved as-is and verified
+#: byte-identical to the approved string before this flip.
+#:
+#: 🛑 THE POLARITY IS INVERTED FROM THE ONE THIS WAVE SHIPPED, DELIBERATELY. While the copy was
+#: PENDING-MR1 the gate was fail-CLOSED (only a literal "1" opened it), because an unset env var
+#: must never mean "ship unratified copy to paying customers". Ratification removes that risk and
+#: introduces the opposite one: a flag that must be SET on every host to get approved behaviour
+#: is a safeguard that is off by accident on the next host, the next rebuild, or the next
+#: `/etc/algovault-bot/env` restore — nothing tracks it, and it fails silently in the direction
+#: of not telling a downgraded customer why their tier changed. So the ratified behaviour is now
+#: the CODE's default and depends on no host state at all.
+#:
+#: What remains is a KILL SWITCH: the literal "0" disables the send. Any other value, including
+#: unset and including the "1" the pre-ratification hosts may carry, enables it — so the flip is
+#: backwards-compatible in the safe direction.
+DOWNGRADE_NOTICE_KILL_SWITCH = "ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED"
 
 
 def _downgrade_notice_enabled() -> bool:
-    return os.environ.get(DOWNGRADE_NOTICE_FLAG, "").strip() == "1"
+    """Default ON. Only the literal "0" turns the ratified notice off."""
+    return os.environ.get(DOWNGRADE_NOTICE_KILL_SWITCH, "").strip() != "0"
 
 
 def _parse_stamp(raw: str | None) -> datetime | None:
@@ -191,11 +204,11 @@ def _apply_link_observation(
         if _send_downgrade_notice(chat_id, sub["lang_code"], db_path):
             db.mark_link_downgrade_notified(chat_id)
     else:
-        log.info(
+        log.warning(
             '{"event": "link_downgrade_notice_suppressed", "chat_id": %d, '
-            '"reason": "PENDING-MR1 — copy not ratified; %s != 1"}',
+            '"reason": "kill switch %s=0 — this subscriber was downgraded WITHOUT being told"}',
             chat_id,
-            DOWNGRADE_NOTICE_FLAG,
+            DOWNGRADE_NOTICE_KILL_SWITCH,
         )
 
     db.unlink_subscriber(chat_id)

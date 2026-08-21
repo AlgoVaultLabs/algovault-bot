@@ -459,12 +459,16 @@ def link_invalid_key_message() -> str:
 def link_downgraded_message(lang_code: str | None = None) -> str:
     """OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice.
 
-    🛑 PENDING-MR1. This wording is NEW USER-FACING COPY and is NOT ratified. The mechanism
-    that would send it is built and gated OFF behind
-    `ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED`; nothing sends this string until the architect
-    ratifies it. Do not flip the flag as part of a code wave.
+    RATIFIED BY THE ARCHITECT 2026-08-21 — approved as-is, and the EN string was verified
+    byte-identical to the approved wording before the send was enabled. It is LIVE: the gate
+    in `entitlement_drain` is now default-ON with `ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED=0`
+    as a kill switch.
 
-    Shape, for the ratification conversation: state the fact, assign no blame, give ONE
+    🛑 THIS IS RATIFIED PUBLIC COPY. Editing the EN string is a public-copy change requiring
+    a fresh ratification — not a wording tidy-up. The `id` / `zh-hans` renderings are
+    translations OF that approved string and move with it.
+
+    Shape, and why each part is load-bearing: state the fact, assign no blame, give ONE
     action, and say explicitly what did NOT change — a subscriber whose watchlist silently
     vanished would read this as data loss on top of a billing problem. Trilingual through
     the existing `normalize_lang` path, each under 300 characters.

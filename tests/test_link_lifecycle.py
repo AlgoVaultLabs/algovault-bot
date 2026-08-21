@@ -316,34 +316,71 @@ def test_revalidation_runs_ABOVE_the_staleness_filter(db: Database) -> None:
     assert _row(db, 3)["link_invalid_streak"] == 1
 
 
-# ── 3d — the notice is BUILT and GATED, and did not send ───────────────────────
+# ── 3d — the notice is RATIFIED (architect, 2026-08-21) and LIVE ──────────────
+#
+# These assertions used to read the other way round: the gate was fail-CLOSED and the tests
+# asserted that an unset env var meant NO SEND, because the copy was PENDING-MR1 and an unset
+# var must never mean "ship unratified copy to paying customers". Ratification inverts the
+# risk — a flag that must be SET on every host to get approved behaviour is one that is off by
+# accident on the next host — so the default flipped and these flipped with it. Each is
+# annotated with what it used to assert.
 
 
-def test_the_downgrade_notice_does_NOT_send_by_default(
+def test_the_downgrade_notice_SENDS_by_default_now_that_the_copy_is_ratified(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # was: `send.assert_not_called()` with the env var unset (PENDING-MR1)
     monkeypatch.delenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", raising=False)
+    _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
+    _age_the_streak(db, 3, hours=73.0)
+    with patch.object(entitlement_drain, "_send_downgrade_notice", return_value=True) as send:
+        _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
+        assert send.call_count == 1, "ratified copy must not depend on host env to send"
+    assert _row(db, 3)["linked_api_key"] is None, "the DOWNGRADE still happens"
+    assert _row(db, 3)["link_downgrade_notice_at"] is not None
+
+
+def test_the_notice_carries_the_RATIFIED_english_string_verbatim() -> None:
+    """Pins the approved wording. A wording change is a public-copy change needing fresh
+    ratification, so it must fail here rather than ship quietly."""
+    from algovault_bot.messages import link_downgraded_message, signup_url
+
+    assert link_downgraded_message("en") == (
+        "Your AlgoVault subscription no longer appears active, so this chat has moved back "
+        "to the free tier (100 alerts/month). Your watchlist is unchanged. "
+        "Reactivate any time: " + signup_url("link_downgraded")
+    )
+
+
+@pytest.mark.parametrize("flag", ["", "1", "true", "yes", "TRUE", " ", "anything"])
+def test_everything_except_literal_0_leaves_the_notice_ENABLED(
+    db: Database, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    """Backwards-compatible in the SAFE direction: hosts still carrying the
+    pre-ratification `=1` keep sending, and a typo cannot silently mute a ratified notice."""
+    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", flag)
+    assert entitlement_drain._downgrade_notice_enabled() is True
+
+
+def test_the_kill_switch_is_exactly_0(monkeypatch: pytest.MonkeyPatch) -> None:
+    # was: `test_the_gate_opens_on_exactly_1`
+    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", "0")
+    assert entitlement_drain._downgrade_notice_enabled() is False
+
+
+def test_the_kill_switch_suppresses_the_send_but_NOT_the_downgrade(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Killing the notice must never wedge the lifecycle — a subscriber is still returned to
+    the free tier, they just are not told. That asymmetry is logged at WARNING."""
+    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", "0")
     _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
     _age_the_streak(db, 3, hours=73.0)
     with patch.object(entitlement_drain, "_send_downgrade_notice") as send:
         _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
         send.assert_not_called()
-    assert _row(db, 3)["linked_api_key"] is None, "the DOWNGRADE still happens"
+    assert _row(db, 3)["linked_api_key"] is None
     assert _row(db, 3)["link_downgrade_notice_at"] is None
-
-
-@pytest.mark.parametrize("flag", ["", "0", "true", "yes", "TRUE", " "])
-def test_only_the_literal_1_enables_the_notice(
-    db: Database, monkeypatch: pytest.MonkeyPatch, flag: str
-) -> None:
-    """An unset or fuzzy env var must never mean 'ship unratified copy to customers'."""
-    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", flag)
-    assert entitlement_drain._downgrade_notice_enabled() is False
-
-
-def test_the_gate_opens_on_exactly_1(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", "1")
-    assert entitlement_drain._downgrade_notice_enabled() is True
 
 
 def test_when_ENABLED_the_notice_sends_once_and_is_stamped(
@@ -361,7 +398,7 @@ def test_when_ENABLED_the_notice_sends_once_and_is_stamped(
 def test_a_notice_failure_REFUSES_and_never_takes_the_loop_down(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", "1")
+    monkeypatch.delenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", raising=False)
     _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
     _age_the_streak(db, 3, hours=73.0)
     with patch.object(entitlement_drain, "_send_downgrade_notice", return_value=False):
