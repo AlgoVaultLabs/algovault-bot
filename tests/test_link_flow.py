@@ -20,7 +20,7 @@ import pytest
 
 from algovault_bot.db import Database
 from algovault_bot.handlers import handle_link, handle_start
-from algovault_bot.link_validator import ValidatedKey
+from algovault_bot.link_validator import KeyCheck
 
 
 TEST_KEY = "av_live_aaaaaaaaaaaaaaaaaaaaaaaa"
@@ -77,16 +77,28 @@ def test_get_linked_state_unknown_chat(tmp_db: Database) -> None:
 
 
 @pytest.fixture()
-def _valid_starter() -> ValidatedKey:
-    return ValidatedKey(customer_id="cus_test123", tier="starter")
+def _valid_starter() -> KeyCheck:
+    return KeyCheck(
+        status="VALID", tier="starter", customer_id="cus_test123", reason="ok"
+    )
 
 
 @pytest.fixture()
-def _valid_pro() -> ValidatedKey:
-    return ValidatedKey(customer_id="cus_test123", tier="pro")
+def _valid_pro() -> KeyCheck:
+    return KeyCheck(status="VALID", tier="pro", customer_id="cus_test123", reason="ok")
 
 
-def test_handle_link_first_time_starter(tmp_db: Database, _valid_starter: ValidatedKey) -> None:
+@pytest.fixture()
+def _determined_invalid() -> KeyCheck:
+    """OPS-BOT-LINKED-TIER-REFRESH-W1 CH1: the invalid-key message is now reachable ONLY
+    from a DETERMINED negative. `validate_api_key` no longer has a None inhabitant, so a
+    test that used to stub `None` must say WHICH of the six former meanings it means."""
+    return KeyCheck(
+        status="INVALID", tier=None, customer_id=None, reason="no_active_subscription"
+    )
+
+
+def test_handle_link_first_time_starter(tmp_db: Database, _valid_starter: KeyCheck) -> None:
     with patch("algovault_bot.handlers.validate_api_key", return_value=_valid_starter):
         reply = handle_link(tmp_db, 42, "alice", "en", TEST_KEY)
     assert "✅ Linked!" in reply
@@ -99,8 +111,10 @@ def test_handle_link_first_time_starter(tmp_db: Database, _valid_starter: Valida
     assert tier == "starter"
 
 
-def test_handle_link_invalid_key(tmp_db: Database) -> None:
-    with patch("algovault_bot.handlers.validate_api_key", return_value=None):
+def test_handle_link_invalid_key(tmp_db: Database, _determined_invalid: KeyCheck) -> None:
+    with patch(
+        "algovault_bot.handlers.validate_api_key", return_value=_determined_invalid
+    ):
         reply = handle_link(tmp_db, 42, "alice", "en", TEST_KEY)
     assert reply.startswith("❌")
     assert "wasn't recognized" in reply
@@ -109,7 +123,7 @@ def test_handle_link_invalid_key(tmp_db: Database) -> None:
     assert tier is None
 
 
-def test_handle_link_re_link_same_tier(tmp_db: Database, _valid_starter: ValidatedKey) -> None:
+def test_handle_link_re_link_same_tier(tmp_db: Database, _valid_starter: KeyCheck) -> None:
     with patch("algovault_bot.handlers.validate_api_key", return_value=_valid_starter):
         handle_link(tmp_db, 42, "alice", "en", TEST_KEY)
         reply = handle_link(tmp_db, 42, "alice", "en", TEST_KEY)
@@ -118,7 +132,7 @@ def test_handle_link_re_link_same_tier(tmp_db: Database, _valid_starter: Validat
 
 
 def test_handle_link_tier_upgrade(
-    tmp_db: Database, _valid_starter: ValidatedKey, _valid_pro: ValidatedKey
+    tmp_db: Database, _valid_starter: KeyCheck, _valid_pro: KeyCheck
 ) -> None:
     with patch("algovault_bot.handlers.validate_api_key", return_value=_valid_starter):
         handle_link(tmp_db, 42, "alice", "en", TEST_KEY)
@@ -134,7 +148,7 @@ def test_handle_link_tier_upgrade(
 
 
 def test_handle_link_creates_subscriber_implicitly(
-    tmp_db: Database, _valid_starter: ValidatedKey
+    tmp_db: Database, _valid_starter: KeyCheck
 ) -> None:
     # New chat going straight to /start auth_<key> with no prior /start
     with patch("algovault_bot.handlers.validate_api_key", return_value=_valid_starter):

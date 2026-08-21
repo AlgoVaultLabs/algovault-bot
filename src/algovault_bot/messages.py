@@ -444,8 +444,26 @@ def link_already_linked_message(tier: str) -> str:
 
 
 def link_invalid_key_message() -> str:
+    """Shown ONLY on a DETERMINED negative — the server told us there is no active
+    subscription behind this key. OPS-BOT-LINKED-TIER-REFRESH-W1 CH1: it used to be shown
+    for "we could not check" too, which is why the retry message below exists."""
     return (
         "❌ That signup link wasn't recognized. The API key in the link is "
         "either expired or doesn't match an active subscription.\n"
         "Sign up or recover your key: https://api.algovault.com/signup?plan=starter"
+    )
+
+
+def link_could_not_verify_message() -> str:
+    """OPS-BOT-LINKED-TIER-REFRESH-W1 CH1 — the INDETERMINATE reply.
+
+    Assigns no blame to the customer's key, because at this point we have not
+    established anything about it, and states plainly that nothing changed. One
+    action, no signup link: sending a paying customer to the signup page implies
+    their subscription is the problem, which is the very claim we cannot make.
+    """
+    return (
+        "⏳ We couldn't verify your subscription just now — that's on our side, "
+        "not your key.\n"
+        "Nothing has changed here. Please tap the link again in a few minutes."
     )

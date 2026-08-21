@@ -353,29 +353,52 @@ def handle_link(
     NEVER log the api_key value at INFO. Only structured fields.
     """
     db.upsert_subscriber(chat_id, username, lang_code)
-    validated = validate_api_key(api_key)
-    if validated is None:
+    check = validate_api_key(api_key)
+
+    if check.status == "INDETERMINATE":
+        # OPS-BOT-LINKED-TIER-REFRESH-W1 CH1 — WE could not check. That is not a fact about
+        # their key, so we do not tell them it is bad and we write NO linked_* state. Before
+        # this branch existed, an unset bypass key or a signal-MCP blip sent a paying
+        # customer the invalid-key message on the paid conversion funnel.
         log.info(
-            '{"event": "link_failed", "chat_id": %d, "reason": "validation_returned_none"}',
+            '{"event": "link_failed", "chat_id": %d, "status": "INDETERMINATE", '
+            '"reason": "%s"}',
             chat_id,
+            check.reason,
+        )
+        return messages.link_could_not_verify_message()
+
+    if check.status == "INVALID":
+        log.info(
+            '{"event": "link_failed", "chat_id": %d, "status": "INVALID", "reason": "%s"}',
+            chat_id,
+            check.reason,
         )
         return messages.link_invalid_key_message()
 
-    previous_tier, is_new_link = db.link_subscriber(chat_id, api_key, validated.tier)
+    tier = check.tier
+    if tier is None:
+        # Unreachable by construction: VALID is only built by `link_validator._valid`, which
+        # requires a tier. REFUSE rather than raise — a guard on a live serving path must
+        # never throw into the /start handler.
+        log.warning('{"event": "link_valid_without_tier", "chat_id": %d}', chat_id)
+        return messages.link_could_not_verify_message()
+
+    previous_tier, is_new_link = db.link_subscriber(chat_id, api_key, tier)
     log.info(
         '{"event": "link_ok", "chat_id": %d, "tier": "%s", "is_new_link": %s, '
         '"previous_tier": "%s"}',
         chat_id,
-        validated.tier,
+        tier,
         "true" if is_new_link else "false",
         previous_tier or "null",
     )
 
     if is_new_link:
-        return messages.link_first_time_message(validated.tier)
-    if previous_tier != validated.tier:
-        return messages.link_tier_changed_message(previous_tier, validated.tier)
-    return messages.link_already_linked_message(validated.tier)
+        return messages.link_first_time_message(tier)
+    if previous_tier != tier:
+        return messages.link_tier_changed_message(previous_tier, tier)
+    return messages.link_already_linked_message(tier)
 
 
 def handle_help(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
