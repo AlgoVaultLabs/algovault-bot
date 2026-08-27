@@ -24,8 +24,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Final
 
-from .messages import signup_url
-from .quota import FREE_TIER_MONTHLY_QUOTA, QuotaState
+from .messages import _usd, signup_url
+from .quota import (
+    FREE_TIER_MONTHLY_QUOTA,
+    STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_USD,
+    QuotaState,
+)
 from .referral import format_referral_nudge
 
 
@@ -119,7 +124,8 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
             return ""
         return (
             "⏰ You've used 75% of your free alerts. "
-            "Upgrade to Starter ($9.99/mo or $39.90/6mo → 10,000 API calls/mo):\n"
+            f"Upgrade to Starter ({_usd(state.starter_price_usd)}/mo or $39.90/6mo "
+            f"→ {state.starter_monthly_calls:,} API calls/mo):\n"
             f"→ {signup_url('quota_75')}"
         )
     return ""
@@ -152,12 +158,22 @@ def referral_nudge_text(state: QuotaState, *, now: datetime | None = None) -> st
     return ""
 
 
-def quota_exhausted_message() -> str:
+def quota_exhausted_message(state: QuotaState | None = None) -> str:
     """Drop-in replacement for signal-MCP's getQuotaExhaustedMessage when the
     bot detects 100% usage locally (D1-C: signal-MCP doesn't tick bot quota,
-    bot owns the gate). Mirrors the upstream message shape."""
+    bot owns the gate). Mirrors the upstream message shape.
+
+    GROWTH-TG-QUOTA-PARITY-W1 CH3b-2: every figure now derives. `state` is optional so existing
+    callers keep working; absent it, the pinned fallbacks are used — which SERVE, as everywhere
+    else in this lane. `$39.90/6mo` stays hand-typed by ruling: `/api/plans/public` carries no
+    prepay field, and widening a shipped public contract for one string is
+    `OPS-PLANS-PUBLIC-PREPAY-FIELD-W1`, not this wave. The figure is currently correct.
+    """
+    total = state.total if state is not None else FREE_TIER_MONTHLY_QUOTA
+    price = state.starter_price_usd if state is not None else STARTER_PRICE_USD
+    calls = state.starter_monthly_calls if state is not None else STARTER_MONTHLY_CALLS
     return (
-        f"Free tier limit reached ({FREE_TIER_MONTHLY_QUOTA}/{FREE_TIER_MONTHLY_QUOTA} "
-        "alerts this month). Upgrade to Starter ($9.99/mo or $39.90/6mo) for "
-        "10,000 API calls/mo, or pay per call via x402."
+        f"Free tier limit reached ({total}/{total} "
+        f"alerts this month). Upgrade to Starter ({_usd(price)}/mo or $39.90/6mo) for "
+        f"{calls:,} API calls/mo, or pay per call via x402."
     )

@@ -73,9 +73,74 @@ produce exactly one `entitlement_debits` row — and it is held by the idempoten
 1. **Bot-facing copy states the bot's units.** "Your free 100 alerts/month" — never "100 calls/month", which reads as the API's meter and is now a different number (200). Any figure quoted from the API ladder must name it as the API's.
 
    > **This rule is now GATE-ENFORCED, because it never once held as prose.** `BOT-QUOTA-REFUSAL-SEAM-W1` (2026-08-16) found it violated in **nine** live surfaces on the day it was audited — including the footer of every trade-call card image — i.e. it was already false when it was written here. `scripts/check-quota-refusal-seam.py` leg **L3** now bans the collision across every module in the package, matching only real string literals (docstrings and comments excluded via AST, so prose *about* the rule is not judged *by* it). "API calls" stays legal; "free calls" does not. Per the Completeness Standard: a rule that has once failed as prose must be retired into a gate or deleted. Note the shape of the near-miss — L3's first cut scanned a hand-listed three files and reported PASS over the six surfaces it never looked at.
-2. **A change to `plans.ts` does not imply a change here.** There is no parity test between the two, deliberately, because there is no invariant to hold.
+2. ~~**A change to `plans.ts` does not imply a change here.** There is no parity test between the two, deliberately, because there is no invariant to hold.~~
+   > 🛑 **RETIRED 2026-08-27 (`GROWTH-TG-QUOTA-PARITY-W1`). This rule is now the OPPOSITE of the truth.** A ladder change PROPAGATES: `plans.ts` publishes the free rung at `GET /api/plans/public`, the bot mirrors it on the existing entitlement drain, and `quota.FREE_TIER_MONTHLY_QUOTA` / `FREE_TIER_DAILY_QUOTA` are pinned FALLBACKS for when that mirror is unreadable — not the answer. See the amendment below.
 3. **If this bot ever delivers a HOLD** — a "nothing to do" digest, a silence-confirmation — that is the moment to revisit, because a delivered HOLD *is* a delivery. Reopen this document then.
 
 ## What was NOT done, and why
 
 No metering code changed. Ruling G-C scoped this chapter to the declaration alone: an undeclared divergence is the defect, not the divergence itself. Changing behaviour to match a ladder that does not apply would have been the actual mistake.
+
+
+---
+
+## Amendment — 2026-08-27 (`GROWTH-TG-QUOTA-PARITY-W1`)
+
+**Architect ruling (Mr.1):** *"TG bot should have the same cap: 200 calls/month, 100 calls/day, for
+free tier."* This **reverses ruling G-C of `PRICING-FOLLOWUPS-GENERATOR-W1` on the ALLOWANCE only.**
+
+### What changed
+
+| | before | after |
+|---|---|---|
+| free monthly | 100 alerts, hand-typed in `quota.py` | **200**, derived from `plans.ts` via `/api/plans/public` |
+| free daily | none | **100 per UTC day** |
+| binding | *"Do not wire one to the other"* | the ladder is MIRRORED on the existing entitlement drain |
+
+### What was RETIRED
+
+- *"Do not wire one to the other."* Wired. One SoT (`src/lib/plans.ts`), one public projection, one
+  mirror.
+- **Rule 2** above — *"a change to `plans.ts` does not imply a change here"*. Struck through in
+  place rather than deleted, because the record of what this document once asserted is the point.
+
+### What SURVIVES — and this is the load-bearing half
+
+- **Rule 3 is UNTOUCHED.** The billable unit is still a **delivered alert**, and a HOLD is still
+  silent and therefore still free. The API meters a returned verdict, HOLD included. Unifying the
+  allowance did not unify the unit, and nothing here suggests it should.
+- **Rule 1 SURVIVES AND IS STRENGTHENED.** Bot-facing copy still states the bot's own noun,
+  `alerts`, because a HOLD costs the user nothing here and `calls` would overstate what they spend.
+  **The two ladders are now the same NUMBER with different UNITS** — which makes the noun matter
+  more than it did when the numbers also differed, not less. Leg **L3** still enforces it; new leg
+  **L5** additionally makes a hand-typed *allowance* unwritable in any shipped string.
+
+### The daily cap is PARITY + HEADROOM. It is not a tightening.
+
+🛑 **The word "tightening" is banned from this wave's copy, this document included, and so is any
+claim that the cap will never bind.** Both would be unevidenced in opposite directions.
+
+What was actually measured (CH0/P5, read-only against production `state.db` on 2026-08-27, over
+`alerts_fired` spanning 2026-05-28 → 2026-08-27):
+
+- **298 free chat-days** observed
+- **maximum 74 alerts** delivered to any free subscriber in one UTC day
+- **mean 4.80** alerts/day
+- **zero** free chat-days above 100
+
+The single chat that ever exceeded 100 alerts in a day (`8776880162`, peak 248) is
+`linked_tier = starter` — **paid**, and therefore governed by the plan ceiling, not this meter.
+
+So the 100/UTC-day cap sits **26% above the highest daily volume any free subscriber has ever
+received**, and no free subscriber in the recorded window would have been refused by it. That is a
+statement about the PRE-CHANGE distribution under a 100/month ceiling, and nothing more: doubling
+the monthly allowance can move daily peaks, so this is not a promise that the cap will never bind.
+**`GROWTH-TG-DAILY-CAP-IMPACT-W1` re-measures against exactly this baseline at ~30 days.**
+
+### Why the daily cap is a CALENDAR day when the monthly window is ROLLING
+
+Deliberate, and it is a copy constraint rather than an implementation preference. The 30-day window
+starts at each subscriber's own first alert, so its reset date is a property of when they happened
+to arrive — it cannot be stated in advance. `00:00 UTC` can. The daily-wall copy names that clock,
+which is the same defect `PRICING-FOLLOWUPS-GENERATOR-W1` CH1 fixed on the API side when production
+told a caller walled for two hours to come back in 30 days.

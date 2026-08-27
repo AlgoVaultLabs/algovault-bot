@@ -32,6 +32,7 @@ from .db import Database, DEFAULT_DB_PATH
 from .entitlement_client import consume, read_state
 from .link_validator import KeyCheck, validate_api_key
 from .quota import PAID_TIERS, PLAN_MIRROR_STALE_AFTER
+from .ladder_client import fetch_ladder
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,9 @@ def _parse_stamp(raw: str | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def _send_downgrade_notice(chat_id: int, lang_code: str | None, db_path: str) -> bool:
+def _send_downgrade_notice(
+    chat_id: int, lang_code: str | None, db_path: str, db: Database
+) -> bool:
     """REFUSES, never throws. A notice failure may not take the poll loop down.
 
     Imported lazily: `broadcast` pulls in the Telegram stack, and the drainer must stay
@@ -102,8 +105,20 @@ def _send_downgrade_notice(chat_id: int, lang_code: str | None, db_path: str) ->
     try:
         from .broadcast import sendDM
         from .messages import link_downgraded_message
+        from .quota import resolve_ladder
 
-        return bool(sendDM(chat_id, link_downgraded_message(lang_code), db_path=db_path))
+        # GROWTH-TG-QUOTA-PARITY-W1 CH3: the notice states the ladder this chat is returning TO,
+        # rendered from the mirror rather than the two literals it used to carry in three
+        # languages. Lazy import for the same reason `broadcast` is: this module must stay
+        # importable on a box with no bot token.
+        lad = resolve_ladder(db)
+        return bool(
+            sendDM(
+                chat_id,
+                link_downgraded_message(lad.free_monthly, lad.free_daily, lang_code),
+                db_path=db_path,
+            )
+        )
     except Exception as err:  # noqa: BLE001 — a notice fault is never fatal to the drain
         log.warning(
             '{"event": "link_downgrade_notice_failed", "chat_id": %d, "err": "%s"}',
@@ -201,7 +216,7 @@ def _apply_link_observation(
 
     # ── sustained past the grace window: notify, then tear the link down ─────────────────
     if _downgrade_notice_enabled():
-        if _send_downgrade_notice(chat_id, sub["lang_code"], db_path):
+        if _send_downgrade_notice(chat_id, sub["lang_code"], db_path, db):
             db.mark_link_downgrade_notified(chat_id)
     else:
         log.warning(
@@ -358,6 +373,29 @@ def drain_entitlement_debits(
                 continue
             db.update_plan_mirror(chat_id, state, source="poll")
             counts["polled"] += 1
+
+    # GROWTH-TG-QUOTA-PARITY-W1 CH2a — refresh the LADDER mirror on the same pass.
+    #
+    # Deliberately here and not on a new schedule: this job already runs every five minutes and
+    # already exists to keep server-published state warm. A dedicated cron for a value that moves
+    # maybe monthly would be a second thing to install, monitor and forget.
+    #
+    # LAST, and unconditionally: it must not be able to abort the debit drain above it, and it must
+    # still run on a pass where every subscriber was skipped. Failure is a WARNING and a kept
+    # mirror — `fetch_ladder` never raises, and a ladder we could not read is never a reason to
+    # refuse anyone.
+    counts["ladder_fetched"] = 0
+    if not dry_run:
+        ladder = fetch_ladder()
+        if ladder is not None:
+            db.upsert_free_tier_ladder(
+                free_monthly=ladder["free_monthly"],
+                free_daily=ladder["free_daily"],
+                starter_price_usd=ladder["starter_price_usd"],
+                starter_monthly_calls=ladder["starter_monthly_calls"],
+                fetched_at=now.isoformat(),
+            )
+            counts["ladder_fetched"] = 1
 
     log.info('{"event": "entitlement_drain", %s}' % ", ".join(f'"{k}": {v}' for k, v in counts.items()))
     return counts

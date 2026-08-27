@@ -130,27 +130,44 @@ def format_referral_body(data: dict[str, Any], lang_code: str | None = None) -> 
     )
 
 
-def format_ref_join_greeting(bonus_calls: int, terms: dict[str, Any], lang_code: str | None = None) -> str:
-    """Greeting when a NEW user joins via someone's ref link (the referee bonus + the give-get pitch)."""
+def format_ref_join_greeting(
+    bonus_calls: int,
+    terms: dict[str, Any],
+    monthly_total: int,
+    lang_code: str | None = None,
+) -> str:
+    """Greeting when a NEW user joins via someone's ref link (the referee bonus + the give-get pitch).
+
+    GROWTH-TG-QUOTA-PARITY-W1 CH3 (ratified 2026-08-27, Q1=a): the free allowance is INTERPOLATED
+    in all three languages. It was hand-typed here — three more copies than §2's table counted, and
+    gate leg L5 now makes the literal form unwritable.
+
+    🛑 The sentence deliberately states NO UNIT for `{monthly_total}`. Two words earlier it says
+    "bonus calls", and the referral unit noun is genuinely SPLIT in this module today: `bonus_calls`
+    is minted by signal-MCP's REFERRAL_TERMS in API CALLS and spent by `quota.consume_quota` per
+    DELIVERED ALERT. Naming a unit here would make one sentence claim two different units for two
+    quantities drawn from the same pool. Resolving that is `OPS-BOT-REFERRAL-UNIT-NOUN-W1`, not
+    this chapter — an allowance wave is the wrong place to settle a cross-meter naming question.
+    """
     lang = normalize_lang(lang_code)
     _b, pct, months = _terms(terms)
     if lang == "id":
         return (
             f"🎉 Selamat datang di AlgoVault! Anda mendapat {bonus_calls} panggilan bonus "
-            "di atas jatah gratis 100/bulan.\n\n"
+            f"di atas jatah gratis {monthly_total}/bulan.\n\n"
             f"Ingin lebih? Ajak teman — mereka dapat {bonus_calls} bonus juga, dan Anda dapat "
             f"{pct}% dari langganan mereka selama {months} bulan. Ketik /referral."
         )
     if lang == "zh-hans":
         return (
             f"🎉 欢迎来到 AlgoVault！你已获得 {bonus_calls} 次奖励调用"
-            "（在每月 100 次免费额度之外）。\n\n"
+            f"（在每月 {monthly_total} 次免费额度之外）。\n\n"
             f"想要更多？推荐好友——他们同样获得 {bonus_calls} 次奖励，你可从其订阅中获得 "
             f"{pct}% 佣金，持续 {months} 个月。发送 /referral。"
         )
     return (
         f"🎉 Welcome to AlgoVault! You got {bonus_calls} bonus calls on top of your "
-        "free 100/month.\n\n"
+        f"free {monthly_total}/month.\n\n"
         f"Want more? Refer friends — they get {bonus_calls} bonus calls too, and you earn "
         f"{pct}% of their subscription for {months} months. Send /referral."
     )

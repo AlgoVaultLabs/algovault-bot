@@ -1,6 +1,8 @@
 """TG-BUTTON-UX-W1 / C1 — keyboard builders (pure) + confirmation card + curated commands."""
 from __future__ import annotations
 
+from algovault_bot.quota import FREE_TIER_MONTHLY_QUOTA
+
 import pytest
 from telegram import InlineKeyboardMarkup
 
@@ -78,14 +80,20 @@ def test_keyboard_coin_grid_has_type_ticker_and_coins():
 # ── confirmation card (shared renderer) ──
 
 def test_confirmation_watch_card_content():
-    card = messages.format_subscription_confirmation("watch", coin="BTC", tf="15m", exchange="BYBIT", mode="both")
+    card = messages.format_subscription_confirmation(
+        "watch", coin="BTC", tf="15m", exchange="BYBIT", mode="both",
+        monthly_total=FREE_TIER_MONTHLY_QUOTA,
+    )
     assert "BTC · 15m · BYBIT · Regime + Calls" in card
-    assert "100/mo" in card and "/unwatch" in card
+    assert f"{FREE_TIER_MONTHLY_QUOTA}/mo" in card and "/unwatch" in card
     assert "<" not in card and ">" not in card  # plain text → parse-mode safe
 
 
 def test_confirmation_scanwatch_card_content():
-    card = messages.format_subscription_confirmation("scanwatch", top_n=10, tf="15m", exchange="BINANCE", cadence="1h")
+    card = messages.format_subscription_confirmation(
+        "scanwatch", top_n=10, tf="15m", exchange="BINANCE", cadence="1h",
+        monthly_total=FREE_TIER_MONTHLY_QUOTA,
+    )
     # TG-SCANWATCH-TF-CADENCE-W1: cadence == the TF; content-deduped to new calls.
     assert "top 10 · 15m · BINANCE" in card
     assert "re-check every 15m" in card and "NEW BUY/SELL" in card
@@ -94,7 +102,9 @@ def test_confirmation_scanwatch_card_content():
 
 def test_confirmation_unknown_kind_raises():
     with pytest.raises(ValueError):
-        messages.format_subscription_confirmation("bogus", tf="15m", exchange="HL")
+        messages.format_subscription_confirmation(
+            "bogus", tf="15m", exchange="HL", monthly_total=FREE_TIER_MONTHLY_QUOTA
+        )
 
 
 # ── curated commands (Menu button SoT) ──

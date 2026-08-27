@@ -48,7 +48,26 @@ from .paywall import format_paywall_body
 
 log = logging.getLogger(__name__)
 
-FREE_TIER_MONTHLY_QUOTA: Final = 100
+# GROWTH-TG-QUOTA-PARITY-W1 CH2b (2026-08-27) — these four are PINNED FALLBACKS, not the answer.
+#
+# The live values come from the ladder mirror (`free_tier_ladder`, refreshed by the entitlement
+# drain from signal-MCP's `GET /api/plans/public`, whose SoT is `src/lib/plans.ts`). These are what
+# we SERVE when that mirror is absent or stale — never a reason to refuse anyone.
+#
+# 🛑 They must EQUAL the live ladder at ship time, and `tests/test_ladder_client.py` asserts
+# exactly that against the endpoint's real response. A fallback that has drifted from the thing it
+# stands in for is the same defect as a hand-typed constant, wearing a different coat.
+#
+# The architect's 2026-08-27 ruling unified the ALLOWANCE across the API and the bot: same NUMBER,
+# different UNIT. The API meters a returned verdict (a HOLD is a call); the bot meters a DELIVERED
+# ALERT (a silent HOLD costs nothing). That distinction is Rule 1 + Rule 3 of
+# `docs/METERING-DIVERGENCE.md` and it SURVIVES this wave untouched.
+FREE_TIER_MONTHLY_QUOTA: Final = 200
+FREE_TIER_DAILY_QUOTA: Final = 100
+#: Starter rung, mirrored for COPY only — it gates nothing. CH3 renders the upgrade line from it.
+STARTER_PRICE_USD: Final = 9.99
+STARTER_MONTHLY_CALLS: Final = 10_000
+
 WINDOW_DAYS: Final = 30
 WINDOW = timedelta(days=WINDOW_DAYS)
 
@@ -71,6 +90,17 @@ PAID_TIERS: Final[frozenset[str]] = frozenset({"starter", "pro", "enterprise", "
 # trusting it. THE SoT: `entitlement_drain` imports this rather than keeping its own copy, because
 # two thresholds that must agree are two thresholds that will drift.
 PLAN_MIRROR_STALE_AFTER: Final = timedelta(minutes=90)
+
+# GROWTH-TG-QUOTA-PARITY-W1 CH2 — how old the LADDER mirror may be before the meter falls back to
+# the pinned constants above.
+#
+# 🛑 DELIBERATELY NOT `PLAN_MIRROR_STALE_AFTER`, and these two must never be "aligned". They answer
+# different questions. The plan mirror is a PER-SUBSCRIBER entitlement whose staleness means "this
+# person's allowance may have changed while we were not looking" — 90 minutes is right for that.
+# The ladder is near-static CONFIG that moves maybe monthly and identically for everyone; a
+# 90-minute TTL would drop the whole free base to the fallback on any drain hiccup, for a value
+# that had not changed. Two thresholds that answer different questions are not drift.
+LADDER_STALE_AFTER: Final = timedelta(days=7)
 
 #: Where an effective tier came from. Carried beside the value so a caller can say "last
 #: known" rather than implying the server confirmed it a moment ago.
@@ -138,6 +168,20 @@ class QuotaState:
     # and stamped by the same `plan_state_as_of`. None = unobserved. Read it through
     # `effective_tier`, never directly: the fallback to `linked_tier` is the whole contract.
     plan_tier: str | None = None
+    # GROWTH-TG-QUOTA-PARITY-W1 CH2c — the FREE lane's DAILY meter. `day_total` defaults to the
+    # pinned fallback rather than to None: a meter with no ceiling is not a meter, and every
+    # construction site that does not pass one is one the ladder has not reached yet.
+    #
+    # 🛑 These keep defaults for the reason stated above — the suite constructs QuotaState
+    # POSITIONALLY (`QuotaState(47, 100, now, 0.47)`), so a non-defaulted field here breaks every
+    # such test at CONSTRUCTION, before any assertion runs, and the failure names the wrong thing.
+    day_used: int = 0
+    day_total: int = FREE_TIER_DAILY_QUOTA
+    #: UTC date of the last DAILY-wall notice. The daily lane's episode key — see `_notice_due`.
+    quota_day_notice_day: str | None = None
+    # CH3 renders the upgrade line from these. COPY ONLY — neither gates anything.
+    starter_price_usd: float = STARTER_PRICE_USD
+    starter_monthly_calls: int = STARTER_MONTHLY_CALLS
 
     @property
     def plan_state(self) -> PlanState:
@@ -191,13 +235,52 @@ class QuotaState:
         return max(0, self.total - self.used) + self.referral_bonus_remaining
 
     @property
+    def monthly_exhausted(self) -> bool:
+        """The FREE lane's 30-day rolling meter, bonus pool included."""
+        return self.used >= self.total and self.referral_bonus_remaining <= 0
+
+    @property
+    def daily_exhausted(self) -> bool:
+        """The FREE lane's UTC-day meter.
+
+        🛑 The referral bonus does NOT lift this cap, deliberately. The bonus is extra BUDGET, and
+        the daily cap is PACING — `OPS-QUOTA-CLAIM-ALIAS-W1` Probe 3 settled that "pacing is not
+        budget". A referred user gets more alerts in total, spread over more days; they do not get
+        to spend the whole pool in one afternoon.
+        """
+        return self.day_used >= self.day_total
+
+    @property
     def exhausted(self) -> bool:
         if self.linked_tier in PAID_TIERS:
             # PRICING-BOT-DELIVERY-METERING-W1 R-1: a paid subscriber IS walled at the plan
             # ceiling — but ONLY on a fresh REFUSE. INDETERMINATE serves (fail-open): never wall a
             # paying customer on a measurement we could not take.
             return self.plan_state is PlanState.REFUSE
-        return self.used >= self.total and self.referral_bonus_remaining <= 0
+        # GROWTH-TG-QUOTA-PARITY-W1 CH2c: two REAL caps, not a cap and a sub-limit. A call is
+        # refused when EITHER is spent — the same shape `plans.ts` documents for the API side.
+        return self.monthly_exhausted or self.daily_exhausted
+
+    @property
+    def limit_kind(self) -> Literal["monthly", "daily"] | None:
+        """WHICH free-lane meter refused, or None when nothing did.
+
+        Single-derivation (CH2d): `evaluate_delivery` decides ONCE and every consumer projects
+        from that answer. The copy layer must never re-derive which wall was hit — two
+        independent derivations of one classification drift to contradiction, and here the
+        contradiction would be telling a user to wait for a 30-day window that is not what
+        stopped them.
+
+        Monthly wins a tie: it is the wall with the longer horizon, so naming it is the more
+        useful thing to tell someone who is out of both.
+        """
+        if self.linked_tier in PAID_TIERS:
+            return None
+        if self.monthly_exhausted:
+            return "monthly"
+        if self.daily_exhausted:
+            return "daily"
+        return None
 
     @property
     def is_paid(self) -> bool:
@@ -256,6 +339,20 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _utc_day_key(now: datetime | None = None) -> str:
+    """Today's UTC calendar day as 'YYYY-MM-DD'.
+
+    GROWTH-TG-QUOTA-PARITY-W1 CH2c. The free lane's daily meter keys on the same shape the paid
+    lane's server-supplied `plan_daily_day` already uses, so a mismatch IS the roll signal and the
+    daily counter needs no reset job, no timer and no cleanup cron.
+
+    A CALENDAR boundary on purpose: unlike the rolling 30-day window — which starts at each user's
+    own first alert and therefore resets on a date nobody can be told in advance — 00:00 UTC can be
+    STATED in the refusal copy. That is what CH3's daily-wall strings say.
+    """
+    return (now or _now()).strftime("%Y-%m-%d")
+
+
 def _parse_ts(raw: str | None) -> datetime | None:
     if not raw:
         return None
@@ -272,6 +369,58 @@ def _parse_ts(raw: str | None) -> datetime | None:
         return None
 
 
+class Ladder(NamedTuple):
+    """The free + starter rungs the meter and the copy serve from, and where they came from."""
+
+    free_monthly: int
+    free_daily: int
+    starter_price_usd: float
+    starter_monthly_calls: int
+    #: 'mirror' = the live ladder signal-MCP published. 'fallback' = the pinned constants, because
+    #: the mirror was absent, stale, or unreadable. Carried so a caller can SAY which it served.
+    source: Literal["mirror", "fallback"]
+
+
+def resolve_ladder(db: Database, now: datetime | None = None) -> Ladder:
+    """The ONE derivation of "what is the free allowance right now?".
+
+    GROWTH-TG-QUOTA-PARITY-W1 CH2b. Reads the mirror written by the entitlement drain and falls
+    back, PER FIELD, to the pinned constants.
+
+    🛑 THE FALLBACK SERVES, IT NEVER REFUSES — the same discipline as `PlanState.INDETERMINATE` on
+    the paid lane. A ladder we could not read is not evidence that a user is out of quota, and
+    walling someone on a failed config read would be the fail-closed mistake this codebase has
+    already paid for once.
+
+    Per-field fallback rather than all-or-nothing: the starter rung feeds COPY and the free rung
+    feeds ENFORCEMENT, so a response that carried the free rung but no starter tier should still
+    move the meter. `parse_ladder` already refuses a payload missing the free rung outright.
+    """
+    row = db.get_free_tier_ladder()
+    if row is None:
+        return Ladder(
+            FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA,
+            STARTER_PRICE_USD, STARTER_MONTHLY_CALLS, "fallback",
+        )
+    fetched = _parse_ts(row["fetched_at"])
+    if fetched is None or ((now or _now()) - fetched) > LADDER_STALE_AFTER:
+        return Ladder(
+            FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA,
+            STARTER_PRICE_USD, STARTER_MONTHLY_CALLS, "fallback",
+        )
+    monthly = row["free_monthly"]
+    daily = row["free_daily"]
+    price = row["starter_price_usd"]
+    calls = row["starter_monthly_calls"]
+    return Ladder(
+        int(monthly) if isinstance(monthly, int) and monthly > 0 else FREE_TIER_MONTHLY_QUOTA,
+        int(daily) if isinstance(daily, int) and daily > 0 else FREE_TIER_DAILY_QUOTA,
+        float(price) if isinstance(price, (int, float)) and price > 0 else STARTER_PRICE_USD,
+        int(calls) if isinstance(calls, int) and calls > 0 else STARTER_MONTHLY_CALLS,
+        "mirror",
+    )
+
+
 def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     """Read the user's current quota state. Auto-rolls expired window.
 
@@ -280,9 +429,15 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     PRICING-BOT-DELIVERY-METERING-W1 that no longer means "served without limit": the paid lane is
     gated by the PLAN mirror instead (see ``plan_state`` / ``exhausted``).
     """
+    ladder = resolve_ladder(db)
     row = db.get_subscriber(chat_id)
     if row is None:
-        return QuotaState(0, FREE_TIER_MONTHLY_QUOTA, None, 0.0, linked_tier=None)
+        return QuotaState(
+            0, ladder.free_monthly, None, 0.0, linked_tier=None,
+            day_total=ladder.free_daily,
+            starter_price_usd=ladder.starter_price_usd,
+            starter_monthly_calls=ladder.starter_monthly_calls,
+        )
 
     used = int(row["alert_count"] or 0)
     window_start = _parse_ts(row["alerts_window_start"])
@@ -308,13 +463,25 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
                 (chat_id,),
             )
 
-    pct = (used / FREE_TIER_MONTHLY_QUOTA) if FREE_TIER_MONTHLY_QUOTA else 0.0
+    # GROWTH-TG-QUOTA-PARITY-W1 CH2c — the DAILY meter, rolled on READ as well as on write.
+    # Reading a stale day as 0 is what makes the roll free: no cron, no timer, and a subscriber who
+    # was walled yesterday is served today without anything having run overnight.
+    day_key = _utc_day_key()
+    stored_day = _m("alerts_day")
+    day_used = int(_m("alerts_day_count") or 0) if stored_day == day_key else 0
+
+    pct = (used / ladder.free_monthly) if ladder.free_monthly else 0.0
     return QuotaState(
         used,
-        FREE_TIER_MONTHLY_QUOTA,
+        ladder.free_monthly,
         window_start,
         pct,
         linked_tier=linked_tier,
+        day_used=day_used,
+        day_total=ladder.free_daily,
+        quota_day_notice_day=_m("quota_day_notice_day"),
+        starter_price_usd=ladder.starter_price_usd,
+        starter_monthly_calls=ladder.starter_monthly_calls,
         quota_75_last_fired_at=last_75,
         quota_90_last_fired_at=last_90,
         quota_100_last_fired_at=last_100,
@@ -365,7 +532,10 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
     if bonus > 0:
         # TG-REFERRAL-W1: fill the monthly free headroom first, then draw any
         # overflow from the referee bonus pool (persistent; not window-reset).
-        headroom = max(0, FREE_TIER_MONTHLY_QUOTA - state.used)
+        # GROWTH-TG-QUOTA-PARITY-W1: headroom is measured against `state.total` — the LADDER's
+        # figure — not against the module constant. The constant is now only a fallback, and
+        # reading it here would have quietly re-pinned the bonus maths to 200 forever.
+        headroom = max(0, state.total - state.used)
         monthly_charge = min(units, headroom)
         new_used = state.used + monthly_charge
         new_bonus = max(0, bonus - (units - monthly_charge))
@@ -373,27 +543,37 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
         # byte-identical to the pre-bonus meter for the (today: 100%) bonus-free base
         new_used = state.used + units
         new_bonus = 0
+    # GROWTH-TG-QUOTA-PARITY-W1 CH2c — the DAILY meter ticks for EVERY consumed unit, bonus-drawn
+    # units included. The bonus is extra budget; it is not a pass on pacing.
+    day_key = _utc_day_key()
+    new_day_used = (state.day_used if state.day_used else 0) + units
     with db._cursor() as cur:
         if state.window_start is None:
             window_start = _now()
             cur.execute(
                 "UPDATE subscribers SET alert_count = ?, alerts_window_start = ?, "
-                "referral_bonus_remaining = ? WHERE chat_id = ?",
-                (new_used, window_start.isoformat(), new_bonus, chat_id),
+                "referral_bonus_remaining = ?, alerts_day_count = ?, alerts_day = ? "
+                "WHERE chat_id = ?",
+                (new_used, window_start.isoformat(), new_bonus, new_day_used, day_key, chat_id),
             )
         else:
             window_start = state.window_start
             cur.execute(
-                "UPDATE subscribers SET alert_count = ?, referral_bonus_remaining = ? "
-                "WHERE chat_id = ?",
-                (new_used, new_bonus, chat_id),
+                "UPDATE subscribers SET alert_count = ?, referral_bonus_remaining = ?, "
+                "alerts_day_count = ?, alerts_day = ? WHERE chat_id = ?",
+                (new_used, new_bonus, new_day_used, day_key, chat_id),
             )
     return QuotaState(
         new_used,
-        FREE_TIER_MONTHLY_QUOTA,
+        state.total,
         window_start,
-        new_used / FREE_TIER_MONTHLY_QUOTA,
+        (new_used / state.total) if state.total else 0.0,
         referral_bonus_remaining=new_bonus,
+        day_used=new_day_used,
+        day_total=state.day_total,
+        quota_day_notice_day=state.quota_day_notice_day,
+        starter_price_usd=state.starter_price_usd,
+        starter_monthly_calls=state.starter_monthly_calls,
     )
 
 
@@ -505,6 +685,14 @@ class QuotaDecision:
     allowed: bool
     state: QuotaState
     notify: bool
+    # GROWTH-TG-QUOTA-PARITY-W1 CH2d — WHICH free-lane meter refused ('monthly' | 'daily'), or
+    # None when nothing did or the subscriber is on the paid lane. Projected from
+    # `QuotaState.limit_kind`, never re-decided: `build_refusal_text` reads this to pick the copy,
+    # so the wall a user is TOLD about is by construction the wall that actually stopped them.
+    #
+    # Defaulted so every existing positional construction in the suite keeps working, for the same
+    # reason QuotaState's fields are defaulted.
+    limit_kind: Literal["monthly", "daily"] | None = None
 
 
 def _notice_due(state: QuotaState) -> bool:
@@ -539,10 +727,25 @@ def _notice_due(state: QuotaState) -> bool:
         # Walled with no limit_kind: we cannot scope an episode, so announce once ever rather
         # than risk a loop.
         return state.quota_100_last_fired_at is None
-    if state.window_start is None:
-        return False  # never consumed anything ⇒ cannot be exhausted
-    last = state.quota_100_last_fired_at
-    return last is None or last < state.window_start
+    # GROWTH-TG-QUOTA-PARITY-W1 CH2e — the FREE lane now walls on TWO clocks, so it needs two
+    # episode keys, exactly as the paid lane above already does.
+    #
+    # 🛑 The daily branch MUST NOT reuse `quota_100_last_fired_at`. That stamp is scoped to a
+    # 30-day window; the daily wall re-arms every UTC day. Reusing it announces the daily wall at
+    # most ONCE EVER — the user hits it again on day 2 and hears nothing. Same string-compare
+    # shape as the paid `daily` branch, against the free lane's own `quota_day_notice_day`.
+    #
+    # Ordering mirrors `limit_kind`: monthly first, so a user out of both is told about the wall
+    # with the longer horizon rather than the one that resets tonight.
+    if state.monthly_exhausted:
+        if state.window_start is None:
+            return False  # never consumed anything ⇒ cannot be exhausted
+        last = state.quota_100_last_fired_at
+        return last is None or last < state.window_start
+    if state.daily_exhausted:
+        today = _utc_day_key()
+        return state.quota_day_notice_day != today
+    return False
 
 
 def evaluate_delivery(db: Database, chat_id: int) -> QuotaDecision:
@@ -566,6 +769,8 @@ def evaluate_delivery(db: Database, chat_id: int) -> QuotaDecision:
         allowed=not exhausted,
         state=state,
         notify=exhausted and _notice_due(state),
+        # CH2d — projected from the state's single derivation, never re-decided downstream.
+        limit_kind=state.limit_kind,
     )
 
 
@@ -597,6 +802,22 @@ def build_refusal_text(db: Database, chat_id: int, state: QuotaState) -> str:
     resets_at = None
     if state.window_start is not None:
         resets_at = (state.window_start + WINDOW).strftime("%d %b %Y")
+
+    # GROWTH-TG-QUOTA-PARITY-W1 CH3 — the level is PROJECTED from `state.limit_kind`, the single
+    # derivation `evaluate_delivery` already made. The copy layer never re-decides which wall was
+    # hit: two independent derivations of one classification drift to contradiction, and here the
+    # contradiction would be telling a user to wait 30 days when what stopped them resets at
+    # midnight. `daily_block` renders the DAILY numerator/denominator for the same reason.
+    if state.limit_kind == "daily":
+        return format_paywall_body(
+            "daily_block",
+            state.day_used,
+            state.day_total,
+            signup_url("quota_exhausted_push", src),
+            lang_code,
+            starter_price_usd=state.starter_price_usd,
+            starter_monthly_calls=state.starter_monthly_calls,
+        )
     return format_paywall_body(
         "block",
         state.used,
@@ -604,6 +825,8 @@ def build_refusal_text(db: Database, chat_id: int, state: QuotaState) -> str:
         signup_url("quota_exhausted_push", src),
         lang_code,
         resets_at=resets_at,
+        starter_price_usd=state.starter_price_usd,
+        starter_monthly_calls=state.starter_monthly_calls,
     )
 
 
@@ -722,8 +945,23 @@ async def refuse_and_notify(
                 # ``quota_notices_fired``, preserved here).
                 # Stamp the episode key this wall actually belongs to. The daily wall re-arms
                 # every UTC day, so it carries its own stamp — see `_notice_due`.
+                # GROWTH-TG-QUOTA-PARITY-W1 CH2e — THREE lanes, three stamps. `_notice_due`
+                # reads a different episode key per lane, so stamping the wrong one is not a
+                # cosmetic slip: it either re-notifies forever or silences the lane for good.
+                #
+                #   paid + daily   -> plan_wall_notice_day     (server's day key)
+                #   FREE + daily   -> quota_day_notice_day     (our UTC day key)   <- NEW
+                #   everything else-> quota_100_last_fired_at  (the monthly episode)
+                #
+                # Without the free-daily branch the daily wall fell through to the MONTHLY stamp,
+                # which `_notice_due`'s daily branch never reads — so the notice would have
+                # re-fired on EVERY dispatch cycle while the user stayed walled, and it would have
+                # corrupted the monthly episode key on the way past. Caught in review, not by a
+                # test: the tests covered the DECISION and not the stamping that follows it.
                 if d.state.is_paid and d.state.plan_limit_kind == "daily" and d.state.plan_daily_day:
                     db.mark_plan_wall_notice_day(chat_id, d.state.plan_daily_day)
+                elif not d.state.is_paid and d.limit_kind == "daily":
+                    db.mark_quota_day_notice(chat_id, _utc_day_key())
                 else:
                     db.mark_quota_cta_fired(chat_id, "100", _now().isoformat())
                 db.record_quota_notice_fired(chat_id)

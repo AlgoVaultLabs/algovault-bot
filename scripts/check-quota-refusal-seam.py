@@ -37,6 +37,12 @@ L3  bot-facing copy states the BOT's unit, never the API's
     (`docs/METERING-DIVERGENCE.md` Rule 1, which failed as prose for its whole life —
      the Completeness Standard requires retiring such a rule into a gate)
 
+L5 (GROWTH-TG-QUOTA-PARITY-W1, 2026-08-27) SUPERSEDES L3's first regex. That leg was
+`\b100\b…\bcalls?\b` — a gate that hard-typed the very number it guarded, so it stopped
+guarding anything the moment the cap moved 100 -> 200. It is DELETED, not updated to 200; L5
+imports its magnitudes from `quota.py` instead. L3's second regex (`\bfree\s+calls?\b`)
+survives untouched: it is value-independent and still correct.
+
 CONTRACT: prints exactly one terminal `QUOTA_REFUSAL_SEAM_VERDICT=PASS|FAIL|
 INDETERMINATE`. Callers gate on the TOKEN, never the exit code. Exit 0=PASS, 1=FAIL,
 3=INDETERMINATE (the token-law default for a NEW gate; `check_test_baseline.sh` keeps
@@ -53,6 +59,16 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "src" / "algovault_bot"
+
+# GROWTH-TG-QUOTA-PARITY-W1 CH3c — L5's banned magnitudes are IMPORTED, never typed.
+# A gate that hand-types the number it guards is the exact bug L5 exists to retire; it must not
+# commit that bug itself. Done at module scope (not inside `load_lanes`) because L5's regex is
+# built at import time.
+sys.path.insert(0, str(REPO / "src"))
+from algovault_bot.quota import (  # noqa: E402
+    FREE_TIER_DAILY_QUOTA,
+    FREE_TIER_MONTHLY_QUOTA,
+)
 SEAM_MODULE = "quota.py"
 REFUSAL_CALL = "refuse_and_notify"
 DECIDE_CALL = "evaluate_delivery"
@@ -67,12 +83,42 @@ DECISION_ATTRS = ("exhausted", "allowed")
 # "100 free calls a month" but NOT "{tier} calls/mo", which correctly names the
 # API ladder for a linked user.
 COPY_BANS = (
-    # the bot's own allowance (100) wearing the API's noun
-    re.compile(r"\b100\b(?!\s*%)[^.\n]{0,24}\bcalls?\b", re.IGNORECASE),
     # ...and the same collision without the literal number ("5 free calls left").
     # "API calls" stays legal: that phrase names the API ladder, which IS in calls.
     re.compile(r"\bfree\s+calls?\b", re.IGNORECASE),
 )
+
+# ── L5: a shipped string may not HAND-TYPE the free allowance ────────────────────────────────
+# GROWTH-TG-QUOTA-PARITY-W1 CH3c.
+#
+# L5 SUPERSEDES L3's first regex, which was `\b100\b…\bcalls?\b` — a gate that hard-typed the
+# very number it guarded. The moment the cap moved 100 → 200 that leg silently stopped guarding
+# anything, which is the defect this leg exists to retire, so it is DELETED above rather than
+# updated to 200. L3's second regex survives untouched: it is value-independent and still correct.
+#
+# NUMERICALLY SELF-UPDATING: the magnitudes are IMPORTED from `quota.py`, never typed here. Move
+# the cap and this leg follows it — that is the whole point.
+#
+# 🛑 THE LOOKAROUNDS ARE LOAD-BEARING. A bare `\b(100|200)\b` is the obvious form and the next
+# reader will "simplify" it back. Do not. Measured 2026-08-27 against the live package:
+#   • `\b` alone FALSE-POSITIVES on the legal paid ladder — `100,000` contains a `\b`-delimited
+#     `100` (a comma is a non-word char), so "Pro gives 100,000 calls a month" would FAIL a gate
+#     on copy this same wave ruled correct. `(?![,\d])` is what rejects it.
+#   • `\b` must nonetheless STAY: it is what keeps the FROZEN identifier `quota_100_last_fired_at`
+#     out, because `_` IS a word char and no boundary exists inside it. A pure `(?<![\d,.])`
+#     form flags that column name in four places.
+# Both properties are required, and neither implies the other.
+_ALLOWANCE_MAGNITUDES = (FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA)
+ALLOWANCE_LITERAL = re.compile(
+    r"(?<![\d,])\b(" + "|".join(str(n) for n in sorted(set(_ALLOWANCE_MAGNITUDES))) + r")\b(?![,\d])"
+)
+# The unit words that make a bare number an ALLOWANCE rather than a version, a port or a price.
+# `hari`/`次`/`额度`/`每月`/`每日` were added after the original list let `referral.py`'s Indonesian
+# and Chinese strings through — the id/zh copy does not use the same nouns the en copy does.
+ALLOWANCE_CONTEXT = re.compile(
+    r"alert|call|quota|month|day|bulan|hari|提醒|条|次|额度|每月|每日", re.IGNORECASE
+)
+ALLOWANCE_WINDOW = 40
 # Scanned STRUCTURALLY — every module in the package, never a hand-listed subset.
 # A maintained allowlist is the shape `verification-gates.md` warns about, and it
 # already failed here once: the first cut listed messages/handlers/cta and was
@@ -250,6 +296,15 @@ def scan_copy(pkg_dir: Path) -> list[str]:
                     f"unit ('calls') — METERING-DIVERGENCE Rule 1: "
                     f"{n.value.strip()[:70]}"
                 )
+            for m in ALLOWANCE_LITERAL.finditer(n.value):
+                lo = max(0, m.start() - ALLOWANCE_WINDOW)
+                if ALLOWANCE_CONTEXT.search(n.value[lo : m.end() + ALLOWANCE_WINDOW]):
+                    out.append(
+                        f"L5 {name}:{n.lineno} hand-types the free allowance "
+                        f"({m.group(0)}) — it comes from QuotaState, never a literal: "
+                        f"{n.value.strip()[:70]}"
+                    )
+                    break
     return out
 
 

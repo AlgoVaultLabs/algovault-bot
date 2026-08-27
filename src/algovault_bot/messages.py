@@ -51,12 +51,35 @@ def signup_url(campaign: str, source: str | None = None) -> str:
 # TG-COPY-DEFAULTS-VENUES-W1 (R1): plain-language onboarding, PLAIN TEXT (no HTML tags;
 # handle_start sends without parse_mode so the plain domain auto-links). The clickable
 # Upgrade CTA moved to /help (byte-identical URL); /start is link-light by design.
-WELCOME_MESSAGE: Final = (
+def _usd(amount: float) -> str:
+    """`$9.99` / `$49` — a price as it renders in copy, trailing `.00` never emitted.
+
+    Mirrors signal-MCP's `plans.ts::planPriceLabel` so the same number renders identically on both
+    sides of the estate. GROWTH-TG-QUOTA-PARITY-W1 CH3b-2.
+    """
+    return f"${amount:.2f}".rstrip("0").rstrip(".") if amount % 1 else f"${int(amount)}"
+
+
+def welcome_message(
+    monthly_total: int,
+    daily_total: int,
+    starter_price_usd: float,
+    starter_monthly_calls: int,
+) -> str:
+    """GROWTH-TG-QUOTA-PARITY-W1 CH3a — a FUNCTION, because a constant cannot interpolate.
+
+    Every figure below arrives from the caller's `QuotaState`, which projects the ladder mirror.
+    It was a module-level `Final` holding the allowance as a literal, bound to `quota.py` by
+    nothing at all — which is precisely the defect this wave exists to retire. Gate leg L5 now
+    makes the literal form unwritable, so this cannot regress quietly.
+    """
+    return (
     "👋 Welcome to AlgoVault, the brain layer for AI trading agents.\n"
     "\n"
     "I watch the markets for you and message you the moment something changes.\n"
     "\n"
-    "You get 100 free alerts a month. Each alert I send uses one. Silent HOLDs are always free.\n"
+    f"You get {monthly_total} free alerts a month, up to {daily_total} a day. "
+    "Each alert I send uses one. Silent HOLDs are always free.\n"
     "\n"
     "Two kinds of alerts:\n"
     "📊 Regime: the market's mood flips (trending, ranging, or wild)\n"
@@ -75,15 +98,19 @@ WELCOME_MESSAGE: Final = (
     "❓ Every command → /help\n"
     "✅ Live, on-chain-verified results → algovault.com/track-record\n"
     "\n"
-    "Free: 100 alerts/month here. Want more? Starter is $9.99/mo or $39.90/6mo for 10,000 API "
+    f"Free: {monthly_total} alerts/month, {daily_total}/day. Want more? Starter is "
+    f"{_usd(starter_price_usd)}/mo or $39.90/6mo for {starter_monthly_calls:,} API "
     "calls/mo, or pay per call with x402."
-)
+    )
 
 
 # TG-COPY-DEFAULTS-VENUES-W1 (R2): plain-language full guide, PLAIN TEXT (sent without
 # parse_mode by _help, so <coin>/<timeframe> render literally). Upgrade URL byte-identical
 # via signup_url('help_message'). 12 venues listed.
-HELP_MESSAGE: Final = (
+def help_message(monthly_total: int, daily_total: int) -> str:
+    """GROWTH-TG-QUOTA-PARITY-W1 CH3a — see `welcome_message` for why this stopped being a
+    constant."""
+    return (
     "📖 AlgoVault — full command guide\n"
     "\n"
     "I send you alerts when the market changes. You pick the coins, timeframes, and alert type.\n"
@@ -138,12 +165,13 @@ HELP_MESSAGE: Final = (
     "   /watch BTC,ETH,SOL 15m    three coins at once\n"
     "   /unwatch BTC all          remove every BTC watch\n"
     "\n"
-    "Free tier: 100 alerts a month. Regime and BUY/SELL alerts each use one. Silent HOLDs are free.\n"
+    f"Free tier: {monthly_total} alerts a month, up to {daily_total} a day. "
+    "Regime and BUY/SELL alerts each use one. Silent HOLDs are free.\n"
     "Informational analytics, not financial advice.\n"
     # TG-SCANWATCH-TF-CADENCE-W1 (B): CTA lead-in → the inline Upgrade button renders below
     # (attached as reply_markup by _help); the raw signup URL line is gone.
-    "Need more than 100 alerts a month?"
-)
+    f"Need more than {monthly_total} alerts a month?"
+    )
 
 
 def cap_reached_message(cap: int = 50) -> str:
@@ -186,6 +214,7 @@ def format_subscription_confirmation(
     exchange: str,
     mode: str | None = None,
     cadence: str | None = None,
+    monthly_total: int,
     lang: str = "en",
 ) -> str:
     """Persistent confirmation card for a recurring subscribe. `kind` ∈ {watch, scanwatch}."""
@@ -195,7 +224,7 @@ def format_subscription_confirmation(
         return (
             "✅ You're now watching\n"
             f"{coin} · {tf} · {exch} · {mode_label}\n"
-            "📊 Regime + 📈 BUY/SELL alerts both count toward your 100/mo\n"
+            f"📊 Regime + 📈 BUY/SELL alerts both count toward your {monthly_total}/mo\n"
             "Manage: /list · /unwatch"
         )
     if kind == "scanwatch":
@@ -203,7 +232,8 @@ def format_subscription_confirmation(
         return (
             f"✅ Standing scan: top {top_n} · {tf} · {exch}\n"
             f"🔁 I'll re-check every {tf} and message only NEW BUY/SELL — repeats + HOLD rounds stay silent + free.\n"
-            "📈 Actionable digests count toward your 100 alerts/mo. Manage: /list · /unscanwatch"
+            f"📈 Actionable digests count toward your {monthly_total} alerts/mo. "
+            "Manage: /list · /unscanwatch"
         )
     raise ValueError(f"unknown subscription kind: {kind!r}")
 
@@ -303,10 +333,12 @@ def batch_watch_added_message(
     )
 
 
-def batch_confirm_message(n_combos: int, n_coins: int, n_tfs: int, n_exch: int) -> str:
+def batch_confirm_message(
+    n_combos: int, n_coins: int, n_tfs: int, n_exch: int, monthly_total: int
+) -> str:
     return (
         f"⚠️ That's {n_combos} combos ({n_coins} coins × {n_tfs} TFs × {n_exch} exchanges) "
-        f"→ expect a lot of alerts and your 100 free alerts/month can go fast. "
+        f"→ expect a lot of alerts and your {monthly_total} free alerts/month can go fast. "
         f"Add all, or start with the Top {DEFAULT_TOP_N} most-active?"
     )
 
@@ -423,10 +455,10 @@ def symbol_unknown_message(coin: str, exchange: str) -> str:
 # replacement dict unwritable.
 
 
-def link_first_time_message(tier: str) -> str:
+def link_first_time_message(tier: str, monthly_total: int) -> str:
     return (
         f"✅ Linked! Your AlgoVault {tier} subscription is connected to this Telegram chat.\n"
-        "Alerts here now draw down your plan allowance instead of the free 100/mo cap."
+        f"Alerts here now draw down your plan allowance instead of the free {monthly_total}/mo cap."
     )
 
 
@@ -456,7 +488,9 @@ def link_invalid_key_message() -> str:
     )
 
 
-def link_downgraded_message(lang_code: str | None = None) -> str:
+def link_downgraded_message(
+    monthly_total: int, daily_total: int, lang_code: str | None = None
+) -> str:
     """OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice.
 
     RATIFIED BY THE ARCHITECT 2026-08-21 — approved as-is, and the EN string was verified
@@ -478,17 +512,20 @@ def link_downgraded_message(lang_code: str | None = None) -> str:
     if lang == "id":
         return (
             "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
-            "tier gratis (100 alert/bulan). Watchlist Anda tidak berubah. "
+            f"tier gratis ({monthly_total} alert/bulan, {daily_total}/hari). "
+            "Watchlist Anda tidak berubah. "
             f"Aktifkan kembali kapan saja: {url}"
         )
     if lang == "zh-hans":
         return (
-            "你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 100 条提醒）。"
+            f"你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 {monthly_total} 条提醒，"
+            f"每日 {daily_total} 条）。"
             f"你的自选列表未受影响。随时可重新订阅：{url}"
         )
     return (
         "Your AlgoVault subscription no longer appears active, so this chat has moved back "
-        "to the free tier (100 alerts/month). Your watchlist is unchanged. "
+        f"to the free tier ({monthly_total} alerts/month, {daily_total}/day). "
+        "Your watchlist is unchanged. "
         f"Reactivate any time: {url}"
     )
 

@@ -5,7 +5,24 @@ from telegram.ext import CallbackQueryHandler
 
 from algovault_bot import keyboards
 from algovault_bot.handlers import register_handlers
-from algovault_bot.messages import WELCOME_MESSAGE
+from algovault_bot.messages import help_message, welcome_message
+from algovault_bot.quota import (
+    FREE_TIER_DAILY_QUOTA,
+    FREE_TIER_MONTHLY_QUOTA,
+    STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_USD,
+)
+
+# GROWTH-TG-QUOTA-PARITY-W1 CH3: WELCOME_MESSAGE / HELP_MESSAGE became FUNCTIONS — a constant
+# cannot interpolate the ladder. Rendered here at the pinned defaults so every assertion below is
+# unchanged: what is being tested is the COPY, not the numbers, and the numbers have their own
+# tests in test_quota_daily_cap.py / test_ladder_client.py.
+_LADDER = (
+    FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, STARTER_PRICE_USD, STARTER_MONTHLY_CALLS,
+)
+WELCOME_MESSAGE = welcome_message(*_LADDER)
+HELP_MESSAGE = help_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA)
+
 
 
 class _CapturingApp:

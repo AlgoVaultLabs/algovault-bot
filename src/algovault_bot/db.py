@@ -306,6 +306,48 @@ LINK_LIFECYCLE_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN link_downgrade_notice_at TIMESTAMP",
 )
 
+# GROWTH-TG-QUOTA-PARITY-W1 CH2 (2026-08-27) — the DAILY free meter + the LADDER MIRROR.
+#
+# A NEW tuple, never an edit to an existing one: the tuples above are applied to live databases
+# and editing one changes what a replayed migration means on a box that already ran it.
+#
+# ── The three subscriber columns (2c) ────────────────────────────────────────────────────────
+# The free lane metered MONTHLY only. It now meters monthly AND daily, and a call is refused when
+# EITHER is exhausted — two real caps, not a cap and a sub-limit.
+#   `alerts_day_count`      alerts delivered in the CURRENT UTC day
+#   `alerts_day`            that day's UTC key, 'YYYY-MM-DD'. A mismatch IS the roll signal, so
+#                           there is no reset job and no timer — the same self-cleaning shape the
+#                           paid lane's `plan_daily_day` already uses.
+#   `quota_day_notice_day`  UTC date of the last DAILY-wall notice.
+#
+# 🛑 `quota_day_notice_day` MUST NOT be collapsed into `quota_100_last_fired_at`. The monthly stamp
+# is scoped to a 30-day window; the daily wall re-arms every UTC day. Reusing it would announce the
+# daily wall at most ONCE EVER — the user hits it again on day 2 and hears nothing, which is the
+# silent-refusal population BOT-QUOTA-REFUSAL-SEAM-W1 found refused ~10,000 times.
+#
+# ── The ladder mirror (2a + 3b-2) ────────────────────────────────────────────────────────────
+# A single row holding signal-MCP's published ladder, refreshed by the EXISTING entitlement drain.
+# It carries the free rung AND the starter rung because BOTH are hand-typed in shipped copy today
+# and both arrive in the SAME response — one read, one table, one fallback path. Shipping the free
+# rung now and widening for the price later would be two migrations for one need.
+#
+# `CHECK (id = 1)` is the single-row guard. Without it a retried write can mint a second row and
+# the read silently becomes ordering-dependent — a load-bearing property rented from SQLite's row
+# order, which is exactly what `build-and-runtime.md` forbids.
+QUOTA_PARITY_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN alerts_day_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subscribers ADD COLUMN alerts_day TEXT",
+    "ALTER TABLE subscribers ADD COLUMN quota_day_notice_day TEXT",
+    "CREATE TABLE IF NOT EXISTS free_tier_ladder ("
+    "  id                    INTEGER PRIMARY KEY CHECK (id = 1),"
+    "  free_monthly          INTEGER,"
+    "  free_daily            INTEGER,"
+    "  starter_price_usd     REAL,"
+    "  starter_monthly_calls INTEGER,"
+    "  fetched_at            TIMESTAMP"
+    ")",
+)
+
 # PRICING-BOT-DELIVERY-METERING-W1 CH4a — the DEBIT OUTBOX.
 #
 # A delivery must never be blocked, delayed or lost by a metering call. The recorder enqueues here
@@ -601,6 +643,8 @@ class Database:
                 # stamped by the plan mirror's existing as_of.
                 *LINKED_TIER_MIRROR_MIGRATIONS,
                 *LINK_LIFECYCLE_MIGRATIONS,
+                # GROWTH-TG-QUOTA-PARITY-W1 (2026-08-27): daily free meter + ladder mirror.
+                *QUOTA_PARITY_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1573,6 +1617,67 @@ class Database:
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE subscribers SET plan_wall_notice_day = ? WHERE chat_id = ?", (day, chat_id)
+            )
+
+    # ── GROWTH-TG-QUOTA-PARITY-W1 CH2: the FREE lane's daily wall + the ladder mirror ──
+
+    def mark_quota_day_notice(self, chat_id: int, day: str) -> None:
+        """Stamp the FREE lane's DAILY-wall episode key.
+
+        The free-lane sibling of `mark_plan_wall_notice_day`, and separate from it for the same
+        reason that one is separate from `quota_100_last_fired_at`: three lanes wall on three
+        clocks, so they need three stamps. Collapsing any pair silences a lane.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE subscribers SET quota_day_notice_day = ? WHERE chat_id = ?",
+                (day, chat_id),
+            )
+
+    def get_free_tier_ladder(self) -> sqlite3.Row | None:
+        """The mirrored ladder row, or None when it has never been fetched.
+
+        None is a FACT, not an error: on a box that has not yet run a drain since the migration
+        there is genuinely no mirror, and the caller serves the pinned fallbacks. It never refuses.
+        """
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    "SELECT free_monthly, free_daily, starter_price_usd, starter_monthly_calls, "
+                    "fetched_at FROM free_tier_ladder WHERE id = 1"
+                )
+            except sqlite3.OperationalError:
+                # A DB that predates the migration. Same tolerance as the per-row mirror columns.
+                return None
+            return cur.fetchone()
+
+    def upsert_free_tier_ladder(
+        self,
+        free_monthly: int,
+        free_daily: int,
+        starter_price_usd: float | None,
+        starter_monthly_calls: int | None,
+        fetched_at: str,
+    ) -> None:
+        """Replace the single mirror row. `id = 1` is pinned by the table's own CHECK."""
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO free_tier_ladder "
+                "(id, free_monthly, free_daily, starter_price_usd, starter_monthly_calls, fetched_at) "
+                "VALUES (1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "  free_monthly = excluded.free_monthly,"
+                "  free_daily = excluded.free_daily,"
+                "  starter_price_usd = excluded.starter_price_usd,"
+                "  starter_monthly_calls = excluded.starter_monthly_calls,"
+                "  fetched_at = excluded.fetched_at",
+                (
+                    free_monthly,
+                    free_daily,
+                    starter_price_usd,
+                    starter_monthly_calls,
+                    fetched_at,
+                ),
             )
 
     # ── BOT-ZOMBIE-W1: bot-blocked subscriber bookkeeping ────────────

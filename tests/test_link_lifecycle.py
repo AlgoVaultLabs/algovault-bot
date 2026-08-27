@@ -14,6 +14,8 @@ lapsed customer a few days longer. Only one of those is worth avoiding.
 
 from __future__ import annotations
 
+from algovault_bot.quota import FREE_TIER_DAILY_QUOTA, FREE_TIER_MONTHLY_QUOTA
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -209,7 +211,7 @@ def test_73h_of_sustained_invalidity_DOES_downgrade(db: Database) -> None:
 
 
 def test_the_downgraded_subscriber_becomes_a_NORMAL_FREE_USER(db: Database) -> None:
-    from algovault_bot.quota import get_quota_state
+    from algovault_bot.quota import FREE_TIER_MONTHLY_QUOTA, get_quota_state
 
     _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
     _age_the_streak(db, 3, hours=73.0)
@@ -218,7 +220,9 @@ def test_the_downgraded_subscriber_becomes_a_NORMAL_FREE_USER(db: Database) -> N
     state = get_quota_state(db, 3)
     assert state.is_paid is False
     assert state.effective_tier == (None, "unknown")
-    assert state.total == 100, "back on the free 100/mo meter"
+    # GROWTH-TG-QUOTA-PARITY-W1: the CONSTANT, not a literal. The assertion is "this chat is
+    # back on the FREE meter", which is a statement about WHICH meter, never about its value.
+    assert state.total == FREE_TIER_MONTHLY_QUOTA, "back on the free monthly meter"
 
 
 def test_a_stale_streak_cannot_survive_an_unlink_into_the_NEXT_link(db: Database) -> None:
@@ -345,9 +349,12 @@ def test_the_notice_carries_the_RATIFIED_english_string_verbatim() -> None:
     ratification, so it must fail here rather than ship quietly."""
     from algovault_bot.messages import link_downgraded_message, signup_url
 
-    assert link_downgraded_message("en") == (
+    # GROWTH-TG-QUOTA-PARITY-W1 CH3: the ratified wording gained the daily figure and both
+    # numbers now interpolate. Still pinned verbatim — a wording change must still fail here.
+    assert link_downgraded_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, "en") == (
         "Your AlgoVault subscription no longer appears active, so this chat has moved back "
-        "to the free tier (100 alerts/month). Your watchlist is unchanged. "
+        f"to the free tier ({FREE_TIER_MONTHLY_QUOTA} alerts/month, {FREE_TIER_DAILY_QUOTA}/day). "
+        "Your watchlist is unchanged. "
         "Reactivate any time: " + signup_url("link_downgraded")
     )
 
@@ -411,13 +418,16 @@ def test_the_send_helper_refuses_rather_than_raising(db: Database) -> None:
     """`_send_downgrade_notice` is called from a cron loop. It must never raise, even with
     no bot token, no network and no Telegram stack available."""
     with patch("algovault_bot.broadcast.sendDM", side_effect=RuntimeError("no token")):
-        assert entitlement_drain._send_downgrade_notice(3, "en", db.path) is False
+        assert entitlement_drain._send_downgrade_notice(3, "en", db.path, db) is False
 
 
 def test_the_notice_copy_is_trilingual_and_within_300_chars() -> None:
     from algovault_bot.messages import link_downgraded_message
 
-    rendered = {lang: link_downgraded_message(lang) for lang in (None, "en", "id", "zh-Hans")}
+    rendered = {
+        lang: link_downgraded_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, lang)
+        for lang in (None, "en", "id", "zh-Hans")
+    }
     for lang, body in rendered.items():
         assert len(body) <= 300, f"{lang} exceeds 300 chars"
         assert "algovault.com/signup" in body, "one action, and it must be reactivation"

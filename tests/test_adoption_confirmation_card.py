@@ -8,16 +8,21 @@ reply_text) is verified live at deploy."""
 from __future__ import annotations
 
 from algovault_bot import adoption, handlers, messages
+from algovault_bot.quota import (
+    FREE_TIER_MONTHLY_QUOTA,
+)
+
 
 
 def test_scanwatch_button_card_is_byte_identical_to_typed_renderer() -> None:
-    card = handlers.adoption_scanwatch_confirmation_card()
+    card = handlers.adoption_scanwatch_confirmation_card(FREE_TIER_MONTHLY_QUOTA)
     assert card == messages.format_subscription_confirmation(
         "scanwatch",
         top_n=adoption.SCANWATCH_DEFAULT_TOP_N,
         tf=adoption.SCANWATCH_DEFAULT_TF,
         exchange=adoption.SCANWATCH_DEFAULT_EXCHANGE,
         cadence=adoption.SCANWATCH_DEFAULT_CADENCE,
+        monthly_total=FREE_TIER_MONTHLY_QUOTA,
     )
     # content anchors: the durable message states the real re-check cadence (the TF)
     assert f"top {adoption.SCANWATCH_DEFAULT_TOP_N}" in card
@@ -27,16 +32,17 @@ def test_scanwatch_button_card_is_byte_identical_to_typed_renderer() -> None:
 
 def test_watch_button_card_is_byte_identical_to_typed_renderer() -> None:
     data = adoption.build_watch_callback("ETH", "4h", "BYBIT", adoption.SOURCE_DIGEST)
-    card = handlers.adoption_watch_confirmation_card(data)
+    card = handlers.adoption_watch_confirmation_card(data, FREE_TIER_MONTHLY_QUOTA)
     assert card == messages.format_subscription_confirmation(
-        "watch", coin="ETH", tf="4h", exchange="BYBIT", mode=handlers.DEFAULT_ALERT_TYPE
+        "watch", coin="ETH", tf="4h", exchange="BYBIT", mode=handlers.DEFAULT_ALERT_TYPE,
+        monthly_total=FREE_TIER_MONTHLY_QUOTA,
     )
     assert "ETH · 4h · BYBIT" in card and "/unwatch" in card
 
 
 def test_watch_button_card_none_on_malformed_payload() -> None:
     # symmetric with handle_adoption_watch_tap → no card sent when nothing was created
-    assert handlers.adoption_watch_confirmation_card("wb:bogus") is None
+    assert handlers.adoption_watch_confirmation_card("wb:bogus", FREE_TIER_MONTHLY_QUOTA) is None
 
 
 def test_scanwatch_toast_states_the_timeframe_not_the_vestigial_cadence(tmp_db) -> None:

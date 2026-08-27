@@ -15,4 +15,36 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 echo "[pre-push] running lint + type checks (ruff + mypy)…"
-exec bash "$ROOT/scripts/lint.sh"
+bash "$ROOT/scripts/lint.sh"
+
+# GROWTH-TG-QUOTA-PARITY-W1 CH3d — the quota-refusal seam gate.
+#
+# `scripts/lint.sh` runs ruff + mypy only, so until this wave the seam gate (and now its L5
+# hand-typed-allowance leg) was caught by CI alone — i.e. AFTER the push that broke it.
+#
+# 🛑 GATES ON THE TOKEN, NEVER THE EXIT CODE. `verification-gates.md`: a guard with a fail-open
+# branch prints exactly one terminal `<GATE>_VERDICT=` line and callers read THAT. Reading `$?`
+# here would let a broken interpreter (exit != 0, no verdict) read as a policy failure, and a
+# fail-open exit 0 read as a pass.
+#
+# INDETERMINATE does not block: it means the gate could not evaluate, which is not evidence that
+# the tree is bad, and blocking every push on our own tooling breakage is the fleet-wedge this
+# repo has already paid for. It is LOUD instead.
+echo "[pre-push] running quota-refusal seam gate…"
+SEAM_PY="${ALGOVAULT_PY:-python3}"
+[ -x "$ROOT/.venv/bin/python" ] && SEAM_PY="$ROOT/.venv/bin/python"
+SEAM_OUT="$("$SEAM_PY" "$ROOT/scripts/check-quota-refusal-seam.py" 2>&1)"
+SEAM_VERDICT="$(printf '%s\n' "$SEAM_OUT" | grep -oE '^QUOTA_REFUSAL_SEAM_VERDICT=[A-Z]+' | tail -1)"
+case "$SEAM_VERDICT" in
+  QUOTA_REFUSAL_SEAM_VERDICT=PASS)
+    echo "[pre-push] $SEAM_VERDICT" ;;
+  QUOTA_REFUSAL_SEAM_VERDICT=FAIL)
+    printf '%s\n' "$SEAM_OUT"
+    echo "[pre-push] $SEAM_VERDICT — push refused." >&2
+    exit 1 ;;
+  *)
+    printf '%s\n' "$SEAM_OUT" >&2
+    echo "[pre-push] seam gate emitted no verdict (INDETERMINATE) — NOT blocking, but it verified nothing." >&2 ;;
+esac
+
+echo "✓ pre-push checks passed"

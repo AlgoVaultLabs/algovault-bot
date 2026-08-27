@@ -20,6 +20,8 @@ import pytest
 from algovault_bot.alert_engine import WatchRow, format_trade_call_alert
 from algovault_bot.db import Database
 from algovault_bot.quota import (
+    FREE_TIER_DAILY_QUOTA,
+    FREE_TIER_MONTHLY_QUOTA,
     PAID_TIERS,
     PLAN_MIRROR_STALE_AFTER,
     QuotaState,
@@ -210,10 +212,15 @@ def test_free_tier_row_is_untouched_by_the_mirror(tmp_db: Database) -> None:
     assert state.is_paid is False
     assert state.linked_tier is None
     assert state.plan_tier is None
-    assert state.total == 100
+    # GROWTH-TG-QUOTA-PARITY-W1: asserted against the CONSTANT, not a literal. These lines
+    # hard-typed 100 and broke the moment the cap moved — which is the same defect, in a test,
+    # that the wave is retiring in the shipped copy. A literal here would only reschedule it.
+    assert state.total == FREE_TIER_MONTHLY_QUOTA
     assert state.used == 0
-    assert state.remaining == 100
+    assert state.remaining == FREE_TIER_MONTHLY_QUOTA
     assert state.exhausted is False
+    assert state.day_total == FREE_TIER_DAILY_QUOTA
+    assert state.day_used == 0
 
 
 def test_free_tier_arithmetic_is_byte_identical_across_the_meter(
@@ -228,17 +235,23 @@ def test_free_tier_arithmetic_is_byte_identical_across_the_meter(
     from algovault_bot.quota import consume_quota
 
     tmp_db.upsert_subscriber(10, "freeuser", "en")
+    N = FREE_TIER_MONTHLY_QUOTA
     observed = []
-    for _ in range(100):
+    for _ in range(N):
         consume_quota(tmp_db, 10)
         s = get_quota_state(tmp_db, 10)
-        observed.append((s.used, s.total, s.remaining, s.exhausted, s.is_paid))
+        observed.append((s.used, s.total, s.remaining, s.monthly_exhausted, s.is_paid))
 
-    assert observed[0] == (1, 100, 99, False, False)
-    assert observed[49] == (50, 100, 50, False, False)
-    assert observed[98] == (99, 100, 1, False, False)
-    assert observed[99] == (100, 100, 0, True, False)
-    assert all(t == 100 for (_u, t, _r, _e, _p) in observed)
+    # GROWTH-TG-QUOTA-PARITY-W1: walked over the CONSTANT, so the ladder is re-walked at whatever
+    # the cap becomes. The boundary column now reads `monthly_exhausted`, not `exhausted`: the
+    # free lane gained a SECOND cap this wave, and `exhausted` is monthly-OR-daily. Asserting the
+    # combined predicate here would be testing the daily meter inside a test named for the
+    # monthly one — the daily cap has its own tests in test_quota_daily_cap.py.
+    assert observed[0] == (1, N, N - 1, False, False)
+    assert observed[N // 2 - 1] == (N // 2, N, N - N // 2, False, False)
+    assert observed[N - 2] == (N - 1, N, 1, False, False)
+    assert observed[N - 1] == (N, N, 0, True, False)
+    assert all(t == N for (_u, t, _r, _e, _p) in observed)
     assert all(p is False for (*_rest, p) in observed)
     assert all(
         get_quota_state(tmp_db, 10).effective_tier == (None, "unknown") for _ in range(1)
@@ -249,7 +262,10 @@ def test_free_tier_pct_used_ladder_is_unmoved(tmp_db: Database) -> None:
     from algovault_bot.quota import consume_quota
 
     tmp_db.upsert_subscriber(11, "freeuser", "en")
-    for _ in range(75):
+    # GROWTH-TG-QUOTA-PARITY-W1: the ASSERTION is that pct_used is used/total. Consuming a literal
+    # 75 only equalled 0.75 while the cap happened to be 100; three-quarters of the CURRENT cap is
+    # what the test was always about.
+    for _ in range(FREE_TIER_MONTHLY_QUOTA * 3 // 4):
         consume_quota(tmp_db, 11)
     assert get_quota_state(tmp_db, 11).pct_used == pytest.approx(0.75)
 
@@ -265,7 +281,9 @@ def test_a_free_subscriber_never_gets_a_tier_badge(tmp_db: Database) -> None:
         funding="0.01%", reasoning=None, quota=state,
     )
     assert "💎" not in card
-    assert "📊 Quota: 0/100 free alerts used" in card
+    # GROWTH-TG-QUOTA-PARITY-W1: interpolated from the constant. The old literal was a FIXTURE
+    # value, never the cap itself — the card has always rendered `{used}/{total}`.
+    assert f"📊 Quota: 0/{FREE_TIER_MONTHLY_QUOTA} free alerts used" in card
 
 
 # ── the mirror write carries tier from the SAME body ───────────────────────────

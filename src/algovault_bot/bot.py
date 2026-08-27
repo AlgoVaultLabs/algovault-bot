@@ -15,7 +15,7 @@ from telegram.ext import Application, ApplicationBuilder
 
 from .db import Database, DEFAULT_DB_PATH
 from .handlers import post_init, register_handlers
-from .messages import WELCOME_MESSAGE  # noqa: F401 — re-exported for tests/import paths
+from .messages import welcome_message  # noqa: F401 — re-exported for tests/import paths
 
 
 def _setup_logging(level: str = "INFO") -> None:

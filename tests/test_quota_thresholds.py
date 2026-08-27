@@ -77,7 +77,9 @@ def test_walled_body_states_the_wall_and_keeps_the_x402_fallback(tmp_path) -> No
             (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 1),
         )
     msg = build_refusal_text(db, 1, get_quota_state(db, 1))
-    assert "100/100" in msg
+    # GROWTH-TG-QUOTA-PARITY-W1: rendered from the constant this test already imports. The old
+    # literal duplicated a value the very next line derives.
+    assert f"{FREE_TIER_MONTHLY_QUOTA}/{FREE_TIER_MONTHLY_QUOTA}" in msg
     assert "alerts" in msg, "the BOT's unit, not the API's 'calls'"
     assert "x402" in msg, "the pay-per-call rail must survive at the wall"
     assert "utm_campaign=quota_exhausted_push" in msg

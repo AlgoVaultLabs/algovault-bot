@@ -46,7 +46,7 @@ from .validators import (
     normalize_push_timeframe,
     normalize_timeframe,
 )
-from .quota import consume_quota, get_quota_state, record_call_delivered
+from .quota import consume_quota, get_quota_state, record_call_delivered, resolve_ladder
 from .capabilities import rank_label, rank_lens_help, recognized_rank_tokens
 from .scan_digest import cadence_for_timeframe, is_valid_cadence, render_scan_digest_line
 
@@ -311,7 +311,8 @@ def _commit_watch_combos(
         # TG-BUTTON-UX-W1: persistent confirmation card (shared renderer) + coverage nudge.
         coin, tf, exch = combos[0]
         base = messages.format_subscription_confirmation(
-            "watch", coin=coin, tf=tf, exchange=exch, mode=alert_type
+            "watch", coin=coin, tf=tf, exchange=exch, mode=alert_type,
+            monthly_total=resolve_ladder(db).free_monthly,
         )
         try:
             est = compute_coverage_estimate(coin, tf, exch)
@@ -333,7 +334,10 @@ def handle_start(
     # /start is hard proof they've unblocked. Clear the flag so digest/stats
     # count them as a reachable subscriber again.
     db.unmark_subscriber_blocked(chat_id)
-    return messages.WELCOME_MESSAGE
+    lad = resolve_ladder(db)
+    return messages.welcome_message(
+        lad.free_monthly, lad.free_daily, lad.starter_price_usd, lad.starter_monthly_calls
+    )
 
 
 def handle_link(
@@ -395,7 +399,7 @@ def handle_link(
     )
 
     if is_new_link:
-        return messages.link_first_time_message(tier)
+        return messages.link_first_time_message(tier, resolve_ladder(db).free_monthly)
     if previous_tier != tier:
         return messages.link_tier_changed_message(previous_tier, tier)
     return messages.link_already_linked_message(tier)
@@ -403,7 +407,8 @@ def handle_link(
 
 def handle_help(db: Database, chat_id: int, username: str | None, lang_code: str | None) -> str:
     db.upsert_subscriber(chat_id, username, lang_code)
-    return messages.HELP_MESSAGE
+    lad = resolve_ladder(db)
+    return messages.help_message(lad.free_monthly, lad.free_daily)
 
 
 # ── FEATURE-PARITY-CHANNELS-W1 CH3 — /scan (pull the market scanner) ──
@@ -888,7 +893,8 @@ def handle_scanwatch(
     # TG-BUTTON-UX-W1: persistent standing-scan confirmation card (shared renderer)
     # + the cadence-vs-timeframe reminder (preserves the faster-than-TF heads-up).
     card = messages.format_subscription_confirmation(
-        "scanwatch", top_n=top_n, tf=timeframe, exchange=exchange, cadence=cadence
+        "scanwatch", top_n=top_n, tf=timeframe, exchange=exchange, cadence=cadence,
+        monthly_total=resolve_ladder(db).free_monthly,
     )
     # SCAN-RANKBY-W1: surface the lens on the confirmation when it's not the default oi.
     if rank_by != "oi":
@@ -999,7 +1005,9 @@ def handle_watch(
             "n_exch": n_exch,
         }
         return BatchReply(
-            messages.batch_confirm_message(n_combos, n_coins, n_tfs, n_exch),
+            messages.batch_confirm_message(
+                n_combos, n_coins, n_tfs, n_exch, resolve_ladder(db).free_monthly
+            ),
             confirm=True,
             pending=pending,
             combos=n_combos,
@@ -1260,7 +1268,7 @@ def handle_adoption_scanwatch_tap(
 # toast (≤200 chars, vanishes). These pure builders render the SAME persistent
 # confirmation card as the typed /watch and /scanwatch paths (shared renderer →
 # tap==type parity) so the callback can ALSO send a durable message.
-def adoption_scanwatch_confirmation_card() -> str:
+def adoption_scanwatch_confirmation_card(monthly_total: int) -> str:
     """Full confirmation card for the one-tap 'set a standing scan' button. The
     button always creates the DEFAULT standing scan, so the params are constants."""
     return messages.format_subscription_confirmation(
@@ -1268,11 +1276,12 @@ def adoption_scanwatch_confirmation_card() -> str:
         top_n=adoption.SCANWATCH_DEFAULT_TOP_N,
         tf=adoption.SCANWATCH_DEFAULT_TF,
         exchange=adoption.SCANWATCH_DEFAULT_EXCHANGE,
+        monthly_total=monthly_total,
         cadence=adoption.SCANWATCH_DEFAULT_CADENCE,
     )
 
 
-def adoption_watch_confirmation_card(data: str) -> str | None:
+def adoption_watch_confirmation_card(data: str, monthly_total: int) -> str | None:
     """Full confirmation card for the one-tap watch button. None on a malformed
     payload — mirrors ``handle_adoption_watch_tap``'s guard so the callback stays
     symmetric (no card sent when nothing was created)."""
@@ -1281,7 +1290,8 @@ def adoption_watch_confirmation_card(data: str) -> str | None:
         return None
     coin, tf, exch, _source = parsed
     return messages.format_subscription_confirmation(
-        "watch", coin=coin, tf=tf, exchange=exch, mode=DEFAULT_ALERT_TYPE
+        "watch", coin=coin, tf=tf, exchange=exch, mode=DEFAULT_ALERT_TYPE,
+        monthly_total=monthly_total,
     )
 
 
@@ -1443,7 +1453,9 @@ def register_handlers(app: Application, db: Database) -> None:
             code_data = referral_client.get_code(chat_id)  # the referee's own terms (+ their link, C3)
             terms = (code_data or {}).get("terms", {})
             await update.message.reply_text(
-                referral.format_ref_join_greeting(bonus, terms, lang),
+                referral.format_ref_join_greeting(
+                    bonus, terms, resolve_ladder(db).free_monthly, lang
+                ),
                 disable_web_page_preview=True,
             )
             log_alert_event("tg_referral_join", chat_id=chat_id, lang_code=lang)
@@ -2044,7 +2056,11 @@ def register_handlers(app: Application, db: Database) -> None:
         # confirmation card (same shared renderer as typed /watch) so the user gets a
         # durable message that they subscribed. toast is None only on a malformed
         # payload (nothing created) → no card.
-        card = adoption_watch_confirmation_card(query.data) if toast is not None else None
+        card = (
+            adoption_watch_confirmation_card(query.data, resolve_ladder(db).free_monthly)
+            if toast is not None
+            else None
+        )
         if card and isinstance(query.message, Message):
             await query.message.reply_text(card, disable_web_page_preview=True)
 
@@ -2070,7 +2086,8 @@ def register_handlers(app: Application, db: Database) -> None:
         # on a malformed payload (nothing created) → skip the card.
         if toast is not None and isinstance(query.message, Message):
             await query.message.reply_text(
-                adoption_scanwatch_confirmation_card(), disable_web_page_preview=True
+                adoption_scanwatch_confirmation_card(resolve_ladder(db).free_monthly),
+                disable_web_page_preview=True,
             )
 
     app.add_handler(CommandHandler("start", _start))

@@ -12,8 +12,8 @@ Two kinds of alerts pushed to your watchlist, automatically:
 
 | Alert | Free? | Cadence |
 |---|---|---|
-| 📊 **Regime shifts** (`TRENDING_UP` / `TRENDING_DOWN` / `RANGING` / `VOLATILE`) | Counts toward your free **100 alerts/month** | Per chosen TF, fired only after 2 confirming cycles (no flap) |
-| 📈 **Trade calls** (BUY / SELL only — HOLD verdicts are silent) | Counts against your free **100 alerts/month** cap | Per chosen TF, real-time |
+| 📊 **Regime shifts** (`TRENDING_UP` / `TRENDING_DOWN` / `RANGING` / `VOLATILE`) | Counts toward your free **200 alerts/month** (and **100/day**) | Per chosen TF, fired only after 2 confirming cycles (no flap) |
+| 📈 **Trade calls** (BUY / SELL only — HOLD verdicts are silent) | Counts against your free **200 alerts/month** (and **100/day**) cap | Per chosen TF, real-time |
 
 Free tier covers **all 720+ assets** and **all 11 timeframes** (1m → 1d). You pick what to watch — more assets + lower timeframes = faster quota burn.
 
@@ -62,7 +62,7 @@ The bot is a thin client over the [`crypto-quant-signal-mcp`](https://github.com
 
 ## Quota burn — the math
 
-Trade-call alerts on busier (lower-TF) pairs consume your free 100 alerts/month faster:
+Trade-call alerts on busier (lower-TF) pairs consume your free 200 alerts/month faster:
 
 | Watch | Approx. burn |
 |---|---|
@@ -76,8 +76,9 @@ Trade-call alerts on busier (lower-TF) pairs consume your free 100 alerts/month 
 - HOLD verdicts are silent, so there is no alert to meter and no quota tick. This bot bills
   DELIVERED ALERTS; the API bills every verdict, HOLD included. The divergence is deliberate
   and declared — see [docs/METERING-DIVERGENCE.md](docs/METERING-DIVERGENCE.md).
-- Regime alerts count toward your 100/mo (parity with the AlgoVault API/MCP, which meters `get_market_regime`); no rate cap beyond 20/24h anti-abuse.
-- Trade-call alerts (BUY/SELL only) tick your 100/mo counter.
+- Regime alerts count toward your 200/mo (parity with the AlgoVault API/MCP, which meters `get_market_regime`).
+- Trade-call alerts (BUY/SELL only) tick your 200/mo counter.
+- Both also tick a **100 per UTC day** meter. A call is refused when EITHER is spent; the daily one resets at 00:00 UTC.
 
 When you hit the cap, [upgrade to Starter ($9.99/mo or $39.90/6mo → 10,000 API calls/mo)](https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=readme) or pay per call via [x402.org](https://x402.org).
 
@@ -85,13 +86,22 @@ When you hit the cap, [upgrade to Starter ($9.99/mo or $39.90/6mo → 10,000 API
 
 ## Anti-abuse
 
-Per-user 24h rolling caps:
+**Free tier:** two meters, and a call is refused when either is spent.
 
-- 20 regime alerts / 24h
-- 30 trade-call alerts / 24h
-- 50 trade-call fetches / 24h → bot pauses your trade-call alerts for 24h with one explanatory message (this is to protect free users from blowing through their 100/mo cap on a single noisy day).
+- **200 alerts / rolling 30 days**, anchored on your first alert (not a calendar month).
+- **100 alerts / UTC day**, reset at 00:00 UTC.
 
-These caps don't apply once you upgrade.
+**Paid tiers:** the free meters do not apply. A delivered alert draws down your **plan
+allowance** instead, and you are walled at the plan ceiling — see
+[docs/METERING-DIVERGENCE.md](docs/METERING-DIVERGENCE.md).
+
+> **Corrected 2026-08-27 (`GROWTH-TG-QUOTA-PARITY-W1`).** This section used to document three
+> per-user 24h caps — 20 regime / 30 trade-call / 50 fetches — and state that they lapse on
+> upgrade. **All four claims were false.** Those caps were removed before this README was
+> written and the code says so in two places (`alert_engine.py`: *"No 24h cap — only the quota
+> gate applies"*) as does `tests/test_anti_abuse.py`; the columns survive in `db.py` as dead
+> `C5_MIGRATIONS` that nothing reads. And upgrading has never removed a ceiling — it replaces
+> the free meters with the plan's.
 
 Telegram-side: bot uses an `asyncio.Semaphore(25)` to stay under Telegram's 30 msg/sec ceiling.
 

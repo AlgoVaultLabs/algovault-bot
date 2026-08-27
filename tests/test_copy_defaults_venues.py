@@ -13,9 +13,27 @@ from algovault_bot.handlers import (
     handle_regime,
     handle_watch,
 )
-from algovault_bot.messages import HELP_MESSAGE
+from algovault_bot.messages import help_message, welcome_message
+from algovault_bot.quota import (
+    FREE_TIER_DAILY_QUOTA,
+    FREE_TIER_MONTHLY_QUOTA,
+    STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_USD,
+)
+
+
 from algovault_bot.scan_digest import cadence_for_timeframe
 from algovault_bot.validators import EXCHANGE_DISPLAY_ORDER, EXCHANGES, normalize_exchange
+
+# GROWTH-TG-QUOTA-PARITY-W1 CH3: WELCOME_MESSAGE / HELP_MESSAGE became FUNCTIONS — a constant
+# cannot interpolate the ladder. Rendered here at the pinned defaults so every assertion below is
+# unchanged: what is being tested is the COPY, not the numbers, and the numbers have their own
+# tests in test_quota_daily_cap.py / test_ladder_client.py.
+_LADDER = (
+    FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, STARTER_PRICE_USD, STARTER_MONTHLY_CALLS,
+)
+WELCOME_MESSAGE = welcome_message(*_LADDER)
+HELP_MESSAGE = help_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA)
 
 _ALL_12 = (
     "HL", "BINANCE", "BYBIT", "OKX", "BITGET",
@@ -47,7 +65,7 @@ def test_help_upgrade_is_inline_button_utm_intact() -> None:
     # URL in the body); the utm-tagged signup URL is byte-identical (utm_campaign=help_message).
     from algovault_bot import keyboards
     assert "Upgrade → " not in HELP_MESSAGE
-    assert "Need more than 100 alerts a month?" in HELP_MESSAGE
+    assert f"Need more than {FREE_TIER_MONTHLY_QUOTA} alerts a month?" in HELP_MESSAGE
     assert keyboards.upgrade_button("help_message").url == (
         "https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=help_message"
     )

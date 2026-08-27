@@ -100,6 +100,8 @@ def format_paywall_body(
     referral_link: str | None = None,
     bonus_calls: int | None = None,
     resets_at: str | None = None,
+    starter_price_usd: float | None = None,
+    starter_monthly_calls: int | None = None,
 ) -> str:
     """Render the T1-voice paywall DM body (≤300 chars per spec).
 
@@ -115,8 +117,26 @@ def format_paywall_body(
     soft/hard pre-wall warnings are unchanged (mirrors C1 leaving 80% soft alone).
     ``bonus_calls`` is the engine SoT number (never hardcoded in the bot).
     """
+    # GROWTH-TG-QUOTA-PARITY-W1 CH3b — the fallback is the CONSTANT, not a literal 100.
+    # Imported lazily because `quota` imports THIS module (`build_refusal_text` renders through
+    # `format_paywall_body`), so a module-level import would be circular. Same idiom as
+    # `entitlement_drain._send_downgrade_notice`.
+    from .quota import FREE_TIER_MONTHLY_QUOTA, STARTER_MONTHLY_CALLS, STARTER_PRICE_USD
+
     used = current_usage if current_usage is not None else "?"
-    total = monthly_limit if monthly_limit is not None else 100
+    total = monthly_limit if monthly_limit is not None else FREE_TIER_MONTHLY_QUOTA
+    # CH3b-2 (ratified 2026-08-27, Q3=b): the PRICE beside the quota derives too. Leaving these
+    # hand-typed while the allowance derives is the `_TIER_QUOTA` failure mode one field over —
+    # the day the price moves, some sites update and the rest lie.
+    price = starter_price_usd if starter_price_usd is not None else STARTER_PRICE_USD
+    calls = starter_monthly_calls if starter_monthly_calls is not None else STARTER_MONTHLY_CALLS
+    # Locale-formatted at the point of use: `id` writes 9,99 / 10.000 where en+zh write 9.99 /
+    # 10,000, and the existing copy already respected that. A single shared formatter would have
+    # quietly anglicised the Indonesian string.
+    price_en = f"${price:.2f}".rstrip("0").rstrip(".") if price % 1 else f"${int(price)}"
+    price_id = price_en.replace(".", ",")
+    calls_en = f"{calls:,}"
+    calls_id = calls_en.replace(",", ".")
     url = suggested_upgrade_url or "https://api.algovault.com/signup?plan=starter&upgrade_from=tg_quota"
     lang = (lang_code or "en").lower().replace("_", "-")
     # BOT-QUOTA-REFUSAL-SEAM-W1 (2026-08-16): the bot's window is a ROLLING 30 days
@@ -154,18 +174,18 @@ def format_paywall_body(
         if lang.startswith("id"):
             return (
                 f"Anda telah memakai {used}/{total} alert. "
-                f"Upgrade ke Starter ($9,99/bln, 10.000 panggilan API): {url}, "
+                f"Upgrade ke Starter ({price_id}/bln, {calls_id} panggilan API): {url}, "
                 f"ATAU dapatkan 30 hari Pro gratis via /unlock_premium_alerts."
             )
         if lang.startswith("zh"):
             return (
                 f"您已使用 {used}/{total} 次提醒。"
-                f"升级到 Starter（$9.99/月、10,000 次 API 调用）：{url}，"
+                f"升级到 Starter（{price_en}/月、{calls_en} 次 API 调用）：{url}，"
                 f"或通过 /unlock_premium_alerts 免费获取 30 天 Pro。"
             )
         return (
             f"You've used {used}/{total} alerts. "
-            f"Upgrade to Starter ($9.99/mo, 10,000 API calls): {url}, "
+            f"Upgrade to Starter ({price_en}/mo, {calls_en} API calls): {url}, "
             f"OR earn 30 days free Pro via /unlock_premium_alerts."
         )
     if level == "hard":
@@ -185,6 +205,32 @@ def format_paywall_body(
             f"⚠️ Used {used}/{total} alerts. "
             f"Approaching quota. Upgrade: {url} · "
             f"OR /unlock_premium_alerts for 30 days free."
+        )
+    # GROWTH-TG-QUOTA-PARITY-W1 CH3 — the FOURTH level: the DAILY wall.
+    #
+    # Copy ratified by Mr.1 2026-08-27. It names the CLOCK ("00:00 UTC") rather than a horizon,
+    # which is the whole reason the daily cap is a calendar day and not a second rolling window:
+    # a rolling window resets on a date nobody can be told in advance, and telling a user walled
+    # for two hours to come back in 30 days is the exact defect PRICING-FOLLOWUPS-GENERATOR-W1
+    # CH1 fixed on the API side.
+    #
+    # `total` here is the DAILY total: `build_refusal_text` passes `state.day_total` when
+    # `QuotaDecision.limit_kind == "daily"`, so the level and the number are chosen from ONE
+    # derivation and cannot disagree about which wall the user hit.
+    if level == "daily_block":
+        if lang.startswith("id"):
+            return (
+                f"Batas harian tercapai ({used}/{total} alert hari ini). "
+                f"Direset pukul 00:00 UTC. Upgrade: {url}"
+            )
+        if lang.startswith("zh"):
+            return (
+                f"已达每日上限（今日 {used}/{total} 条提醒）。"
+                f"UTC 00:00 重置。升级：{url}"
+            )
+        return (
+            f"Daily limit reached ({used}/{total} alerts today). "
+            f"Resets 00:00 UTC. Upgrade: {url}"
         )
     if level == "block":
         if lang.startswith("id"):

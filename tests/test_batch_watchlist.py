@@ -14,6 +14,13 @@ import pytest
 from algovault_bot import asset_universe, batch, handlers, messages
 from algovault_bot.db import Database
 from algovault_bot.validators import EXCHANGES, ValidationError
+from algovault_bot.quota import (
+    FREE_TIER_DAILY_QUOTA,
+    FREE_TIER_MONTHLY_QUOTA,
+    STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_USD,
+)
+
 
 
 # ── batch.py — pure parse + expand ─────────────────────────────
@@ -293,7 +300,7 @@ def test_handle_list_summarizes_over_threshold(tmp_db: Database) -> None:
 def test_start_copy_plain_language_and_link_light() -> None:
     # TG-COPY-DEFAULTS-VENUES-W1 (R1/F2): plain-language /start; link-light — the
     # clickable Upgrade CTA + its utm moved to /help.
-    w = messages.WELCOME_MESSAGE
+    w = messages.welcome_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, STARTER_PRICE_USD, STARTER_MONTHLY_CALLS)
     assert "the brain layer for AI trading agents" in w
     assert "900+ markets (crypto, gold, stocks, pre-IPO) across 12 exchanges" in w
     assert "New here? Just type /watch and I'll start you on BTC 1h (Binance)." in w
@@ -307,7 +314,7 @@ def test_start_copy_plain_language_and_link_light() -> None:
 
 
 def test_help_copy_has_batch_and_unwatchall() -> None:
-    h = messages.HELP_MESSAGE
+    h = messages.help_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA)
     assert "/unwatchall" in h
     assert "all" in h  # batch syntax hint
     assert "[regime|calls|both]" in h

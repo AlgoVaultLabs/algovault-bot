@@ -12,7 +12,7 @@ Layout (vertical stack, ~1024px wide):
 - Header strip: ``<COIN> / <Exchange> — <TF> Trade Call`` (serif)
 - Metric table: 2 columns (label, value), 10 rows max, alt-tinted backgrounds
 - Reasoning section: full text block, wrapped
-- Footer strip: ``💎 <Tier> Plan`` (paid) OR ``📊 Quota: N/M free calls`` (free)
+- Footer strip: ``💎 <Tier> Plan`` (paid) OR ``📊 Quota: N/M free alerts`` (free)
 
 Falls back gracefully when a font is missing — Pillow's default bitmap font
 is hideous but safe.

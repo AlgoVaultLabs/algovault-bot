@@ -10,7 +10,15 @@ from __future__ import annotations
 
 from algovault_bot import referral, referral_client
 from algovault_bot.cta import quota_threshold
-from algovault_bot.quota import QuotaState, consume_quota, get_quota_state
+from algovault_bot.quota import (
+    FREE_TIER_DAILY_QUOTA,
+    FREE_TIER_MONTHLY_QUOTA,
+    STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_USD,
+    QuotaState,
+    consume_quota,
+    get_quota_state,
+)
 
 
 # ── referral.py renderers (pure; terms come from the engine, not hardcoded) ──
@@ -153,18 +161,34 @@ def test_consume_bonus_free_is_byte_identical(tmp_db):
 
 
 def test_consume_draws_monthly_then_bonus(tmp_db):
+    """The MONTHLY meter fills first, then the bonus pool.
+
+    GROWTH-TG-QUOTA-PARITY-W1: asserted on `monthly_exhausted`, not on `exhausted`. The free lane
+    gained a second, DAILY cap this wave, and `exhausted` is now monthly-OR-daily — so consuming a
+    whole month's allowance in one call (which is what this fixture does) legitimately trips the
+    daily wall too. Reading the combined predicate here would make a test about the BONUS POOL
+    fail for a reason that has nothing to do with bonuses. The daily cap gets its own positive
+    assertion at the bottom, because "the bonus does not lift the daily cap" is a real ruling
+    (OPS-QUOTA-CLAIM-ALIAS-W1 Probe 3: pacing is not budget) and must be pinned somewhere.
+    """
+    M = FREE_TIER_MONTHLY_QUOTA
     tmp_db.upsert_subscriber(911, "u", "en")
-    consume_quota(tmp_db, 911, 100)            # exhaust the monthly 100
+    consume_quota(tmp_db, 911, M)              # exhaust the monthly allowance
     tmp_db.grant_referral_bonus(911, 500)      # +500 bonus
     st = get_quota_state(tmp_db, 911)
-    assert st.used == 100 and st.referral_bonus_remaining == 500
-    assert st.exhausted is False and st.remaining == 500
-    st2 = consume_quota(tmp_db, 911, 1)        # overflow draws the bonus, monthly stays 100
-    assert st2.used == 100 and st2.referral_bonus_remaining == 499
-    # drain the rest of the bonus → truly exhausted
+    assert st.used == M and st.referral_bonus_remaining == 500
+    assert st.monthly_exhausted is False and st.remaining == 500
+    st2 = consume_quota(tmp_db, 911, 1)        # overflow draws the bonus, monthly stays at M
+    assert st2.used == M and st2.referral_bonus_remaining == 499
+    # drain the rest of the bonus → the monthly lane is truly out
     consume_quota(tmp_db, 911, 499)
     final = get_quota_state(tmp_db, 911)
-    assert final.referral_bonus_remaining == 0 and final.exhausted is True
+    assert final.referral_bonus_remaining == 0 and final.monthly_exhausted is True
+
+    # POSITIVE assertion for the capability this wave added: every one of those units also ticked
+    # the DAILY meter, so a bonus pool buys more alerts overall — never more alerts in one day.
+    assert final.day_used == M + 500
+    assert final.daily_exhausted is True
 
 
 # ── bonus-aware CTA ──
@@ -185,6 +209,7 @@ def test_cta_threshold_suppressed_while_bonus_remains():
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
 from algovault_bot.cta import referral_nudge_text  # noqa: E402
+
 
 _NOW = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
 
@@ -227,8 +252,8 @@ def test_db_mark_referral_nudge_throttle(tmp_db):
 def test_referral_in_help_only():
     # TG-COPY-DEFAULTS-VENUES-W1 (R1): /start is link-light — /referral lives in /help now.
     from algovault_bot import messages
-    assert "/referral" in messages.HELP_MESSAGE
-    assert "/referral" not in messages.WELCOME_MESSAGE
+    assert "/referral" in messages.help_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA)
+    assert "/referral" not in messages.welcome_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, STARTER_PRICE_USD, STARTER_MONTHLY_CALLS)
 
 
 # ── REFERRAL-PARITY-NOTIFS-W1 / C2 — earnings parity + notifications ──
