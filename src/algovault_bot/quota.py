@@ -964,7 +964,10 @@ async def refuse_and_notify(
                     db.mark_quota_day_notice(chat_id, _utc_day_key())
                 else:
                     db.mark_quota_cta_fired(chat_id, "100", _now().isoformat())
-                db.record_quota_notice_fired(chat_id)
+                # Record WHICH wall fired. For the paid lane `d.limit_kind` is None by
+                # design (it describes the FREE lane's two meters); the paid wall's own
+                # episode key is `plan_wall_notice_day`, stamped above.
+                db.record_quota_notice_fired(chat_id, d.limit_kind)
                 db.increment_total_ctas_shown(chat_id)
                 notified = True
     except Exception as err:  # noqa: BLE001 — never break the dispatch loop

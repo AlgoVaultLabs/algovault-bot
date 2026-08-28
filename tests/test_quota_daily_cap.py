@@ -299,3 +299,80 @@ def test_the_free_monthly_wall_still_stamps_the_monthly_key(db: Database) -> Non
     with db._cursor() as cur:
         cur.execute("SELECT quota_100_last_fired_at FROM subscribers WHERE chat_id = 21")
         assert cur.fetchone()["quota_100_last_fired_at"] is not None
+
+
+# ── the notice ledger records WHICH wall (the +30d impact wave depends on it) ────────────────
+
+
+def _notices(db: Database) -> list[tuple[int, str | None]]:
+    with db._cursor() as cur:
+        cur.execute("SELECT chat_id, limit_kind FROM quota_notices_fired ORDER BY id")
+        return [(r["chat_id"], r["limit_kind"]) for r in cur.fetchall()]
+
+
+def test_the_notice_ledger_records_which_wall_fired(db: Database) -> None:
+    """🛑 Without this, `GROWTH-TG-DAILY-CAP-IMPACT-W1` cannot answer its own question.
+
+    `alerts_fired` is written ONLY on the delivered path, so once the daily cap ships it is
+    censored at the cap by construction — the CH0/P5 query ("free chat-days above 100") can
+    never return a new row whether the cap bound zero times or five hundred. That is a
+    confident ZERO from an instrument structurally incapable of seeing the thing.
+
+    `quota_notices_fired` is the one table the REFUSAL path writes, so it is the only durable
+    per-episode record. It has to say WHICH wall, or the +30d re-measure reads the daily and
+    monthly walls as one undifferentiated count.
+    """
+    import asyncio
+
+    from algovault_bot.quota import refuse_and_notify
+
+    async def _send(_t: str) -> bool:
+        return True
+
+    # daily wall
+    db.upsert_subscriber(30, "u", "en")
+    consume_quota(db, 30, D)
+    asyncio.run(refuse_and_notify(db, 30, "watch", send=_send, decision=evaluate_delivery(db, 30)))
+
+    # monthly wall
+    db.upsert_subscriber(31, "u", "en")
+    consume_quota(db, 31, M)
+    asyncio.run(refuse_and_notify(db, 31, "watch", send=_send, decision=evaluate_delivery(db, 31)))
+
+    assert _notices(db) == [(30, "daily"), (31, "monthly")]
+
+
+def test_the_impact_query_can_separate_the_two_walls(db: Database) -> None:
+    """The exact shape `GROWTH-TG-DAILY-CAP-IMPACT-W1` will run at +30 days."""
+    import asyncio
+
+    from algovault_bot.quota import refuse_and_notify
+
+    async def _send(_t: str) -> bool:
+        return True
+
+    for i, units in ((40, D), (41, D), (42, M)):
+        db.upsert_subscriber(i, "u", "en")
+        consume_quota(db, i, units)
+        asyncio.run(refuse_and_notify(db, i, "watch", send=_send, decision=evaluate_delivery(db, i)))
+
+    with db._cursor() as cur:
+        cur.execute(
+            "SELECT limit_kind, COUNT(*) n, COUNT(DISTINCT chat_id) chats "
+            "FROM quota_notices_fired GROUP BY limit_kind ORDER BY limit_kind"
+        )
+        rows = {r["limit_kind"]: (r["n"], r["chats"]) for r in cur.fetchall()}
+    assert rows["daily"] == (2, 2), "two distinct subscribers hit the DAILY wall"
+    assert rows["monthly"] == (1, 1)
+
+
+def test_a_pre_migration_row_reads_NULL_not_a_backfilled_guess(db: Database) -> None:
+    """An absent measurement is not a zero.
+
+    Every row written before 2026-08-27 predates the daily cap, so it is monthly by
+    construction — but backfilling them to 'monthly' would be inventing a measurement nobody
+    took. The impact wave must be able to tell "we recorded monthly" from "we did not record".
+    """
+    db.upsert_subscriber(50, "u", "en")
+    db.record_quota_notice_fired(50)  # the pre-migration call shape
+    assert _notices(db) == [(50, None)]

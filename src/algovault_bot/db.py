@@ -334,6 +334,32 @@ LINK_LIFECYCLE_MIGRATIONS = (
 # `CHECK (id = 1)` is the single-row guard. Without it a retried write can mint a second row and
 # the read silently becomes ordering-dependent — a load-bearing property rented from SQLite's row
 # order, which is exactly what `build-and-runtime.md` forbids.
+# GROWTH-TG-QUOTA-PARITY-W1 FOLLOW-UP (2026-08-27) — WHICH WALL FIRED.
+#
+# 🛑 WITHOUT THIS COLUMN THE DAILY CAP IS UNMEASURABLE, and the +30d impact wave
+# (`GROWTH-TG-DAILY-CAP-IMPACT-W1`) cannot answer its own question.
+#
+# The reason is a censoring effect, not an oversight in the analysis:
+#   • CH0/P5 measured "does the daily cap bind?" from `alerts_fired` — max 74 alerts/UTC-day
+#     over 298 free chat-days, zero days above 100.
+#   • `record_call_delivered` writes `alerts_fired` ONLY on the delivered path, AFTER the quota
+#     gate allows. A REFUSED alert never lands a row.
+#   • So the moment the 100/day cap ships, `alerts_fired` is capped at 100/day BY CONSTRUCTION.
+#     Re-running the exact CH0 query at +30d returns the same frozen pre-cap rows whether the
+#     cap bound zero times or five hundred — a confident ZERO from an instrument structurally
+#     incapable of seeing the thing (`verification-gates.md`, the OPS-CF-ORIGIN-LOCK-W1 sign).
+#
+# `quota_notices_fired` is the one table the REFUSAL path writes. It carried
+# `(id, chat_id, fired_at)` and could not tell a monthly wall from a daily one. `limit_kind`
+# makes it the durable per-episode record the impact wave needs.
+#
+# NULL is honest and expected: every row written before this migration predates the daily cap
+# and is therefore monthly by construction. Backfilling them to 'monthly' would be inventing
+# a measurement nobody took — an absent value is not a zero.
+QUOTA_NOTICE_LIMIT_KIND_MIGRATIONS = (
+    "ALTER TABLE quota_notices_fired ADD COLUMN limit_kind TEXT",
+)
+
 QUOTA_PARITY_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN alerts_day_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subscribers ADD COLUMN alerts_day TEXT",
@@ -645,6 +671,8 @@ class Database:
                 *LINK_LIFECYCLE_MIGRATIONS,
                 # GROWTH-TG-QUOTA-PARITY-W1 (2026-08-27): daily free meter + ladder mirror.
                 *QUOTA_PARITY_MIGRATIONS,
+                # …and the notice ledger learns WHICH wall fired (runs after the table exists).
+                *QUOTA_NOTICE_LIMIT_KIND_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1762,19 +1790,30 @@ class Database:
 
     # ── BOT-DIGEST-QUOTA-NOTICES-W1: per-notice log for rolling-24h digest ──
 
-    def record_quota_notice_fired(self, chat_id: int) -> None:
+    def record_quota_notice_fired(self, chat_id: int, limit_kind: str | None = None) -> None:
         """Record one successfully-delivered quota-exhausted notice for the
         rolling-24h digest line. Called from ``alert_engine`` AFTER the
         Telegram API returns OK on the quota-exhausted trade-call branch —
         failed sends are not counted. Distinct from ``record_alert_fired``:
-        these are operator-UX nudges (the watcher is at their 100/mo free
-        cap), NOT signal volume, so they live in their own table and never
+        these are operator-UX nudges (the watcher is at their free cap),
+        NOT signal volume, so they live in their own table and never
         inflate the regime/call counts. ``fired_at`` defaults to
-        ``datetime('now')`` (UTC) at the DB layer."""
+        ``datetime('now')`` (UTC) at the DB layer.
+
+        ``limit_kind`` ∈ {'monthly', 'daily', None} — WHICH wall fired.
+
+        🛑 THIS IS THE ONLY DURABLE RECORD THAT A DAILY WALL BOUND. `alerts_fired` cannot
+        show it: refusals never reach that table, so it is censored at the cap by
+        construction. `subscribers.quota_day_notice_day` holds only the LAST such day and is
+        overwritten. Without this column `GROWTH-TG-DAILY-CAP-IMPACT-W1` would read a
+        confident zero regardless of the truth. See QUOTA_NOTICE_LIMIT_KIND_MIGRATIONS.
+
+        Defaulted so the paid lane's callers keep working unchanged; None means "not recorded"
+        and is what every pre-2026-08-27 row carries."""
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO quota_notices_fired(chat_id) VALUES (?)",
-                (chat_id,),
+                "INSERT INTO quota_notices_fired(chat_id, limit_kind) VALUES (?, ?)",
+                (chat_id, limit_kind),
             )
 
     def count_quota_notices_last_24h(self) -> int:
