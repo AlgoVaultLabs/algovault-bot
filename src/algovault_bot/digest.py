@@ -101,6 +101,46 @@ class DigestMetrics:
     # never a plausible substitute.
     deployed_sha: str | None
     generated_at: str  # ISO-8601 UTC
+    # GROWTH-TG-QUOTA-PARITY-W1 follow-up (2026-08-28) — WHICH wall the 24h notices came from.
+    #
+    # WHY THIS IS A DIGEST LINE AND NOT A CALENDAR REMINDER. The wave shipped a 100/UTC-day cap
+    # whose impact was to be re-measured "in ~30 days". A reminder to go and look is prose
+    # addressed to whoever happens to read it — the exact control this wave spent three chapters
+    # retiring. Surfacing the split here makes a daily wall visible ON THE DAY IT FIRES, so the
+    # question answers itself continuously instead of once, late, if someone remembers.
+    #
+    # It is also the ONLY way to see it: `alerts_fired` is written only on the DELIVERED path, so
+    # once the cap ships that table is censored at the cap by construction and can never show a
+    # refusal. `quota_notices_fired.limit_kind` is the sole durable record.
+    #
+    # DEFAULTED, and last: every field above `generated_at` lacks a default, so a non-defaulted
+    # field could not be added after it. Defaults also keep every existing positional
+    # construction in the suite working.
+    #
+    # Deliberately NOT added to the `bot_daily_metrics` Postgres row: that is a shared-schema
+    # change on signal-MCP's database, which is a migration and a different wave. The operator's
+    # TG digest is where this belongs today.
+    quota_notices_monthly_24h: int = 0
+    quota_notices_daily_24h: int = 0
+    #: Rows in the window predating the 2026-08-28 migration, so `limit_kind IS NULL`. Shown only
+    #: when non-zero, and only so the sub-counts always sum to the total — a breakdown that does
+    #: not add up reads as a bug in the digest rather than as honest missing provenance.
+    quota_notices_unclassified_24h: int = 0
+
+
+def _notice_split(m: DigestMetrics) -> str:
+    """`🗓 Monthly N · ⏰ Daily N` — and `· ❔ Unclassified N` only when non-zero.
+
+    The clock emoji is deliberate: the daily wall resets at 00:00 UTC, which is what the refusal
+    copy tells the user, and the monthly one rolls on each subscriber's own 30-day window.
+    """
+    parts = [
+        f"🗓 Monthly {m.quota_notices_monthly_24h}",
+        f"⏰ Daily {m.quota_notices_daily_24h}",
+    ]
+    if m.quota_notices_unclassified_24h:
+        parts.append(f"❔ Unclassified {m.quota_notices_unclassified_24h}")
+    return " · ".join(parts)
 
 
 def compute_digest_metrics(db: Database) -> DigestMetrics:
@@ -162,11 +202,25 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         watch_total = int(cur.fetchone()[0])
 
         # BOT-DIGEST-QUOTA-NOTICES-W1 2026-06-15: rolling-24h quota-exhausted notices.
+        # GROWTH-TG-QUOTA-PARITY-W1 follow-up 2026-08-28: broken out by WHICH wall fired.
+        # ONE grouped read rather than three counts — the total is derived from the parts, so
+        # they cannot disagree with it.
         cur.execute(
-            "SELECT COUNT(*) FROM quota_notices_fired "
-            "WHERE fired_at >= datetime('now', '-1 day')"
+            "SELECT limit_kind, COUNT(*) FROM quota_notices_fired "
+            "WHERE fired_at >= datetime('now', '-1 day') GROUP BY limit_kind"
         )
-        quota_notices_24h = int(cur.fetchone()[0])
+        by_kind = {row[0]: int(row[1]) for row in cur.fetchall()}
+        quota_notices_monthly_24h = by_kind.get("monthly", 0)
+        quota_notices_daily_24h = by_kind.get("daily", 0)
+        # NULL = written before the migration. These age out of the 24h window on their own.
+        quota_notices_unclassified_24h = sum(
+            n for k, n in by_kind.items() if k not in ("monthly", "daily")
+        )
+        quota_notices_24h = (
+            quota_notices_monthly_24h
+            + quota_notices_daily_24h
+            + quota_notices_unclassified_24h
+        )
 
     # BOT-QUOTA-REFUSAL-SEAM-W1: derived by projecting every reachable subscriber
     # through `evaluate_delivery` — the SAME decision the seam enforces. Never a
@@ -189,6 +243,9 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         calls_24h=calls_24h,
         watch_total=watch_total,
         quota_notices_24h=quota_notices_24h,
+        quota_notices_monthly_24h=quota_notices_monthly_24h,
+        quota_notices_daily_24h=quota_notices_daily_24h,
+        quota_notices_unclassified_24h=quota_notices_unclassified_24h,
         walled_now=walled_now,
         walled_silent=walled_silent,
         walled_paid=walled_paid,
@@ -219,7 +276,8 @@ def _format_digest(m: DigestMetrics) -> str:
         f"  📊 Regime: {m.regime_24h}",
         f"  📈 Calls: {m.calls_24h}  "
         f"(👁 Watch {m.calls_watch} · 🔭 Scanwatch {m.calls_scanwatch} · 🔎 Scan {m.calls_scan})",
-        f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}",
+        f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}"
+        f"  ({_notice_split(m)})",
         f"  💳 Plan debits 24h: {m.plan_units_debited}  (⏳ {m.outbox_pending} queued)",
         f"  🚧 Walled now: {m.walled_now}"
         f"  (notified {m.walled_now - m.walled_silent} · silent {m.walled_silent})",

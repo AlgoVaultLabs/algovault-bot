@@ -376,3 +376,69 @@ def test_a_pre_migration_row_reads_NULL_not_a_backfilled_guess(db: Database) -> 
     db.upsert_subscriber(50, "u", "en")
     db.record_quota_notice_fired(50)  # the pre-migration call shape
     assert _notices(db) == [(50, None)]
+
+
+# ── the digest surfaces WHICH wall, so the answer arrives daily instead of once ──────────────
+
+
+def test_the_digest_breaks_notices_out_by_wall(db: Database) -> None:
+    """GROWTH-TG-QUOTA-PARITY-W1 follow-up: replaces a calendar reminder with a daily signal.
+
+    "Re-measure in ~30 days" is prose addressed to whoever happens to read it — the control this
+    wave spent three chapters retiring. A daily wall firing is now visible on the day it fires.
+    """
+    import asyncio
+
+    from algovault_bot.digest import compute_digest_metrics
+    from algovault_bot.quota import refuse_and_notify
+
+    async def _send(_t: str) -> bool:
+        return True
+
+    for cid, units in ((60, D), (61, D), (62, M)):
+        db.upsert_subscriber(cid, "u", "en")
+        consume_quota(db, cid, units)
+        asyncio.run(
+            refuse_and_notify(db, cid, "watch", send=_send, decision=evaluate_delivery(db, cid))
+        )
+
+    m = compute_digest_metrics(db)
+    assert (m.quota_notices_daily_24h, m.quota_notices_monthly_24h) == (2, 1)
+    assert m.quota_notices_unclassified_24h == 0
+    # The total is DERIVED from the parts, so a breakdown can never disagree with its own total.
+    assert m.quota_notices_24h == 3
+
+
+def test_the_split_renders_on_the_digest_line(db: Database) -> None:
+    import asyncio
+
+    from algovault_bot.digest import render_digest
+    from algovault_bot.quota import refuse_and_notify
+
+    async def _send(_t: str) -> bool:
+        return True
+
+    db.upsert_subscriber(70, "u", "en")
+    consume_quota(db, 70, D)
+    asyncio.run(refuse_and_notify(db, 70, "watch", send=_send, decision=evaluate_delivery(db, 70)))
+
+    body = render_digest(db)
+    assert "🔒 Quota-exhausted notices: 1  (🗓 Monthly 0 · ⏰ Daily 1)" in body
+    assert "Unclassified" not in body, "the unclassified part is hidden when zero"
+
+
+def test_pre_migration_rows_are_shown_not_silently_dropped(db: Database) -> None:
+    """A breakdown whose parts do not sum to its total reads as a bug in the digest.
+
+    Rows written before the 2026-08-28 migration carry `limit_kind IS NULL`. They are honest
+    missing provenance, not zero — so they are counted and labelled rather than discarded.
+    """
+    from algovault_bot.digest import compute_digest_metrics, render_digest
+
+    db.upsert_subscriber(80, "u", "en")
+    db.record_quota_notice_fired(80)  # the pre-migration call shape
+    m = compute_digest_metrics(db)
+    assert (m.quota_notices_monthly_24h, m.quota_notices_daily_24h) == (0, 0)
+    assert m.quota_notices_unclassified_24h == 1
+    assert m.quota_notices_24h == 1
+    assert "❔ Unclassified 1" in render_digest(db)
