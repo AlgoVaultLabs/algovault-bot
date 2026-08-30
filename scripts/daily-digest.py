@@ -128,7 +128,7 @@ def render_digest_body(top3: list[dict[str, Any]], date_str: str) -> str:
         # R2 per-setup CTA (approved copy). The button below does the same tap.
         lines.append(f"   → never miss the next flip: /watch {coin} {tf}")
     lines.append("")
-    lines.append("👇 One tap to start watching · 100 free calls/month. HOLDs never cost.")
+    lines.append("👇 One tap to start watching · 200 free alerts/month.")
     body = "\n".join(lines)
     # Hard cap; truncate body lines (not closing CTA) if absurdly long.
     if len(body) <= MAX_DIGEST_CHARS:
