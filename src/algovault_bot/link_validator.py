@@ -63,7 +63,7 @@ MIN_KEY_LEN: Final = 8
 #: The C3 scaffold value. Present-but-placeholder is misconfigured, same as unset.
 PLACEHOLDER_BYPASS_KEY: Final = "__C3_PLACEHOLDER__"
 
-KeyStatus = Literal["VALID", "INVALID", "INDETERMINATE"]
+KeyStatus = Literal["VALID", "DUNNING", "INVALID", "INDETERMINATE"]
 
 
 @dataclass(frozen=True)
@@ -94,9 +94,38 @@ class KeyCheck:
     def is_valid(self) -> bool:
         return self.status == "VALID"
 
+    @property
+    def is_dunning(self) -> bool:
+        """A determined POSITIVE that is not an entitlement grant. See `_dunning`."""
+        return self.status == "DUNNING"
+
+    @property
+    def corroborates(self) -> bool:
+        """May this answer serve as proof the validator is up RIGHT NOW?
+
+        VALID or DUNNING only — both are POSITIVE determinations that required Stripe to answer.
+        An INVALID deliberately does NOT corroborate: before
+        OPS-VALIDATE-KEY-INDETERMINATE-W1 CH2 a bare 404 could be an outage, and this bot may be
+        running against a server that predates it. Keeping corroboration keyed on a positive
+        answer means the fail-safe holds under EITHER server version, which is what makes CH3
+        safe to deploy in any order.
+        """
+        return self.status in ("VALID", "DUNNING")
+
 
 def _valid(tier: str, customer_id: str | None) -> KeyCheck:
     return KeyCheck(status="VALID", tier=tier, customer_id=customer_id, reason="ok")
+
+
+def _dunning(tier: str | None, customer_id: str | None, reason: str) -> KeyCheck:
+    """Stripe is still COLLECTING from this customer. OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3.
+
+    Not VALID (they are not entitled to API access) and emphatically not INVALID (they have a
+    subscription and an open invoice Stripe is retrying). Folding it into either is what this
+    wave exists to stop: as INVALID it advanced a downgrade streak against a paying customer,
+    and it made every delivery free because the debit 404'd.
+    """
+    return KeyCheck(status="DUNNING", tier=tier, customer_id=customer_id, reason=reason)
 
 
 def _invalid(reason: str) -> KeyCheck:
@@ -144,11 +173,26 @@ def validate_api_key(api_key: str) -> KeyCheck:
         if not isinstance(data, dict):
             log.warning("validate_api_key: 200 with non-object JSON body")
             return _indeterminate("bad_body")
+        # OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3 — read the state the server now states outright.
+        # Absent on a server predating CH2, in which case the legacy `valid` branch below still
+        # governs and behaviour is byte-identical to before this wave.
+        state = data.get("entitlement_state")
+        if state == "DUNNING":
+            dun = data.get("dunning") or {}
+            return _dunning(
+                tier=str(dun.get("tier")) if dun.get("tier") else None,
+                customer_id=data.get("customer_id") or None,
+                reason="past_due",
+            )
+        if state == "INDETERMINATE":
+            # Belt and braces: this arrives as a 503 and is handled below. A 200 carrying it
+            # would be the server contradicting itself, and the safe reading is still "unknown".
+            return _indeterminate("server_indeterminate")
         if not data.get("valid"):
             # Defensive: the live endpoint answers 404 for this, never 200 (measured
             # 2026-08-21). Kept because a shape we stopped expecting is exactly the kind
             # that comes back, and the branch is free.
-            return _invalid("no_active_subscription")
+            return _invalid(str(state) if state else "no_active_subscription")
         tier = data.get("tier")
         if not tier:
             # 200 asserting valid=true but carrying NO tier is a SHAPE MISMATCH — the
@@ -159,9 +203,17 @@ def validate_api_key(api_key: str) -> KeyCheck:
         return _valid(tier=str(tier), customer_id=data.get("customer_id") or None)
 
     if resp.status_code == 404:
-        # Determined: no active subscription. See the module docstring for why this is
-        # not the whole truth upstream, and what guards the downgrade path because of it.
-        return _invalid("no_active_subscription")
+        # Determined: no subscription, or one that has ENDED. Since
+        # OPS-VALIDATE-KEY-INDETERMINATE-W1 CH2 this is unambiguous — a Stripe outage answers
+        # 503 and a dunning customer answers 200, so 404 finally means what it says.
+        reason = "no_active_subscription"
+        try:
+            body = resp.json()
+            if isinstance(body, dict) and body.get("reason"):
+                reason = str(body["reason"])[:64]
+        except ValueError:
+            pass
+        return _invalid(reason)
 
     # 401 / 403 / 5xx — our auth is broken or the server is down. Both are OURS.
     # Log structurally; never log the api_key value.

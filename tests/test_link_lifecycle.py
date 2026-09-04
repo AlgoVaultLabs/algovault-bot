@@ -24,7 +24,7 @@ import pytest
 
 from algovault_bot import entitlement_drain
 from algovault_bot.db import Database
-from algovault_bot.entitlement_drain import LINK_INVALID_GRACE
+from algovault_bot.entitlement_drain import LINK_INVALID_GRACE, MIN_INVALID_OBSERVATIONS
 from algovault_bot.link_validator import KeyCheck
 
 
@@ -80,16 +80,28 @@ def _row(db: Database, chat_id: int) -> dict:
     return {k: r[k] for k in r.keys()}
 
 
-def _age_the_streak(db: Database, chat_id: int, hours: float) -> None:
+def _age_the_streak(
+    db: Database, chat_id: int, hours: float, observations: int | None = None
+) -> None:
     """Backdate `link_invalid_since` — the grace window measures WALL-CLOCK, so this is
-    how a long-running streak is expressed without waiting three days."""
+    how a long-running streak is expressed without waiting three days.
+
+    OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3 — it now ages the OBSERVATION COUNT too, because
+    teardown requires BOTH conditions and a streak that is old is, in reality, a streak that
+    accumulated observations while it aged. The drain runs 10x/hour, so that is the rate used.
+    Pass `observations=` explicitly to construct the case this helper's default would hide:
+    a long ELAPSED window containing almost no determined observations, which is exactly the
+    outage shape `MIN_INVALID_OBSERVATIONS` exists to refuse.
+    """
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
+    streak = observations if observations is not None else max(1, int(hours * 10))
     with db._cursor() as cur:
         cur.execute(
-            "UPDATE subscribers SET link_invalid_since = ? WHERE chat_id = ?",
-            (since, chat_id),
+            "UPDATE subscribers SET link_invalid_since = ?, link_invalid_streak = ? "
+            "WHERE chat_id = ?",
+            (since, streak, chat_id),
         )
 
 
@@ -154,6 +166,7 @@ def test_INDETERMINATE_never_downgrades_even_past_the_grace_window(
     """The single most important assertion in this file."""
     _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
     _age_the_streak(db, 3, hours=LINK_INVALID_GRACE.total_seconds() / 3600.0 + 48)
+    aged = _row(db, 3)["link_invalid_streak"]
 
     counts = _drain(db, {2: VALID_STARTER, 3: unknown, 4: VALID_STARTER})
 
@@ -161,16 +174,76 @@ def test_INDETERMINATE_never_downgrades_even_past_the_grace_window(
     r = _row(db, 3)
     assert r["linked_api_key"] is not None, "an unknown must never tear down a link"
     assert r["linked_tier"] == "starter"
-    assert r["link_invalid_streak"] == 0, "an unknown ENDS a streak, it does not extend it"
+    # OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3 — this line used to read `== 0` with the rationale
+    # "an unknown ENDS a streak, it does not extend it". It does neither: it HOLDS. See
+    # `test_INDETERMINATE_HOLDS_a_long_running_streak` below for the measured reason.
+    # The streak was aged to a realistic count by `_age_the_streak`; the assertion that matters
+    # is that the unknown left it EXACTLY where it was.
+    assert r["link_invalid_streak"] == aged, "an unknown holds — it neither advances nor resets"
 
 
-def test_INDETERMINATE_resets_a_long_running_streak(db: Database) -> None:
+def test_INDETERMINATE_HOLDS_a_long_running_streak(db: Database) -> None:
+    """🛑 THE LIVELOCK, RETIRED. OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3.
+
+    This test previously asserted the opposite (`test_INDETERMINATE_resets_a_long_running_streak`)
+    and was the specification the defect was written to. `_apply_link_observation`'s own docstring
+    has always said an INDETERMINATE "keeps current state and does not advance the grace counter";
+    RESETTING is not keeping — it credits the subscriber with a determined VALID on the strength
+    of a measurement we failed to take.
+
+    And the signal is GLOBAL: when signal-MCP blips, every linked chat resets in the same pass.
+
+    MEASURED over the entire retained drain log — 3,014 passes, 2026-08-23 to 2026-09-04:
+        passes with downgraded > 0      0     (never, not once)
+        passes with uncorroborated > 0  0     (corroboration was never the blocker)
+        reset events                    9
+        longest clean run               578 passes = 57.8h
+        needed for the 72h teardown     720 passes = 72.0h
+    The teardown was UNREACHABLE for the whole observed record, and two determinedly-invalid
+    subscribers sat in that limbo indefinitely — served, unmetered, and invisible.
+    """
     for _ in range(5):
         _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
     assert _row(db, 3)["link_invalid_streak"] == 5
+    since = _row(db, 3)["link_invalid_since"]
+
     _drain(db, {2: VALID_STARTER, 3: INDETERMINATE, 4: VALID_STARTER})
-    assert _row(db, 3)["link_invalid_streak"] == 0
-    assert _row(db, 3)["link_invalid_since"] is None
+
+    r = _row(db, 3)
+    assert r["link_invalid_streak"] == 5, "an unknown must not reset a determined streak"
+    assert r["link_invalid_since"] == since, "nor move the clock it is measured against"
+
+
+def test_an_outage_between_two_invalids_CANNOT_tear_down(db: Database) -> None:
+    """The hazard that HOLDING introduces, and the reason elapsed time is no longer sufficient.
+
+    One determined-invalid, a long outage, one more determined-invalid: `elapsed >= 72h` is
+    satisfied while we have observed the subscriber as invalid exactly twice. Tearing down there
+    would be Build Rule 5 violated by arithmetic instead of by branch. `MIN_INVALID_OBSERVATIONS`
+    is the second condition; NEITHER alone may downgrade.
+    """
+    _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
+    # `observations=1` is the whole point: a huge ELAPSED window that contains one determined
+    # negative. The helper's default would fabricate 1680 observations and hide the case.
+    _age_the_streak(db, 3, hours=LINK_INVALID_GRACE.total_seconds() / 3600.0 + 96, observations=1)
+    for _ in range(20):  # well past the grace window, far short of the observation floor
+        _drain(db, {2: VALID_STARTER, 3: INDETERMINATE, 4: VALID_STARTER})
+    counts = _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
+
+    assert counts["downgraded"] == 0
+    assert _row(db, 3)["linked_api_key"] is not None
+
+
+def test_sustained_invalidity_past_BOTH_conditions_DOES_tear_down(db: Database) -> None:
+    """The other direction. A guard that can never fire is not a guard — and for 12.5 measured
+    days this one never fired. This is the assertion that proves the retirement actually works."""
+    for _ in range(MIN_INVALID_OBSERVATIONS + 1):
+        _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
+    _age_the_streak(db, 3, hours=LINK_INVALID_GRACE.total_seconds() / 3600.0 + 1)
+    counts = _drain(db, {2: VALID_STARTER, 3: INVALID, 4: VALID_STARTER})
+
+    assert counts["downgraded"] == 1
+    assert _row(db, 3)["linked_api_key"] is None
 
 
 def test_VALID_resets_a_long_running_streak(db: Database) -> None:

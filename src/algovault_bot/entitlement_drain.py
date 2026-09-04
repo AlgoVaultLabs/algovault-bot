@@ -15,7 +15,11 @@ OUTCOME → ACTION, and each is a deliberate choice:
   INDETERMINATE / transport  leave PENDING, attempts += 1, backoff. Never stamp: we do not know
                              whether the charge landed, and stamping would silently forgive it.
   unlinked / 404             stamp sent_at with a terminal reason. A real terminal state, recorded
-                             — never a silent drop.
+                             — never a silent drop. Since OPS-VALIDATE-KEY-INDETERMINATE-W1 CH2 a
+                             404 is unambiguous: a Stripe outage answers 503 (INDETERMINATE, stays
+                             pending) and a `past_due` customer answers 200 and CHARGES. Before
+                             that, all three shared one 404 and a dunning customer's debits were
+                             stamped terminal forever — 1,987 of them, uncharged, in nine days.
 
 Fail-soft throughout: this runs on a cron, and a metering fault must never wall a paying customer
 or crash the drain.
@@ -60,6 +64,21 @@ STALENESS = PLAN_MIRROR_STALE_AFTER
 #: WRONG downgrade walls a paying customer; a LATE downgrade serves a lapsed one a few days
 #: longer. Only one of those is worth avoiding.
 LINK_INVALID_GRACE = timedelta(hours=72)
+
+#: How many DETERMINED-invalid observations must fall inside that window before a teardown.
+#:
+#: OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3 introduced this, and it is the safety half of making
+#: INDETERMINATE HOLD instead of RESET. With a reset, an outage wiped the clock — which is what
+#: livelocked the teardown for 12.5 measured days. With a plain hold and nothing else, the
+#: opposite hazard appears: one determined-invalid, a week-long outage, one more
+#: determined-invalid, and `elapsed >= 72h` would tear down a customer we observed as invalid
+#: exactly twice.
+#:
+#: So elapsed time is necessary and no longer sufficient. The drain runs 10x/hour, so a genuinely
+#: lapsed subscriber accumulates ~720 determined negatives across the 72h window; 24 is ~2.4h of
+#: sustained invalidity — trivially cleared by a real lapse, unreachable by the outage shape.
+#: Neither condition alone can tear down a link.
+MIN_INVALID_OBSERVATIONS = 24
 
 #: 3d's notice. RATIFIED BY THE ARCHITECT 2026-08-21, copy approved as-is and verified
 #: byte-identical to the approved string before this flip.
@@ -148,19 +167,66 @@ def _apply_link_observation(
     """
     chat_id = int(sub["chat_id"])
 
+    # ── 🛑 THE LIVELOCK THIS BRANCH USED TO BE. OPS-VALIDATE-KEY-INDETERMINATE-W1 CH3. ─────────
+    #
+    # This function's own docstring has always said "An INDETERMINATE keeps current state and
+    # does not advance the grace counter — it is not evidence of anything." The CODE did the
+    # opposite: it RESET the streak and cleared `link_invalid_since`. Resetting is not keeping.
+    # It credits the subscriber with a determined VALID on the strength of a measurement we
+    # failed to take.
+    #
+    # And an INDETERMINATE is a GLOBAL signal, not a per-subscriber one: when signal-MCP blips,
+    # every linked chat resets in the SAME pass. So the 72h grace could only elapse if the
+    # server stayed continuously reachable for 72h.
+    #
+    # MEASURED over the entire retained drain log — 3,014 passes across 12.5 days, 2026-08-23
+    # to 2026-09-04:
+    #     downgraded > 0        in 0 passes        (never, not once)
+    #     uncorroborated > 0    in 0 passes        (corroboration was never the blocker)
+    #     reset events          9                  (indeterminate > 0)
+    #     longest clean run     578 passes = 57.8h
+    #     needed for teardown   720 passes = 72.0h
+    # The teardown was UNREACHABLE for the whole observed record. Two determinedly-invalid
+    # subscribers sat in that limbo indefinitely, served and unmetered.
+    #
+    # The fix is to make the code do what the docstring says: HOLD.
+    if check.status == "INDETERMINATE":
+        counts["indeterminate"] += 1
+        log.info(
+            '{"event": "link_revalidate_indeterminate", "chat_id": %d, "reason": "%s", '
+            '"streak_held_at": %d, "note": "not evidence — streak neither advanced nor reset"}',
+            chat_id,
+            check.reason,
+            int(sub["link_invalid_streak"] or 0),
+        )
+        return True
+
+    if check.status == "DUNNING":
+        # A determined POSITIVE: they hold a subscription and Stripe is retrying their card.
+        # This ENDS a streak, because it is real evidence the link is live — and it is evidence
+        # we could not previously obtain, since a `past_due` customer answered a bare 404 that
+        # was indistinguishable from a cancellation.
+        #
+        # 🛑 NO SECOND GRACE TIMER. Stripe's dunning window IS the grace period, it is already
+        # delivered to us as `customer.subscription.updated`, and when Stripe gives up the
+        # subscription moves to `unpaid`/`canceled` — which arrives here as a determined INVALID
+        # and starts the streak for real. `LINK_INVALID_GRACE` was a reinvention of exactly this,
+        # and the reinvention is what livelocked.
+        counts["dunning"] += 1
+        log.warning(
+            '{"event": "link_dunning", "chat_id": %d, "tier": "%s", '
+            '"note": "past_due — link HELD and deliveries METERED; Stripe still collecting"}',
+            chat_id,
+            check.tier or "unknown",
+        )
+        if int(sub["link_invalid_streak"] or 0) or sub["link_invalid_since"]:
+            db.reset_link_invalid_streak(chat_id)
+        return True
+
     if check.status != "INVALID":
-        # VALID or INDETERMINATE. Either ends a streak: the counter measures SUSTAINED
-        # determined invalidity, so anything that is not a determined negative resets it.
-        # A VALID whose tier moved needs no special case — the mirror refresh below carries
-        # the new tier, CH2 renders it, and a customer who just upgraded does not need a
-        # bot message about it.
-        if check.status == "INDETERMINATE":
-            counts["indeterminate"] += 1
-            log.info(
-                '{"event": "link_revalidate_indeterminate", "chat_id": %d, "reason": "%s"}',
-                chat_id,
-                check.reason,
-            )
+        # VALID. A determined positive ends the streak. A VALID whose tier moved needs no
+        # special case — the mirror refresh below carries the new tier, CH2 renders it, and a
+        # customer who just upgraded does not need a bot message about it.
         if int(sub["link_invalid_streak"] or 0) or sub["link_invalid_since"]:
             db.reset_link_invalid_streak(chat_id)
         return True
@@ -211,7 +277,9 @@ def _apply_link_observation(
         LINK_INVALID_GRACE.total_seconds() / 3600.0,
     )
 
-    if elapsed < LINK_INVALID_GRACE:
+    # BOTH conditions, never either alone. See MIN_INVALID_OBSERVATIONS for why elapsed time
+    # stopped being sufficient the moment INDETERMINATE started holding instead of resetting.
+    if elapsed < LINK_INVALID_GRACE or streak < MIN_INVALID_OBSERVATIONS:
         return True
 
     # ── sustained past the grace window: notify, then tear the link down ─────────────────
@@ -264,6 +332,8 @@ def drain_entitlement_debits(
         # zeroes is indistinguishable from a loop that never executed.
         "revalidated": 0, "key_invalid": 0, "indeterminate": 0,
         "uncorroborated": 0, "downgraded": 0,
+        # CH3 — the dunning cohort, counted so "served but not paying" is never invisible again.
+        "dunning": 0,
     }
     now = datetime.now(timezone.utc)
 
@@ -350,7 +420,11 @@ def drain_entitlement_debits(
         for sub in subs:
             checks[int(sub["chat_id"])] = validate_api_key(sub["linked_api_key"] or "")
             counts["revalidated"] += 1
-        corroborated = any(c.is_valid for c in checks.values())
+        # CH3 — `corroborates` is VALID **or DUNNING**: both are positive determinations that
+        # required Stripe to answer. Before this wave a dunning customer answered a bare 404 and
+        # counted as INVALID, so a cohort where every paying customer was mid-dunning offered no
+        # corroboration at all — the guard was weakest exactly when the population needed it.
+        corroborated = any(c.corroborates for c in checks.values())
 
         for sub in subs:
             chat_id = int(sub["chat_id"])
