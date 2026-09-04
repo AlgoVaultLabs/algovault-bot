@@ -721,7 +721,12 @@ def _record_saturation(deferred: int) -> None:
             except (json.JSONDecodeError, OSError):
                 state = {}
         new_state, should_alert = fetch_budget.update_saturation_state(
-            state, deferred, threshold
+            state,
+            deferred,
+            threshold,
+            int(time.time()),
+            episode_threshold=fetch_budget.saturation_episodes(),
+            window_seconds=fetch_budget.saturation_window_seconds(),
         )
         try:
             with open(_SATURATION_STATE_PATH, "w") as f:

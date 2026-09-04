@@ -46,6 +46,31 @@ DEFAULT_FETCH_TICK_DEADLINE_SEC: int = 45
 # Consecutive ticks with deferred>0 before the operator-action signal fires.
 DEFAULT_SATURATION_TICKS: int = 5
 
+# OPS-BOT-DISPATCH-LATENCY-W1 CH1 — THE CONSECUTIVE ARM ALONE IS A DARK GUARD.
+#
+# `DEFAULT_SATURATION_TICKS = 5` asks for five BACK-TO-BACK deferred ticks. Real budget
+# pressure here is not shaped like that: it is boundary-clustered. Rows collapse onto the
+# minutes after a shared bar boundary, the budget drains them over 3-4 ticks, and then 56
+# minutes are clean. Measured over the full 40-day journal the longest run is 3-4 and the
+# alarm has NEVER fired — while the budget was genuinely binding on 26 ticks in 26 hours.
+#
+# So the guard was not merely mis-tuned; it was asking the wrong question. Lowering the
+# threshold to 3 would be the lane fix and would make it fire on a single ordinary boundary.
+# The quantity that means "an operator should look" is RECURRENCE: a burst that keeps coming
+# back every hour is chronic saturation, and a burst that never ends is a stall. Those are two
+# different failures and the guard now has an arm for each:
+#
+#   arm A (kept) — `consecutive >= saturation_ticks`      : one unbroken run = a stall.
+#   arm B (new)  — `episodes >= saturation_episodes`      : repeated bursts = chronic pressure.
+#                  within `saturation_window_seconds`
+#
+# An EPISODE is one maximal run of deferred>0 ticks, counted once at its first tick, so a
+# 4-tick drain is one episode and not four.
+DEFAULT_SATURATION_EPISODES: int = 3
+# 3 hours: at the hourly boundary that is three chances to recur, so a genuinely chronic
+# condition alerts within one working morning while a single bad hour stays silent.
+DEFAULT_SATURATION_WINDOW_SEC: int = 10_800
+
 
 class SchedulableRow(Protocol):
     chat_id: int
@@ -145,16 +170,70 @@ def schedule(
 
 
 def update_saturation_state(
-    state: dict, deferred: int, threshold: int
+    state: dict,
+    deferred: int,
+    threshold: int,
+    now_epoch: int,
+    *,
+    episode_threshold: int | None = None,
+    window_seconds: int | None = None,
 ) -> tuple[dict, bool]:
-    """Pure detector for the sustained-deferred operator signal.
+    """Pure detector for the sustained-deferred operator signal. TWO arms.
 
-    Increments a consecutive-deferred counter while ``deferred > 0``; resets it
-    on a clean tick (``deferred == 0``). Returns ``(new_state, should_alert)``;
-    ``should_alert`` is True the tick the counter first reaches ``threshold``,
-    and the counter resets after firing so it alerts ONCE per sustained episode
-    (the 24h send-cooldown is additionally enforced by send_telegram.sh).
+    ``arm A`` — consecutive: increments while ``deferred > 0``, resets on a clean tick, fires
+    at ``threshold``. An unbroken run means the engine is not draining at all.
+
+    ``arm B`` — episodes: counts distinct BURSTS (one maximal deferred run = one episode,
+    stamped at its first tick) inside a rolling ``window_seconds``, and fires at
+    ``episode_threshold``. Recurrence is the signal arm A structurally cannot see: measured
+    over 40 days, real deferral never exceeded a 3-4 tick run, so arm A alone had never fired
+    once despite the budget binding 26 times in 26 hours.
+
+    ``now_epoch`` is INJECTED rather than read here — the house idiom (``is_due``,
+    ``list_due_watches``) — so the detector stays pure and its window is testable without a
+    clock. It is REQUIRED, deliberately: an optional clock would let a caller silently leave
+    arm B dark, which is the exact failure mode this change exists to retire.
+
+    Returns ``(new_state, should_alert)``. Both counters clear on fire, so an episode-cluster
+    alerts ONCE (the 24h send-cooldown in send_telegram.sh is additional, not a substitute).
     """
-    consecutive = (state.get("consecutive", 0) + 1) if deferred > 0 else 0
-    should_alert = consecutive >= threshold
-    return ({"consecutive": 0 if should_alert else consecutive}, should_alert)
+    episodes_needed = (
+        DEFAULT_SATURATION_EPISODES if episode_threshold is None else episode_threshold
+    )
+    window = DEFAULT_SATURATION_WINDOW_SEC if window_seconds is None else window_seconds
+
+    prior_consecutive = int(state.get("consecutive", 0) or 0)
+    # Tolerate a state file written by the pre-wave shape (no episode list) or a corrupt one.
+    raw_starts = state.get("episode_starts")
+    starts = [int(t) for t in raw_starts if isinstance(t, (int, float))] if isinstance(raw_starts, list) else []
+
+    if deferred > 0:
+        consecutive = prior_consecutive + 1
+        # Stamp only the FIRST tick of a run: a 4-tick drain is one episode, not four.
+        if prior_consecutive == 0:
+            starts.append(now_epoch)
+    else:
+        consecutive = 0
+
+    starts = [t for t in starts if now_epoch - t < window]
+
+    should_alert = consecutive >= threshold or len(starts) >= episodes_needed
+    if should_alert:
+        return ({"consecutive": 0, "episode_starts": []}, True)
+    return ({"consecutive": consecutive, "episode_starts": starts}, False)
+
+
+def saturation_episodes() -> int:
+    try:
+        return max(1, int(os.environ.get("FETCH_SATURATION_EPISODES", DEFAULT_SATURATION_EPISODES)))
+    except (TypeError, ValueError):
+        return DEFAULT_SATURATION_EPISODES
+
+
+def saturation_window_seconds() -> int:
+    try:
+        return max(
+            60, int(os.environ.get("FETCH_SATURATION_WINDOW_SEC", DEFAULT_SATURATION_WINDOW_SEC))
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_SATURATION_WINDOW_SEC

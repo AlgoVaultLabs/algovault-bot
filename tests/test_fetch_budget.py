@@ -27,6 +27,17 @@ _NONE_EXHAUSTED = lambda _cid: False  # noqa: E731
 # ── budget cap ─────────────────────────────────────────────────
 
 
+# OPS-BOT-DISPATCH-LATENCY-W1 CH1: `update_saturation_state` now takes an INJECTED clock so its
+# rolling episode window is testable. These legacy cases exercise arm A (consecutive), so they
+# advance one tick (60s) per call and never accumulate enough episodes to trip arm B.
+_CLOCK = [1_788_000_000]
+
+
+def _t() -> int:
+    _CLOCK[0] += 60
+    return _CLOCK[0]
+
+
 def test_budget_caps_processed_exactly() -> None:
     # AC2.1 — 1000 due, budget 200 → exactly 200 scheduled, 800 deferred.
     due = _rows(1, 1000)
@@ -140,16 +151,16 @@ def test_saturation_fires_after_threshold_consecutive_ticks() -> None:
     state: dict = {}
     fired = []
     for _ in range(5):
-        state, alert = fetch_budget.update_saturation_state(state, deferred=7, threshold=5)
+        state, alert = fetch_budget.update_saturation_state(state, 7, 5, _t())
         fired.append(alert)
     assert fired == [False, False, False, False, True]  # fires on the 5th
 
 
 def test_saturation_resets_on_clean_tick() -> None:
     state: dict = {}
-    state, _ = fetch_budget.update_saturation_state(state, deferred=7, threshold=3)
-    state, _ = fetch_budget.update_saturation_state(state, deferred=7, threshold=3)
-    state, alert = fetch_budget.update_saturation_state(state, deferred=0, threshold=3)
+    state, _ = fetch_budget.update_saturation_state(state, 7, 3, _t())
+    state, _ = fetch_budget.update_saturation_state(state, 7, 3, _t())
+    state, alert = fetch_budget.update_saturation_state(state, 0, 3, _t())
     assert alert is False
     assert state["consecutive"] == 0
 
@@ -160,7 +171,7 @@ def test_saturation_fires_once_per_episode() -> None:
     state: dict = {}
     alerts = []
     for _ in range(8):  # 8 consecutive deferred ticks, threshold 3
-        state, alert = fetch_budget.update_saturation_state(state, deferred=4, threshold=3)
+        state, alert = fetch_budget.update_saturation_state(state, 4, 3, _t())
         alerts.append(alert)
     # fires on tick 3 and tick 6 (reset after each) — once per 3-tick episode.
     assert alerts == [False, False, True, False, False, True, False, False]
