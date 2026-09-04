@@ -41,8 +41,25 @@ from .validators import TF_SECONDS
 # Ratified by the Plan-Mode capacity probe (2026-05-29): p50 1.4s / p95 7.7s
 # per signal-MCP call, sequential engine, 60s tick → ~30 rows is the safe
 # sequential ceiling. Env-overridable (no redeploy to tune).
-DEFAULT_FETCH_BUDGET_PER_MIN: int = 30
+# OPS-BOT-DISPATCH-LATENCY-W1 CH3 — 30 was the SEQUENTIAL ceiling and is now stale twice over.
+# It was ratified 2026-05-29 against a 2-vCPU CPX22 holding EIGHT watchlist rows; the box became
+# an 8-vCPU CPX42 on 2026-06-05 (OPS-CPX42-RESIZE-W1) six days later, and the loop is no longer
+# sequential. Replaying the original audit's own derivation at today's measured per-row cost
+# sizes it at 67-101 rows, and it binds on only ~2% of ticks — every one of them at the hour
+# boundary, which is exactly where the alert that should have reported it could not fire.
+#
+# 150 is chosen against the WORST CASE, not today's load: 105 live rows, a measured max of 51
+# eligible in any tick across 40 days, and CH4's jitter collapse putting up to 104 rows on one
+# tick. It leaves ~40% watchlist headroom before deferral resumes, and it is still a real cap —
+# the point of the budget was never throughput, it is a bound on what one tick can ask of the
+# venue layer.
+DEFAULT_FETCH_BUDGET_PER_MIN: int = 150
 DEFAULT_FETCH_TICK_DEADLINE_SEC: int = 45
+# How many rows may be in flight at once. Rows are sharded by chat_id, so this bounds distinct
+# SUBSCRIBERS in flight, never two rows of the same one. 8 == the box's vCPU count, and the
+# work per row is one blocking HTTP call offloaded to a thread, so the threads are I/O-bound
+# and the ceiling is the upstream's tolerance rather than the CPU's.
+DEFAULT_FETCH_CONCURRENCY: int = 8
 # Consecutive ticks with deferred>0 before the operator-action signal fires.
 DEFAULT_SATURATION_TICKS: int = 5
 
@@ -83,6 +100,16 @@ def fetch_budget_per_min() -> int:
         return max(1, int(os.environ.get("FETCH_BUDGET_PER_MIN", DEFAULT_FETCH_BUDGET_PER_MIN)))
     except (TypeError, ValueError):
         return DEFAULT_FETCH_BUDGET_PER_MIN
+
+
+def fetch_concurrency() -> int:
+    """Max rows in flight. Clamped to [1, 32]: 1 restores the pre-CH3 sequential behaviour
+    exactly (a working rollback with no redeploy), and the upper bound stops a typo turning
+    one tick into a stampede against the venue layer."""
+    try:
+        return max(1, min(32, int(os.environ.get("FETCH_CONCURRENCY", DEFAULT_FETCH_CONCURRENCY))))
+    except (TypeError, ValueError):
+        return DEFAULT_FETCH_CONCURRENCY
 
 
 def tick_deadline_sec() -> float:

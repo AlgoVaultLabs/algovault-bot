@@ -136,12 +136,44 @@ def test_deferred_rows_returned_unmodified() -> None:
 
 
 def test_budget_env_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Asserted against the CONSTANT, not a literal. The literal 30 was baked in here and had to
+    # be hand-edited when OPS-BOT-DISPATCH-LATENCY-W1 CH3 raised the default — a duplicated fact
+    # that goes stale, which is exactly what this repo's own rules say not to write.
+    default = fetch_budget.DEFAULT_FETCH_BUDGET_PER_MIN
     monkeypatch.delenv("FETCH_BUDGET_PER_MIN", raising=False)
-    assert fetch_budget.fetch_budget_per_min() == 30
+    assert fetch_budget.fetch_budget_per_min() == default
     monkeypatch.setenv("FETCH_BUDGET_PER_MIN", "12")
     assert fetch_budget.fetch_budget_per_min() == 12
     monkeypatch.setenv("FETCH_BUDGET_PER_MIN", "garbage")
-    assert fetch_budget.fetch_budget_per_min() == 30  # default-deny on bad value
+    assert fetch_budget.fetch_budget_per_min() == default  # default-deny on bad value
+
+
+def test_the_budget_covers_the_measured_worst_case() -> None:
+    """The number itself is load-bearing, so it is pinned to what it was sized against rather
+    than left as a bare literal nobody can re-derive. 51 = max eligible rows in any tick across
+    the 40-day journal; 104 = the whole watchlist collapsing onto one tick, which is what CH4's
+    jitter change produces. A future wave lowering this below either figure re-creates the
+    silent deferral this wave exists to retire."""
+    assert fetch_budget.DEFAULT_FETCH_BUDGET_PER_MIN >= 51, "measured max eligible/tick"
+    assert fetch_budget.DEFAULT_FETCH_BUDGET_PER_MIN >= 104, "CH4 full-collapse worst case"
+
+
+def test_concurrency_env_default_override_and_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    default = fetch_budget.DEFAULT_FETCH_CONCURRENCY
+    monkeypatch.delenv("FETCH_CONCURRENCY", raising=False)
+    assert fetch_budget.fetch_concurrency() == default
+    monkeypatch.setenv("FETCH_CONCURRENCY", "4")
+    assert fetch_budget.fetch_concurrency() == 4
+    # 1 is the documented rollback: it restores the pre-CH3 sequential tick with no redeploy.
+    monkeypatch.setenv("FETCH_CONCURRENCY", "1")
+    assert fetch_budget.fetch_concurrency() == 1
+    # Clamped both ways so a typo cannot stampede the venue layer or halt the tick.
+    monkeypatch.setenv("FETCH_CONCURRENCY", "0")
+    assert fetch_budget.fetch_concurrency() == 1
+    monkeypatch.setenv("FETCH_CONCURRENCY", "9999")
+    assert fetch_budget.fetch_concurrency() == 32
+    monkeypatch.setenv("FETCH_CONCURRENCY", "garbage")
+    assert fetch_budget.fetch_concurrency() == default
 
 
 # ── sustained-deferred saturation detector ─────────────────────

@@ -401,6 +401,27 @@ def _maybe_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+async def call_tool_async(mcp: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """OPS-BOT-DISPATCH-LATENCY-W1 CH3 — run the BLOCKING MCP call off the event loop.
+
+    `McpClient.call_tool` is a synchronous `httpx.Client` request, so `asyncio.gather` over
+    `process_one_row` was a structural NO-OP: N tasks would serialize on the loop and the tick
+    would take exactly as long as before. This is the one line that makes concurrency real.
+
+    A full port to `httpx.AsyncClient` was the original plan and is REJECTED on measurement:
+    `call_tool` has TEN production call sites (5 in handlers.py, 3 here, adoption.py,
+    scripts/daily-digest.py) plus nine sync test doubles, and turning it async makes every one
+    of them a place where a missed `await` silently yields a coroutine that reads as a truthy
+    result. Offloading instead keeps every caller and every double byte-identical.
+
+    Threads are safe here because `Database` already is: it opens a NEW connection per
+    `_cursor()` call ("Threadsafe via per-call connections") on a WAL database in autocommit
+    with a 30s busy timeout. Only the HTTP call runs in the thread — Telegram sends and DB
+    writes stay on the loop, where they already were.
+    """
+    return await asyncio.to_thread(mcp.call_tool, name, arguments)
+
+
 async def process_one_row(
     bot: Bot, mcp: McpClient, db: Database, row: WatchRow
 ) -> dict[str, Any]:
@@ -416,7 +437,8 @@ async def process_one_row(
         try:
             # get_market_regime supports {1h, 4h, 1d}; for shorter TFs we coarse-grain to 1h.
             regime_tf = row.timeframe if row.timeframe in ("1h", "4h", "1d") else "1h"
-            regime_result = mcp.call_tool(
+            regime_result = await call_tool_async(
+                mcp,
                 "get_market_regime",
                 {"coin": row.coin, "timeframe": regime_tf, "exchange": row.exchange},
             )
@@ -506,7 +528,8 @@ async def process_one_row(
 
     if row.alert_type in ("calls", "both"):
         try:
-            tc_result = mcp.call_tool(
+            tc_result = await call_tool_async(
+                mcp,
                 "get_trade_call",
                 {
                     "coin": row.coin,
@@ -816,43 +839,75 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
         internal_bypass_key=bypass_key,
     )
     deadline = fetch_budget.tick_deadline_sec()
+    concurrency = fetch_budget.fetch_concurrency()
     tick_start = time.monotonic()
     latencies: list[float] = []
     deadline_deferred = 0
+
+    # OPS-BOT-DISPATCH-LATENCY-W1 CH3 — CONCURRENT, SHARDED BY chat_id.
+    #
+    # The tick was a plain `for` with one `await` per row, so its wall time was the SUM of the
+    # row times. Journal arithmetic confirmed it: elapsed / (rows x per-row p50) sat at 1.34,
+    # a sequential sum, while elapsed / p95 sat at 4.5. That ceiling is the whole reason
+    # `FETCH_BUDGET_PER_MIN` exists at 30, and the reason the jitter window exists to spread
+    # rows across ticks in the first place.
+    #
+    # Rows are grouped by chat_id and the GROUPS run concurrently while each group stays
+    # SEQUENTIAL internally. That is deliberate and it is the cheap half of CH2's guarantee:
+    # two rows for the same subscriber can never be in flight together, so the quota
+    # gate -> send -> consume span is never raced against itself no matter what `concurrency`
+    # is set to. With 105 rows across 65 chat_ids most groups are size 1, so the shard costs
+    # almost nothing in parallelism and buys the invariant outright.
+    async def _run_chat_group(rows: list[WatchRow]) -> None:
+        for row in rows:
+            # The wall-clock guard stays BETWEEN rows, where it has always been — it defers
+            # what has not started rather than cancelling work in flight. Cancelling mid-row
+            # is the dangerous shape: `process_one_row` can be between a delivered Telegram
+            # message and its `record_call_delivered`, and killing it there would hand out a
+            # free alert or lose a bar. A group that is already past the deadline simply stops.
+            if time.monotonic() - tick_start > deadline:
+                nonlocal deadline_deferred
+                deadline_deferred += 1
+                continue
+            row_start = time.monotonic()
+            try:
+                async with sem:
+                    fetched = await process_one_row(bot, mcp, db, row)
+                counts["processed"] += 1
+                if fetched.get("regime") == "fired":
+                    counts["regime_fired"] += 1
+                if fetched.get("trade_call") == "fired":
+                    counts["calls_fired"] += 1
+            except Exception as e:  # noqa: BLE001
+                counts["errors"] += 1
+                log.exception(
+                    "row processing failed: %s/%s/%s — %s",
+                    row.coin, row.timeframe, row.exchange, e,
+                )
+            finally:
+                latencies.append(time.monotonic() - row_start)
+
+    by_chat: dict[int, list[WatchRow]] = {}
+    for row in sched.scheduled:
+        by_chat.setdefault(row.chat_id, []).append(row)
+
+    sem = asyncio.Semaphore(concurrency)
     try:
         with McpClient(cfg) as mcp:
-            for i, row in enumerate(sched.scheduled):
-                # Wall-clock guard: a latency spike must never overrun the 60s
-                # tick — defer the rest (they remain due, unmarked).
-                if time.monotonic() - tick_start > deadline:
-                    deadline_deferred = len(sched.scheduled) - i
-                    log.warning(
-                        json.dumps({
-                            "event": "fetch_tick_deadline_hit",
-                            "deadline_s": deadline,
-                            "deadline_deferred": deadline_deferred,
-                        })
-                    )
-                    break
-                row_start = time.monotonic()
-                try:
-                    fetched = await process_one_row(bot, mcp, db, row)
-                    counts["processed"] += 1
-                    if fetched.get("regime") == "fired":
-                        counts["regime_fired"] += 1
-                    if fetched.get("trade_call") == "fired":
-                        counts["calls_fired"] += 1
-                except Exception as e:  # noqa: BLE001
-                    counts["errors"] += 1
-                    log.exception(
-                        "row processing failed: %s/%s/%s — %s",
-                        row.coin, row.timeframe, row.exchange, e,
-                    )
-                finally:
-                    latencies.append(time.monotonic() - row_start)
+            await asyncio.gather(*(_run_chat_group(g) for g in by_chat.values()))
     except McpError as e:
         log.error("mcp client init failed: %s", e)
         counts["errors"] += 1
+
+    if deadline_deferred:
+        log.warning(
+            json.dumps({
+                "event": "fetch_tick_deadline_hit",
+                "deadline_s": deadline,
+                "deadline_deferred": deadline_deferred,
+            })
+        )
+    counts["concurrency"] = concurrency
 
     total_deferred = sched.stats["deferred"] + deadline_deferred
     counts["deferred"] = total_deferred
@@ -929,7 +984,8 @@ async def process_scan_digests(
                 try:
                     # Forward the stored lens (the MCP resolves; 'oi' is byte-identical to
                     # omitting → existing oi watches push the same digest as before).
-                    result = mcp.call_tool(
+                    result = await call_tool_async(
+                        mcp,
                         "scan_trade_calls",
                         # SCAN-DIGEST-MCP-PARITY-W1 CH3: the enriched scan IS the digest — one
                         # call returns price+factors+reasoning+oi_change_window per coin (retires
