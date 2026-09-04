@@ -1879,6 +1879,88 @@ class Database:
                 (last_verdict, last_verdict_streak, regime_last_seen, chat_id, coin, timeframe, exchange),
             )
 
+    def consume_quota_atomic(
+        self,
+        chat_id: int,
+        units: int,
+        monthly_total: int,
+        day_key: str,
+        now_iso: str,
+    ) -> tuple[int, int, int, str | None] | None:
+        """OPS-BOT-DISPATCH-LATENCY-W1 CH2 — the free meter's charge, as ONE statement.
+
+        `consume_quota` was a read-modify-write: `get_quota_state` read `alert_count`, Python
+        computed `used + units`, and an UPDATE wrote the ABSOLUTE result. Two charges
+        interleaving on one subscriber therefore both read N and both wrote N+1 — one delivered
+        alert billed to nobody.
+
+        That is not theoretical here and it does not need concurrency inside the engine to
+        happen: `record_call_delivered` is called from the cron engine AND from `handlers.py`
+        inside the separate, always-running `algovault-bot.service`, and both open the SAME
+        `/var/lib/algovault-bot/state.db`. A user pressing a button while their watch tick
+        fires is the whole reproduction.
+
+        Every counter is now RELATIVE and derived inside the statement. SQLite evaluates every
+        SET expression against the row's PRE-UPDATE values, so `alert_count` on the right-hand
+        side of the bonus arm is the same snapshot the monthly arm used — the two cannot
+        disagree, which a two-statement version could not guarantee at any isolation level we
+        control.
+
+        Precedent for the idiom, on this very table, three columns away:
+        `increment_total_call_alerts` / `increment_total_regime_alerts` /
+        `increment_total_ctas_shown` (`UPDATE … SET col = col + 1 … RETURNING col`). The
+        counters that fund the product were the ones still doing it the unsafe way.
+
+        `referral_bonus_remaining` is covered deliberately, not incidentally: it carries granted
+        user value, so fixing only `alert_count` would close the lost-update class on the
+        counter nobody was losing and leave it open on the one that costs a user something.
+
+        Returns `(alert_count, referral_bonus_remaining, alerts_day_count, alerts_window_start)`
+        after the write, or None when no such subscriber exists.
+        """
+        # The monthly charge: capped at remaining headroom ONLY when a bonus pool exists, which
+        # is what makes the overflow land on the bonus. With no pool the meter is uncapped and
+        # the user crosses the wall — byte-identical to the pre-wave Python for that (today:
+        # 100%) base, which is why this reads as two arms rather than one tidy expression.
+        monthly_charge = (
+            "CASE WHEN COALESCE(referral_bonus_remaining, 0) > 0 "
+            "THEN MIN(?, MAX(0, ? - alert_count)) ELSE ? END"
+        )
+        sql = f"""
+            UPDATE subscribers
+            SET alert_count = alert_count + ({monthly_charge}),
+                referral_bonus_remaining =
+                    CASE WHEN COALESCE(referral_bonus_remaining, 0) > 0
+                         THEN MAX(0, referral_bonus_remaining - (? - ({monthly_charge})))
+                         ELSE 0 END,
+                -- Rolled on WRITE as well as on read: a stale day contributes 0, so a
+                -- subscriber walled yesterday is served today with nothing having run overnight.
+                alerts_day_count =
+                    CASE WHEN alerts_day = ? THEN COALESCE(alerts_day_count, 0) ELSE 0 END + ?,
+                alerts_day = ?,
+                -- Replaces the `if state.window_start is None` branch. COALESCE is the same
+                -- decision expressed atomically, so two first-charges cannot each start a window.
+                alerts_window_start = COALESCE(alerts_window_start, ?)
+            WHERE chat_id = ?
+            RETURNING alert_count, referral_bonus_remaining, alerts_day_count, alerts_window_start
+        """
+        params = (
+            units, monthly_total, units,               # monthly arm
+            units, units, monthly_total, units,        # bonus arm (units, then the same CASE)
+            day_key, units, day_key,                   # daily meter
+            now_iso, chat_id,
+        )
+        with self._cursor() as cur:
+            row = cur.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        return (
+            int(row["alert_count"] or 0),
+            int(row["referral_bonus_remaining"] or 0),
+            int(row["alerts_day_count"] or 0),
+            row["alerts_window_start"],
+        )
+
     def record_fetch_failure(
         self,
         chat_id: int,

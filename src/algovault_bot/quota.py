@@ -528,41 +528,31 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
     if state.is_paid:
         return state  # no-op for paid tiers
     units = _clamp_units(units)
-    bonus = state.referral_bonus_remaining
-    if bonus > 0:
-        # TG-REFERRAL-W1: fill the monthly free headroom first, then draw any
-        # overflow from the referee bonus pool (persistent; not window-reset).
-        # GROWTH-TG-QUOTA-PARITY-W1: headroom is measured against `state.total` — the LADDER's
-        # figure — not against the module constant. The constant is now only a fallback, and
-        # reading it here would have quietly re-pinned the bonus maths to 200 forever.
-        headroom = max(0, state.total - state.used)
-        monthly_charge = min(units, headroom)
-        new_used = state.used + monthly_charge
-        new_bonus = max(0, bonus - (units - monthly_charge))
-    else:
-        # byte-identical to the pre-bonus meter for the (today: 100%) bonus-free base
-        new_used = state.used + units
-        new_bonus = 0
-    # GROWTH-TG-QUOTA-PARITY-W1 CH2c — the DAILY meter ticks for EVERY consumed unit, bonus-drawn
-    # units included. The bonus is extra budget; it is not a pass on pacing.
-    day_key = _utc_day_key()
-    new_day_used = (state.day_used if state.day_used else 0) + units
-    with db._cursor() as cur:
-        if state.window_start is None:
-            window_start = _now()
-            cur.execute(
-                "UPDATE subscribers SET alert_count = ?, alerts_window_start = ?, "
-                "referral_bonus_remaining = ?, alerts_day_count = ?, alerts_day = ? "
-                "WHERE chat_id = ?",
-                (new_used, window_start.isoformat(), new_bonus, new_day_used, day_key, chat_id),
-            )
-        else:
-            window_start = state.window_start
-            cur.execute(
-                "UPDATE subscribers SET alert_count = ?, referral_bonus_remaining = ?, "
-                "alerts_day_count = ?, alerts_day = ? WHERE chat_id = ?",
-                (new_used, new_bonus, new_day_used, day_key, chat_id),
-            )
+
+    # OPS-BOT-DISPATCH-LATENCY-W1 CH2 — THE CHARGE IS ONE STATEMENT.
+    #
+    # This was a read-modify-write: the `get_quota_state` above read `alert_count`, the bonus
+    # arithmetic ran here in Python, and an UPDATE wrote the ABSOLUTE result. Two charges
+    # interleaving on one subscriber both read N and both wrote N+1 — one delivered alert
+    # billed to nobody. It needs no concurrency inside the engine to happen:
+    # `record_call_delivered` runs in the cron engine AND in `handlers.py` inside the separate,
+    # always-running `algovault-bot.service`, and both open the same state.db.
+    #
+    # The bonus/headroom rule, the daily roll and the first-window stamp all moved INTO the
+    # statement — not for tidiness, but because each of them read a counter that the other
+    # writer could move underneath it. `referral_bonus_remaining` is covered deliberately: it
+    # carries granted user value, and fixing only `alert_count` would close the lost-update
+    # class on the counter nobody was losing while leaving it open on the one that costs a
+    # user something.
+    charged = db.consume_quota_atomic(
+        chat_id, units, state.total, _utc_day_key(), _now().isoformat()
+    )
+    if charged is None:
+        # Subscriber deleted between the read and the charge. Nothing to meter.
+        return state
+    new_used, new_bonus, new_day_used, window_raw = charged
+    window_start = _parse_ts(window_raw)
+
     return QuotaState(
         new_used,
         state.total,
