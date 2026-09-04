@@ -98,6 +98,11 @@ def test_upsert_sql_column_param_arity() -> None:
         # asserts on a comment. Current truth: the point-in-time walled state IS bridged (as
         # `walled_paid_now`) and the arity is asserted below rather than stated here.
         walled_now=0, walled_silent=0, walled_paid=0, calls_paid_linked=0,
+        # OPS-VALIDATE-KEY-INDETERMINATE-W1 CH6 — the leak meter. DELIBERATELY NOT bridged to
+        # postgres: `bot_daily_metrics` lives in signal-MCP's DB behind a least-privilege role,
+        # so widening it is a cross-repo migration. These are TG-digest-only for now, which is
+        # why the arity asserted below is UNCHANGED by this wave.
+        unmetered_24h=0, linked_by_state={},
         plan_units_debited=0, outbox_pending=0, deployed_sha=None,
         generated_at="2026-07-06T03:00:00+00:00",
     )

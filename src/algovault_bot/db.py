@@ -263,6 +263,24 @@ PLAN_MIRROR_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN plan_wall_notice_day TEXT",   # UTC date of last DAILY notice
 )
 
+# OPS-VALIDATE-KEY-INDETERMINATE-W1 CH4/CH6 — THE MIRROR CARRIES THE ENTITLEMENT STATE.
+#
+# The server has answered four distinct states since CH2 (ENTITLED / DUNNING / NOT_ENTITLED /
+# INDETERMINATE) and the bot stored none of them, so "this subscriber is being served while
+# Stripe dunns them" existed only as a log line in a file with no reader. That is exactly how
+# 1,987 uncharged debits and 2,025 delivered alerts accumulated for nine days unnoticed.
+#
+# 🛑 NO SECOND FRESHNESS CLOCK, for the same reason `plan_tier` has none: this column is stamped
+# by the EXISTING `plan_state_as_of` in the same `update_plan_mirror` write. A column with its own
+# timestamp is a second clock to drift.
+#
+# NULL = never observed, and it MUST read as unobserved rather than as any state — a mirror
+# written by a server predating CH2 carries no state, and defaulting that to ENTITLED would grant
+# and to NOT_ENTITLED would revoke.
+ENTITLEMENT_STATE_MIRROR_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN plan_entitlement_state TEXT",
+)
+
 # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — THE MIRROR CARRIES TIER.
 #
 # `linked_tier` was written once at /link and never re-read, while the server's CURRENT tier
@@ -689,6 +707,7 @@ class Database:
                 *QUOTA_WALL_NOTICE_MIGRATIONS,
                 # PRICING-BOT-DELIVERY-METERING-W1 (2026-08-17): plan mirror + debit outbox.
                 *PLAN_MIRROR_MIGRATIONS,
+                *ENTITLEMENT_STATE_MIRROR_MIGRATIONS,
                 *ENTITLEMENT_OUTBOX_MIGRATIONS,
                 # OPS-BOT-LINKED-TIER-REFRESH-W1 (2026-08-21): server-authoritative tier,
                 # stamped by the plan mirror's existing as_of.
@@ -1609,6 +1628,41 @@ class Database:
             cur.execute("SELECT COUNT(*) FROM entitlement_outbox WHERE sent_at IS NULL")
             return int(cur.fetchone()[0])
 
+    def count_unmetered_deliveries_last_24h(self) -> int:
+        """Debits stamped TERMINAL because the key would not validate — the revenue-leak meter.
+
+        OPS-VALIDATE-KEY-INDETERMINATE-W1 CH6. Every row counted here is an alert we DELIVERED
+        and will never charge for: `entitlement_drain` stamps `key_invalid_404` and the row is
+        never charged and never retried. Measured 2026-09-04 at 1,987 such rows for a single
+        `past_due` customer across nine days, while `plan_units_debited` sat healthy and nothing
+        anywhere said a word — the digest reported the debits that WORKED and had no denominator.
+
+        A non-zero value is not automatically a fault: a genuinely cancelled subscriber's queued
+        debits land here too, and that is correct. It is the SUSTAINED non-zero that means a live
+        subscriber is being served for nothing.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM entitlement_outbox "
+                "WHERE sent_at IS NOT NULL AND last_error LIKE 'key_invalid%' "
+                "AND sent_at >= datetime('now', '-24 hours')"
+            )
+            return int(cur.fetchone()[0])
+
+    def count_linked_by_entitlement_state(self) -> dict[str, int]:
+        """Linked subscribers grouped by the state their mirror last observed.
+
+        NULL groups under `unobserved` and is NEVER folded into any state: a mirror written by a
+        server predating CH2 carries no state, and reporting that as ENTITLED would manufacture
+        the very reassurance this line exists to withhold.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(plan_entitlement_state, 'unobserved') AS st, COUNT(*) AS n "
+                "FROM subscribers WHERE linked_api_key IS NOT NULL GROUP BY st"
+            )
+            return {str(r["st"]): int(r["n"]) for r in cur.fetchall()}
+
     def count_plan_units_debited_last_24h(self) -> int:
         """Units the drainer CONFIRMED charged in the last 24h — `sent_at` set with no terminal
         error, i.e. CHARGED or ALREADY_CHARGED. A REFUSED or unlinked row carries a reason and is
@@ -1633,7 +1687,7 @@ class Database:
             cur.execute(
                 "UPDATE subscribers SET plan_used = ?, plan_total = ?, plan_allowed = ?, "
                 "plan_limit_kind = ?, plan_period_start = ?, plan_daily_day = ?, "
-                "plan_next_json = ?, plan_tier = ?, "
+                "plan_next_json = ?, plan_tier = ?, plan_entitlement_state = ?, "
                 "plan_state_as_of = datetime('now'), plan_state_source = ? "
                 "WHERE chat_id = ?",
                 (
@@ -1650,6 +1704,10 @@ class Database:
                     # A body without it stores NULL, which reads as UNOBSERVED and falls back;
                     # it never overwrites a known tier with nothing.
                     state.get("tier"),
+                    # CH4/CH6 — same 200 body, same call, same cadence, as `tier` before it.
+                    # A body without it stores NULL, which reads as UNOBSERVED; it never
+                    # overwrites a known state with nothing.
+                    state.get("entitlement_state"),
                     source,
                     chat_id,
                 ),
@@ -1660,6 +1718,7 @@ class Database:
         with self._cursor() as cur:
             cur.execute(
                 "SELECT chat_id, linked_api_key, linked_tier, plan_tier, plan_state_as_of, "
+                "plan_entitlement_state, "
                 "lang_code, link_invalid_since, link_invalid_streak, link_downgrade_notice_at "
                 "FROM subscribers "
                 "WHERE linked_api_key IS NOT NULL AND bot_blocked_at IS NULL"

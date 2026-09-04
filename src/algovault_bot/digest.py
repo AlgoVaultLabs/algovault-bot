@@ -97,6 +97,15 @@ class DigestMetrics:
     # not being charged, and it is invisible everywhere else.
     plan_units_debited: int
     outbox_pending: int
+    # OPS-VALIDATE-KEY-INDETERMINATE-W1 CH6 — THE DENOMINATOR THE DIGEST NEVER HAD.
+    #
+    # `plan_units_debited` counts the debits that WORKED. For nine days it read healthy while a
+    # `past_due` subscriber's 1,987 debits were stamped terminal and 2,025 alerts went out free,
+    # because a rail reporting only its successes cannot report a leak. These two are that leak,
+    # in the two units it is visible in: deliveries we will never charge for, and who is in a
+    # state that produces them.
+    unmetered_24h: int
+    linked_by_state: dict[str, int]
     # CH3c — the commit this bot's running code was deployed from. None = no provenance recorded,
     # never a plausible substitute.
     deployed_sha: str | None
@@ -126,6 +135,21 @@ class DigestMetrics:
     #: when non-zero, and only so the sub-counts always sum to the total — a breakdown that does
     #: not add up reads as a bug in the digest rather than as honest missing provenance.
     quota_notices_unclassified_24h: int = 0
+
+
+def _link_state_suffix(m: DigestMetrics) -> str:
+    """The linked cohort by state, rendered ONLY when something is not ENTITLED.
+
+    A quiet line on a healthy day and a loud one on the day it matters — the same reasoning as
+    the daily-wall split above. `unobserved` is rendered as its own bucket, never folded into a
+    state: a mirror that has never been written is not evidence of entitlement.
+    """
+    by = m.linked_by_state or {}
+    notable = {k: v for k, v in sorted(by.items()) if k != "ENTITLED" and v}
+    if not notable:
+        return ""
+    detail = " · ".join(f"{k} {v}" for k, v in notable.items())
+    return f"  (linked: ENTITLED {by.get('ENTITLED', 0)} · {detail})"
 
 
 def _notice_split(m: DigestMetrics) -> str:
@@ -229,6 +253,8 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
     walled_now, walled_silent, walled_paid = count_walled_now(db)
     plan_units_debited = db.count_plan_units_debited_last_24h()
     outbox_pending = db.count_pending_entitlement_debits()
+    unmetered_24h = db.count_unmetered_deliveries_last_24h()
+    linked_by_state = db.count_linked_by_entitlement_state()
     deployed_sha = read_deployed_sha()
 
     return DigestMetrics(
@@ -252,6 +278,8 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         calls_paid_linked=calls_paid_linked,
         plan_units_debited=plan_units_debited,
         outbox_pending=outbox_pending,
+        unmetered_24h=unmetered_24h,
+        linked_by_state=linked_by_state,
         deployed_sha=deployed_sha,
         generated_at=now.isoformat(),
     )
@@ -279,6 +307,7 @@ def _format_digest(m: DigestMetrics) -> str:
         f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}"
         f"  ({_notice_split(m)})",
         f"  💳 Plan debits 24h: {m.plan_units_debited}  (⏳ {m.outbox_pending} queued)",
+        f"  🩸 Unmetered 24h: {m.unmetered_24h}{_link_state_suffix(m)}",
         f"  🚧 Walled now: {m.walled_now}"
         f"  (notified {m.walled_now - m.walled_silent} · silent {m.walled_silent})",
         "",
