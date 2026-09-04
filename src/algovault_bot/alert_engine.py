@@ -1102,6 +1102,11 @@ def main() -> None:
                 "due": counts["due"],
                 # TG-BATCH-WATCHLIST-W1 C2 — fetch-budget observability.
                 "processed": counts["processed"],
+                # OPS-BOT-DISPATCH-LATENCY-W1 CH3: `counts` carries it but this line is an
+                # EXPLICIT key list, so a new count is invisible until named here. Without it
+                # the one number that says whether the tick was concurrent is unreadable from
+                # the journal — and the journal is the only instrument for the CH4 gate.
+                "concurrency": counts.get("concurrency", 0),
                 "deferred": counts["deferred"],
                 "skipped_exhausted": counts["skipped_exhausted"],
                 "active_users": counts["active_users"],
