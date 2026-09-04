@@ -42,7 +42,7 @@ from .cta import (
     referral_nudge_text,
     trade_call_cta_text,
 )
-from .db import Database, DEFAULT_DB_PATH
+from .db import Database, DEFAULT_DB_PATH, MAX_FETCH_ATTEMPTS_PER_BUCKET
 from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
 from .quota import (
@@ -82,6 +82,21 @@ class WatchRow:
     regime_last_seen: str | None
     last_verdict: str | None
     last_verdict_streak: int
+    # OPS-BOT-DISPATCH-LATENCY-W1 CH1 — attempts already spent on THIS dispatch bucket.
+    # >0 means this tick is a RETRY of a bar we failed to fetch, which the regime lane must
+    # know: `last_verdict_streak` counts consecutive BARS, and a retry is the same bar.
+    # Defaulted so the ~9 test doubles and every other constructor stay valid.
+    fetch_fail_streak: int = 0
+
+
+def _row_get(r: Any, key: str) -> Any:
+    """`sqlite3.Row` raises IndexError (not KeyError) for an absent column, and a plain dict
+    raises KeyError — so a mapper that must tolerate a pre-migration row cannot use `.get`.
+    Returns None when the column is not present."""
+    try:
+        return r[key]
+    except (IndexError, KeyError):
+        return None
 
 
 def _row_from_sqlite(r: Any) -> WatchRow:
@@ -94,6 +109,7 @@ def _row_from_sqlite(r: Any) -> WatchRow:
         regime_last_seen=r["regime_last_seen"],
         last_verdict=r["last_verdict"],
         last_verdict_streak=int(r["last_verdict_streak"] or 0),
+        fetch_fail_streak=int(_row_get(r, "fetch_fail_streak") or 0),
     )
 
 
@@ -390,6 +406,8 @@ async def process_one_row(
 ) -> dict[str, Any]:
     """Process a single watchlist row. Returns a structured-log dict for journal."""
     fetched: dict[str, str] = {"regime": "skip", "trade_call": "skip"}
+    # Set by either lane's `except McpError`. Decides whether this tick SERVICED the bucket.
+    mcp_failed = False
     new_verdict = row.last_verdict or ""
     new_streak = row.last_verdict_streak
     regime_seen: str | None = row.regime_last_seen
@@ -408,8 +426,17 @@ async def process_one_row(
 
             if current_regime:
                 # Streak counter: increment if same as last_verdict, else reset.
+                #
+                # OPS-BOT-DISPATCH-LATENCY-W1 CH1: `fetch_fail_streak > 0` means this tick is a
+                # RETRY of a bar whose fetch failed, and the streak is a count of consecutive
+                # BARS agreeing — not of fetch attempts. Attempt 1 already booked this bar's
+                # increment (a failed tick still persists what it learned), so re-adding here
+                # would let two retries manufacture the `new_streak >= 2` flap-suppression
+                # threshold out of a SINGLE bar. A regime change still resets to 1 on any
+                # attempt, so the counter stays coherent with `last_verdict` in every case.
                 if current_regime == row.last_verdict:
-                    new_streak = row.last_verdict_streak + 1
+                    already_counted_this_bar = row.fetch_fail_streak > 0
+                    new_streak = row.last_verdict_streak + (0 if already_counted_this_bar else 1)
                 else:
                     new_streak = 1
                 new_verdict = current_regime
@@ -472,6 +499,7 @@ async def process_one_row(
                                 cta_shown=bool(cta),
                             )
         except McpError as e:
+            mcp_failed = True
             log.warning(
                 json.dumps({"event": "mcp_get_market_regime_failed", "err": str(e)[:200]})
             )
@@ -595,14 +623,43 @@ async def process_one_row(
                         )
             # HOLD verdicts are silently absorbed — no message, no quota tick (per spec).
         except McpError as e:
+            mcp_failed = True
             log.warning(
                 json.dumps({"event": "mcp_get_trade_call_failed", "err": str(e)[:200]})
             )
 
-    db.update_watch_after_fetch(
-        row.chat_id, row.coin, row.timeframe, row.exchange,
-        new_verdict, new_streak, regime_seen,
-    )
+    # OPS-BOT-DISPATCH-LATENCY-W1 CH1 — SERVICING the bucket is now conditional on the fetch
+    # having actually happened. This call used to be unconditional and sat outside both
+    # `except McpError` blocks, so an upstream failure advanced `last_fetched_at`, `is_due`'s
+    # strict bucket comparison then read the bar as served, and that bar's alert was dropped
+    # for good — up to 4 hours of silence on a 4h row, announced only by a `warning` line.
+    #
+    # Either way we persist what the tick LEARNED. `regime_last_seen` and the streak are
+    # flap-suppression state, and the regime lane already establishes (in its quota-refusal
+    # branch) that this state must survive a non-delivery.
+    if mcp_failed:
+        attempts, bucket_advanced = db.record_fetch_failure(
+            row.chat_id, row.coin, row.timeframe, row.exchange,
+            new_verdict, new_streak, regime_seen,
+        )
+        fetched["fetch"] = "gave_up" if bucket_advanced else f"retry_{attempts}"
+        log_alert_event(
+            "watch_fetch_failed",
+            chat_id=row.chat_id,
+            coin=row.coin,
+            timeframe=row.timeframe,
+            exchange=row.exchange,
+            attempts=attempts,
+            max_attempts=MAX_FETCH_ATTEMPTS_PER_BUCKET,
+            # TRUE means the bar was abandoned and its alert is permanently lost — the event
+            # the pre-wave code emitted for EVERY failure, silently and with no counter.
+            bar_abandoned=bucket_advanced,
+        )
+    else:
+        db.update_watch_after_fetch(
+            row.chat_id, row.coin, row.timeframe, row.exchange,
+            new_verdict, new_streak, regime_seen,
+        )
     return fetched
 
 

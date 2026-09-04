@@ -360,6 +360,31 @@ QUOTA_NOTICE_LIMIT_KIND_MIGRATIONS = (
     "ALTER TABLE quota_notices_fired ADD COLUMN limit_kind TEXT",
 )
 
+# OPS-BOT-DISPATCH-LATENCY-W1 CH1 — BOUNDED RETRY FOR A FAILED FETCH.
+#
+# `update_watch_after_fetch` sat at function-body indent in `process_one_row`, OUTSIDE both
+# `except McpError` blocks, so a failed MCP call still stamped `last_fetched_at` and advanced
+# the dispatch bucket. `is_due` is a strict bucket comparison, so that bar's alert was never
+# retried and never delivered — silently, with only a `warning` line. Measured: 150 MCP
+# failures over the 40-day journal, and on a 4h row one of them costs a 4-hour blind spot.
+#
+# Simply NOT stamping is the wrong fix and would have been worse: the row then stays due on
+# EVERY tick for the rest of its bucket — up to 240 retries on a 4h row against the venue and
+# the quota meter. So the stamp is SPLIT instead:
+#   - what we LEARNED (last_verdict / streak / regime_last_seen) persists either way; the
+#     regime lane's own comment already establishes that flap-suppression state must survive
+#     a non-delivery, and a failed fetch is the same case.
+#   - whether the bucket was SERVICED is now conditional, bounded by this counter.
+FETCH_RETRY_MIGRATIONS = (
+    "ALTER TABLE watchlists ADD COLUMN fetch_fail_streak INTEGER NOT NULL DEFAULT 0",
+)
+
+# Attempts per bucket before the row gives up and lets the bucket advance. 3 is one original
+# plus two retries, i.e. ~2 extra minutes of recovery on the 60s tick — comfortably inside the
+# shortest schedulable timeframe (3m; 1m is excluded from PUSH_TIMEFRAMES) so a retry can never
+# leak into the following bar even at the fastest cadence.
+MAX_FETCH_ATTEMPTS_PER_BUCKET: Final = 3
+
 QUOTA_PARITY_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN alerts_day_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subscribers ADD COLUMN alerts_day TEXT",
@@ -673,6 +698,9 @@ class Database:
                 *QUOTA_PARITY_MIGRATIONS,
                 # …and the notice ledger learns WHICH wall fired (runs after the table exists).
                 *QUOTA_NOTICE_LIMIT_KIND_MIGRATIONS,
+                # OPS-BOT-DISPATCH-LATENCY-W1 CH1 (2026-09-04): bounded per-bucket retry so a
+                # failed MCP call stops silently consuming the bar.
+                *FETCH_RETRY_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1153,7 +1181,7 @@ class Database:
                 """
                 SELECT chat_id, coin, timeframe, exchange, alert_type,
                        regime_last_seen, regime_pending, last_fetched_at,
-                       last_verdict, last_verdict_streak
+                       last_verdict, last_verdict_streak, fetch_fail_streak
                 FROM watchlists
                 """
             )
@@ -1844,8 +1872,68 @@ class Database:
                 SET last_fetched_at = datetime('now'),
                     last_verdict = ?,
                     last_verdict_streak = ?,
-                    regime_last_seen = COALESCE(?, regime_last_seen)
+                    regime_last_seen = COALESCE(?, regime_last_seen),
+                    fetch_fail_streak = 0
                 WHERE chat_id = ? AND coin = ? AND timeframe = ? AND exchange = ?
                 """,
                 (last_verdict, last_verdict_streak, regime_last_seen, chat_id, coin, timeframe, exchange),
             )
+
+    def record_fetch_failure(
+        self,
+        chat_id: int,
+        coin: str,
+        timeframe: str,
+        exchange: str,
+        last_verdict: str,
+        last_verdict_streak: int,
+        regime_last_seen: str | None,
+        max_attempts: int = MAX_FETCH_ATTEMPTS_PER_BUCKET,
+    ) -> tuple[int, bool]:
+        """The failure counterpart of :meth:`update_watch_after_fetch`.
+
+        Persists what the tick LEARNED (verdict / streak / regime_last_seen — flap-suppression
+        state, which must survive a non-delivery exactly as it survives a quota refusal) while
+        holding the dispatch bucket OPEN so the row is retried on the next tick.
+
+        Returns ``(attempts_used, bucket_advanced)``.
+
+        ONE STATEMENT, deliberately. Read-then-write here would be a lost-update race against
+        the interactive `algovault-bot.service`, which shares this database file — the same
+        class `AOE-RETUNE-IDEMPOTENCY-W1` ruled on ("a last line of defence may not have a race
+        in it"). Both CASE arms read the PRE-update `fetch_fail_streak`, so the increment, the
+        give-up test and the reset are one atomic decision.
+
+        On the give-up tick the counter returns to 0 rather than staying at the cap: the cap is
+        per BUCKET, and the bucket is over the moment `last_fetched_at` advances.
+        """
+        with self._cursor() as cur:
+            row = cur.execute(
+                """
+                UPDATE watchlists
+                SET last_verdict = ?,
+                    last_verdict_streak = ?,
+                    regime_last_seen = COALESCE(?, regime_last_seen),
+                    fetch_fail_streak =
+                        CASE WHEN fetch_fail_streak + 1 >= ? THEN 0
+                             ELSE fetch_fail_streak + 1 END,
+                    last_fetched_at =
+                        CASE WHEN fetch_fail_streak + 1 >= ? THEN datetime('now')
+                             ELSE last_fetched_at END
+                WHERE chat_id = ? AND coin = ? AND timeframe = ? AND exchange = ?
+                RETURNING fetch_fail_streak, last_fetched_at
+                """,
+                (
+                    last_verdict, last_verdict_streak, regime_last_seen,
+                    max_attempts, max_attempts,
+                    chat_id, coin, timeframe, exchange,
+                ),
+            ).fetchone()
+        if row is None:
+            # Row deleted mid-tick (an /unwatch between dispatch and failure). Nothing to
+            # retry and nothing to hold open.
+            return (0, True)
+        # fetch_fail_streak reads 0 on the give-up tick, so derive `advanced` from the counter
+        # rather than re-reading the clock: 0 after a failure means the CASE took the cap arm.
+        advanced = row["fetch_fail_streak"] == 0
+        return (max_attempts if advanced else row["fetch_fail_streak"], advanced)
