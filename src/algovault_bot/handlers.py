@@ -46,7 +46,13 @@ from .validators import (
     normalize_push_timeframe,
     normalize_timeframe,
 )
-from .quota import consume_quota, get_quota_state, record_call_delivered, resolve_ladder
+from .quota import (
+    consume_quota,
+    get_quota_state,
+    picker_above_tier,
+    record_call_delivered,
+    resolve_ladder,
+)
 from .capabilities import rank_label, rank_lens_help, recognized_rank_tokens
 from .scan_digest import cadence_for_timeframe, is_valid_cadence, render_scan_digest_line
 
@@ -1365,21 +1371,20 @@ def register_handlers(app: Application, db: Database) -> None:
     def _picker_above_tier(chat_id: int) -> str | None:
         """The rung this chat is ALREADY on, so the picker never sells it back to them.
 
-        GROWTH-TG-PLAN-PICKER-W1 R4. Projects `quota.effective_tier` — the ONE derivation every
-        tier label in this bot reads — rather than re-deriving from `linked_tier`, which is the
-        second-derivation drift `quota.py` documents at length.
+        A thin DB-reading shell over `quota.picker_above_tier`, which owns the RULE — including
+        the one that matters, that only a FRESH MIRROR may withhold a rung. Read that docstring
+        before changing anything here; this function must never grow a second copy of it.
 
         Fail-soft, deliberately: a DB read error returns None, which renders the FULL ladder. The
-        worst case is showing a Starter subscriber the Starter row, which is a cosmetic miss; the
-        alternative failure (hiding the ladder from a free user on a transient error) is a lost
-        sale. Same direction as every other fallback in this lane — it SERVES.
+        worst case is re-offering a subscriber the plan they already hold, which is a recoverable
+        annoyance; the alternative failure — hiding a rung from someone willing to buy it — is a
+        lost sale that announces nothing. Same direction as every other fallback in this lane.
         """
         try:
-            tier = get_quota_state(db, chat_id).effective_tier.tier
+            return picker_above_tier(get_quota_state(db, chat_id))
         except Exception:
             log.exception('{"event": "picker_tier_read_failed", "chat_id": %d}', chat_id)
             return None
-        return tier if tier in ("starter", "pro", "enterprise") else None
 
     async def _start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:

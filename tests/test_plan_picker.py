@@ -36,6 +36,8 @@ from algovault_bot.quota import (
     Ladder,
     consume_quota,
     evaluate_delivery,
+    get_quota_state,
+    picker_above_tier,
     refuse_and_notify,
     resolve_ladder,
 )
@@ -302,6 +304,12 @@ def test_a_walled_STARTER_is_offered_pro_only(tmp_path: Path) -> None:
             "used": 10000, "total": 10000, "allowed": False, "limit": "monthly",
             "period_start": (NOW() - timedelta(days=3)).isoformat(),
             "daily_day": NOW().strftime("%Y-%m-%d"),
+            # R4b: `tier` is what makes the mirror AUTHORITATIVE, and the live server has sent
+            # it in every consume/state 200 all along (both linked rows on signal-1 carry a
+            # populated plan_tier). Without it the mirror is fresh but tier-less, the effective
+            # tier degrades to the `link` source, and `picker_above_tier` correctly declines to
+            # withhold a rung — so omitting it here tested a shape the server never sends.
+            "tier": "starter",
             "next_plan": {"id": "pro", "label": "Pro", "monthly_calls": 100000,
                           "price_usd": 49,
                           "signup_url": "https://api.algovault.com/signup?plan=pro"},
@@ -478,3 +486,99 @@ def test_the_starter_month_url_is_byte_identical_through_both_paths() -> None:
     assert messages.signup_url("quota_100") == (
         "api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_100"
     )
+
+
+# ── R4b — only a FRESH MIRROR may withhold a rung ────────────────────────────
+#
+# The three cases below are the three LIVE shapes on signal-1 at 2026-09-06 15:5xZ, transcribed
+# from the subscribers table rather than invented. The middle one is the defect the operator
+# caught: R4 shipped it offering Pro-only to a lapsed subscriber.
+
+
+def _linked(db: Database, chat_id: int, *, linked: str, mirror_tier: str | None,
+            mirror_age_min: float = 1.0) -> None:
+    db.upsert_subscriber(chat_id, "u", "en")
+    db.link_subscriber(chat_id, f"av_live_{chat_id}", linked)
+    if mirror_tier is not None:
+        db.update_plan_mirror(
+            chat_id,
+            {
+                "used": 1, "total": 10000, "allowed": True, "limit": None,
+                "period_start": (NOW() - timedelta(days=3)).isoformat(),
+                "daily_day": NOW().strftime("%Y-%m-%d"),
+                "tier": mirror_tier,
+                "next_plan": None,
+            },
+            source="debit",
+        )
+        if mirror_age_min > 1.0:
+            stamp = (NOW() - timedelta(minutes=mirror_age_min)).isoformat()
+            with db._cursor() as cur:
+                cur.execute(
+                    "UPDATE subscribers SET plan_state_as_of = ? WHERE chat_id = ?",
+                    (stamp, chat_id),
+                )
+
+
+def test_a_LAPSED_link_is_offered_the_FULL_ladder(db: Database) -> None:
+    """🛑 THE REGRESSION THIS EXISTS FOR. Live chat 1793689937, 2026-09-06.
+
+    `linked_tier='starter'` written once at /link on 2026-05-08, NO plan mirror ever observed,
+    and the server answering that key INVALID 568 consecutive times since 2026-09-04. R4 read
+    `effective_tier.tier` (which falls back to `linked_tier`) and showed them Pro at $49/$129
+    ONLY — refusing a lapsed subscriber the chance to re-buy the plan they lapsed from.
+    """
+    _linked(db, 1793689937, linked="starter", mirror_tier=None)
+    state = get_quota_state(db, 1793689937)
+    # The LABEL still reads starter, and that is correct — it is last-known, and says so.
+    assert state.effective_tier.tier == "starter"
+    assert state.effective_tier.source == "link"
+    # ...but the label is NOT good enough to withhold a purchase option.
+    assert picker_above_tier(state) is None
+    kb = keyboards.plan_picker_kb(resolve_ladder(db), "upgrade_command",
+                                  above_tier=picker_above_tier(state))
+    assert kb is not None
+    assert [len(r) for r in kb.inline_keyboard] == [2, 2], "a lapsed link must see all four SKUs"
+    assert any("plan=starter" in u for u in _urls(kb))
+
+
+def test_a_FRESH_mirror_still_withholds_the_rung_it_names(db: Database) -> None:
+    """Live chat 8776880162: linked starter, mirror fresh and saying starter."""
+    _linked(db, 8776880162, linked="starter", mirror_tier="starter")
+    state = get_quota_state(db, 8776880162)
+    assert state.effective_tier.source == "mirror"
+    assert picker_above_tier(state) == "starter"
+    kb = keyboards.plan_picker_kb(resolve_ladder(db), "upgrade_command",
+                                  above_tier=picker_above_tier(state))
+    assert kb is not None
+    assert all("plan=pro" in u for u in _urls(kb))
+
+
+def test_the_mirror_OVERRIDES_a_stale_linked_tier(db: Database) -> None:
+    """Live chat 1061466212: linked_tier says starter, the fresh mirror says PRO.
+
+    The picker must follow the mirror — offering a Pro subscriber the Pro row because a
+    four-month-old `/link` row still says "starter" is the same defect in the other direction.
+    """
+    _linked(db, 1061466212, linked="starter", mirror_tier="pro")
+    state = get_quota_state(db, 1061466212)
+    assert state.effective_tier == ("pro", "mirror")
+    assert picker_above_tier(state) == "pro"
+    assert keyboards.plan_picker_kb(resolve_ladder(db), "upgrade_command",
+                                    above_tier=picker_above_tier(state)) is None
+
+
+def test_a_STALE_mirror_reopens_the_full_ladder(db: Database) -> None:
+    """Direction of failure, pinned: past PLAN_MIRROR_STALE_AFTER the tier degrades to 'link',
+    and a measurement we could not take must never withhold a purchase option."""
+    _linked(db, 4242, linked="starter", mirror_tier="starter", mirror_age_min=91.0)
+    state = get_quota_state(db, 4242)
+    assert state.effective_tier.source == "link"
+    assert picker_above_tier(state) is None
+
+
+def test_an_unlinked_free_chat_sees_everything(db: Database) -> None:
+    db.upsert_subscriber(55, "u", "en")
+    state = get_quota_state(db, 55)
+    assert state.effective_tier == (None, "unknown")
+    assert picker_above_tier(state) is None

@@ -1020,6 +1020,37 @@ def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> st
     return f"{tier} plan allowance used: {figures}. {when_en} {upsell_en}"
 
 
+def picker_above_tier(state: QuotaState) -> str | None:
+    """THE one derivation of "which rung must the plan picker NOT offer this chat".
+
+    GROWTH-TG-PLAN-PICKER-W1 R4b, correcting R4.
+
+    🛑 A TIER IS ONLY GOOD ENOUGH TO WITHHOLD A PURCHASE OPTION WHEN IT CAME FROM A FRESH
+    MIRROR. R4 read `effective_tier.tier` and ignored `.source`, which is precisely the misuse
+    that property's own docstring warns about: "THIS IS FOR LABELS, NOT FOR ENTITLEMENT."
+    Deciding not to sell someone Starter is an ENTITLEMENT decision wearing a label's clothes.
+
+    MEASURED COST, live on 2026-09-06: chat 1793689937 carried `linked_tier='starter'` written
+    once at /link on 2026-05-08 and NEVER refreshed — no plan mirror had ever been observed for
+    it, and the server had answered that key INVALID 568 consecutive times since 2026-09-04. The
+    picker read "starter" and offered them Pro at $49/$129 ONLY. A lapsed subscriber was refused
+    the chance to re-buy the plan they had lapsed from, which is the worst possible outcome for
+    exactly the cohort most likely to convert. `linked_tier` being stale is the defect
+    OPS-BOT-LINKED-TIER-REFRESH-W1 exists to contain, and the `source` field is the container.
+
+    DIRECTION OF FAILURE, stated so it is not "tidied" later: `mirror` SUPPRESSES a rung;
+    `link` and `unknown` SHOW THE FULL LADDER. That is the same asymmetry the wall already
+    applies one screen up — "never wall a paying customer on a measurement we could not take"
+    — pointed at the commercial mirror image: never withhold a purchase option on a measurement
+    we could not take. A stale-mirror payer briefly re-offered their own plan is a recoverable
+    annoyance; a lapsed customer shown no way back is a lost sale that announces nothing.
+    """
+    et = state.effective_tier
+    if et.source != "mirror":
+        return None
+    return et.tier if et.tier in ("starter", "pro", "enterprise") else None
+
+
 async def refuse_and_notify(
     db: Database,
     chat_id: int,
@@ -1069,7 +1100,7 @@ async def refuse_and_notify(
             if d.state.is_paid:
                 text = build_plan_refusal_text(db, chat_id, d.state)
                 markup = plan_picker_kb(
-                    ladder, "plan_wall", src, above_tier=d.state.effective_tier.tier
+                    ladder, "plan_wall", src, above_tier=picker_above_tier(d.state)
                 )
             else:
                 text = build_refusal_text(db, chat_id, d.state)
