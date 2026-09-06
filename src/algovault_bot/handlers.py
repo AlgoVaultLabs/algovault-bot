@@ -28,9 +28,15 @@ from telegram.ext import (
 from datetime import datetime, timezone
 
 from . import adoption, asset_universe, batch, keyboards, messages, referral, referral_client, wizard
+from .messages import STARS_INTEREST_TOAST
 from .admin import handle_stats as admin_handle_stats
 from .coverage_nudge import compute_coverage_estimate, format_nudge, format_nudge_short
-from .db import Database, PER_USER_WATCHLIST_CAP, normalize_acquisition_source
+from .db import (
+    STARS_INTEREST_KIND,
+    Database,
+    PER_USER_WATCHLIST_CAP,
+    normalize_acquisition_source,
+)
 from .link_validator import validate_api_key
 from .log_setup import log_alert_event
 from .mcp_client import McpError, from_env
@@ -1607,6 +1613,41 @@ def register_handlers(app: Application, db: Database) -> None:
                 text, disable_web_page_preview=True, reply_markup=markup
             )
 
+    async def _on_stars_interest(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """⭐ Pay with Stars — GROWTH-TG-STARS-DEMAND-PROBE-W1 R3.
+
+        🛑 THIS TAKES NO PAYMENT. It answers a toast and writes one row. The Stars checkout is
+        deferred behind the counter this feeds; building the rail first would be building on an
+        opinion, which is the class this wave retires.
+
+        🛑 IT NEVER SENDS A SECOND MESSAGE. `q.answer(text=...)` is a TOAST — it appears over the
+        chat and leaves nothing behind. A probe that replies in-channel becomes a nag, and the
+        one thing that would poison this measurement is users learning that tapping ⭐ costs them
+        a notification.
+
+        Fail-soft: a write failure still answers the toast. The user asked a question and
+        deserves the answer; losing one row of a demand counter is not worth a visibly broken
+        button, and the failure is logged where the operator can see it.
+        """
+        q = update.callback_query
+        if q is None or q.data is None or q.from_user is None:
+            return
+        await q.answer(text=STARS_INTEREST_TOAST, show_alert=False)
+        u = q.from_user
+        # The campaign rides the payload after the second colon when it fitted in 64 bytes.
+        parts = q.data.split(":", 2)
+        campaign = parts[2] if len(parts) > 2 and parts[2] else None
+        try:
+            db.upsert_subscriber(u.id, u.username, u.language_code)
+            _maybe_fire_first_command_event(db, u.id)
+            db.record_interest(
+                STARS_INTEREST_KIND, u.id, campaign, datetime.now(timezone.utc).isoformat()
+            )
+        except Exception:
+            log.exception('{"event": "stars_interest_write_failed", "chat_id": %d}', u.id)
+            return
+        log_alert_event("tg_stars_interest", chat_id=u.id, lang_code=u.language_code)
+
     async def _upgrade(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """`/upgrade` — the plan picker as a first-class command. GROWTH-TG-PLAN-PICKER-W1 R4.
 
@@ -2176,6 +2217,10 @@ def register_handlers(app: Application, db: Database) -> None:
     app.add_handler(CommandHandler("help", _help))
     # GROWTH-TG-PLAN-PICKER-W1 R4 — the plan picker as a command.
     app.add_handler(CommandHandler("upgrade", _upgrade))
+    # GROWTH-TG-STARS-DEMAND-PROBE-W1 R3 — the demand probe. Its OWN handler and its own
+    # `stars:` namespace, deliberately not folded into the mnu:* router: that router maps
+    # buttons to EXISTING text handlers, and this one writes a row and answers a toast.
+    app.add_handler(CallbackQueryHandler(_on_stars_interest, pattern=r"^stars:interest(?::[A-Za-z0-9_]{1,40})?$"))
     app.add_handler(CommandHandler("referral", _referral))
     # TG-BUTTON-UX-W1 (C4): /menu re-renders the inline menu; the mnu:* router serves the
     # menu buttons mapping to existing handlers (Watch/Scan are the wizards' own entry_points).

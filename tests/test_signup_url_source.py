@@ -149,7 +149,9 @@ def test_plan_picker_threads_source_into_every_button():
 
     kb = keyboards.plan_picker_kb(_fallback_ladder(), "help_message", "geo")
     assert kb is not None
-    urls = [b.url for row in kb.inline_keyboard for b in row]
+    # url-bearing buttons only: the ⭐ demand-probe row added by
+    # GROWTH-TG-STARS-DEMAND-PROBE-W1 is a callback, and carries no utm because it goes nowhere.
+    urls = [b.url for row in kb.inline_keyboard for b in row if b.url]
     assert len(urls) == 4
     for u in urls:
         assert u.startswith("https://")
@@ -157,7 +159,7 @@ def test_plan_picker_threads_source_into_every_button():
     kb0 = keyboards.plan_picker_kb(_fallback_ladder(), "help_message")
     assert kb0 is not None
     assert all(
-        "utm_medium" not in b.url for row in kb0.inline_keyboard for b in row
+        "utm_medium" not in b.url for row in kb0.inline_keyboard for b in row if b.url
     )
 
 

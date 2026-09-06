@@ -125,6 +125,19 @@ TOP_SELF_SERVE_ID: Final = (
 TOP_SELF_SERVE_ZH: Final = "您已使用最高自助套餐——请回复，我们将为您安排后续方案。"
 
 
+#: The ⭐ demand probe's toast. GROWTH-TG-STARS-DEMAND-PROBE-W1, ratified §Copy.
+#:
+#: Telegram caps a callback answer at 200 characters and shows it for a few seconds over the
+#: chat — so it must be true, complete and finished in one read. Two sentences, ≤20 words each:
+#: the first is HONEST about what does not exist yet (a probe that implies a live rail is a lie
+#: that converts), the second names what works TODAY so the tap is not a dead end, and it
+#: promises a message on this surface rather than an email nobody gave us.
+STARS_INTEREST_TOAST: Final = (
+    "Noted — Stars checkout isn't live yet. "
+    "Card checkout works today; we'll message you here when Stars is ready."
+)
+
+
 def plan_picker_text(ladder: Ladder, *, above_tier: str | None = None) -> str:
     """The message body the plan picker's keyboard hangs under.
 

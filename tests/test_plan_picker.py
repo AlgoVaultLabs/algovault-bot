@@ -60,12 +60,27 @@ FIXTURE = Ladder(
 )
 
 
+# Both helpers project the SKU buttons — the ones carrying a checkout URL — and skip anything
+# else the picker grows. GROWTH-TG-STARS-DEMAND-PROBE-W1 appended a callback-only ⭐ row, and a
+# helper that returned `None` for its `url` would make every "all urls carry X" assertion below
+# fail on a button that has no url to carry anything. `_sku_rows` keeps the SHAPE pinned so a
+# filtered projection cannot hide a row appearing or vanishing.
+
+
 def _urls(kb) -> list[str]:  # noqa: ANN001
-    return [b.url for row in kb.inline_keyboard for b in row]
+    return [b.url for row in kb.inline_keyboard for b in row if b.url]
 
 
 def _labels(kb) -> list[str]:  # noqa: ANN001
-    return [b.text for row in kb.inline_keyboard for b in row]
+    return [b.text for row in kb.inline_keyboard for b in row if b.url]
+
+
+def _sku_rows(kb) -> list[int]:  # noqa: ANN001
+    """Row widths of the SKU rows, asserting the ⭐ probe row is last and alone."""
+    widths = [len(r) for r in kb.inline_keyboard]
+    assert widths[-1] == 1, f"the ⭐ probe row must be last and alone: {widths}"
+    assert kb.inline_keyboard[-1][0].callback_data.startswith("stars:interest")
+    return widths[:-1]
 
 
 # ── (a) four buttons, exact labels, exact URLs ───────────────────────────────
@@ -75,7 +90,7 @@ def test_the_picker_renders_four_skus_with_derived_labels_and_urls() -> None:
     kb = keyboards.plan_picker_kb(FIXTURE, "upgrade_command", "geo")
     assert kb is not None
     # Two rows of two: one ROW per plan, one COLUMN per term. Stars adds a column, not a copy.
-    assert [len(r) for r in kb.inline_keyboard] == [2, 2]
+    assert _sku_rows(kb) == [2, 2]
     assert _labels(kb) == [
         "Starter · $77/mo",
         "Starter · $77.50/6mo",
@@ -124,7 +139,7 @@ def test_the_picker_never_offers_enterprise() -> None:
 def test_a_starter_is_offered_pro_only() -> None:
     kb = keyboards.plan_picker_kb(FIXTURE, "plan_wall", above_tier="starter")
     assert kb is not None
-    assert [len(r) for r in kb.inline_keyboard] == [2]
+    assert _sku_rows(kb) == [2]
     assert _labels(kb) == ["Pro · $404/mo", "Pro · $444.40/6mo"]
     assert all("plan=starter" not in u for u in _urls(kb))
 
@@ -290,7 +305,7 @@ def test_the_free_wall_carries_the_full_picker(tmp_path: Path) -> None:
     consume_quota(db, 1, resolve_ladder(db).free_monthly)
     text, markup = _capture_wall(db, 1)
     assert markup is not None, "the free wall must carry the picker"
-    assert [len(r) for r in markup.inline_keyboard] == [2, 2]
+    assert _sku_rows(markup) == [2, 2]
     assert all("utm_campaign=quota_exhausted_push" in u for u in _urls(markup))
     # The ≤300-char BODY is unchanged — this wave attached a keyboard, it did not rewrite copy.
     assert len(text) <= 300
@@ -318,7 +333,7 @@ def test_a_walled_STARTER_is_offered_pro_only(tmp_path: Path) -> None:
     )
     _text, markup = _capture_wall(db, 2)
     assert markup is not None, "a walled Starter must be offered the rung above them"
-    assert [len(r) for r in markup.inline_keyboard] == [2]
+    assert _sku_rows(markup) == [2]
     assert all("plan=pro" in u for u in _urls(markup))
     assert all("utm_campaign=plan_wall" in u for u in _urls(markup))
 
@@ -452,7 +467,7 @@ def test_the_help_command_carries_the_picker(db: Database) -> None:
     asyncio.run(_command(db, "help")(upd, SimpleNamespace(args=[], user_data={})))
     _text, markup = upd.message.replies[0]
     assert markup is not None
-    assert [len(r) for r in markup.inline_keyboard] == [2, 2]
+    assert _sku_rows(markup) == [2, 2]
     assert all("utm_campaign=help_message" in u for u in _urls(markup))
 
 
@@ -471,7 +486,7 @@ def test_every_money_surface_renders_the_SAME_picker(db: Database) -> None:
     shapes.append(q.message.replies[0][1])
     assert all(kb is not None for kb in shapes)
     assert len({tuple(_labels(kb)) for kb in shapes}) == 1, "the four labels must be identical"
-    assert len({tuple(len(r) for r in kb.inline_keyboard) for kb in shapes}) == 1
+    assert len({tuple(_sku_rows(kb)) for kb in shapes}) == 1
 
 
 # ── (f) the byte-identity guard still holds through the new composer ─────────
@@ -538,7 +553,7 @@ def test_a_LAPSED_link_is_offered_the_FULL_ladder(db: Database) -> None:
     kb = keyboards.plan_picker_kb(resolve_ladder(db), "upgrade_command",
                                   above_tier=picker_above_tier(state))
     assert kb is not None
-    assert [len(r) for r in kb.inline_keyboard] == [2, 2], "a lapsed link must see all four SKUs"
+    assert _sku_rows(kb) == [2, 2], "a lapsed link must see all four SKUs"
     assert any("plan=starter" in u for u in _urls(kb))
 
 

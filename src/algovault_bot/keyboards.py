@@ -11,13 +11,17 @@ collide with the existing `bw:`/`uwa:`/`wb:`/`sw:`/`unlock:` handlers:
   - ``wz:*``   watch wizard     — ``wz:coin:BTC`` / ``wz:tf:15m`` / ``wz:ex:BYBIT`` /
                                   ``wz:mode:both`` / ``wz:type`` / ``wz:back`` / ``wz:cancel``
   - ``scn:*``  scan wizard      — same shape (C3 adds kind/topN grids)
+  - ``stars:*`` Stars rail       — ``stars:interest[:<campaign>]``. RESERVED for the deferred
+                                  Telegram-Stars checkout (`GROWTH-TG-STARS-CHECKOUT-W1`);
+                                  `interest` is its first and, until that wave ships, only
+                                  member. It takes NO payment — see `plan_picker_kb`.
 
 The step grids take a ``prefix`` so the Watch (``wz``) and Scan (``scn``) wizards
 reuse the SAME TF/exchange builders (single-derivation — no duplicate arrays).
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -81,6 +85,33 @@ def _nav_row(prefix: str, *, back: bool = True) -> list[InlineKeyboardButton]:
     return row
 
 
+#: The demand-probe payload. `stars:interest`, optionally suffixed with the campaign that
+#: produced the tap. Telegram caps `callback_data` at 64 BYTES, so the suffix is dropped rather
+#: than truncated when it would not fit — a truncated campaign is a WRONG campaign, and this
+#: field is a nice-to-have while the count is the product.
+STARS_INTEREST_CB: Final = "stars:interest"
+_CALLBACK_DATA_MAX_BYTES: Final = 64
+
+
+def _stars_interest_row(campaign: str) -> list[InlineKeyboardButton]:
+    """The ⭐ row. GROWTH-TG-STARS-DEMAND-PROBE-W1 R2.
+
+    🛑 THIS BUTTON TAKES NO PAYMENT AND MUST NOT LEARN TO. It records that someone WANTED to pay
+    with Stars, at the instant of purchase intent, under the four real SKUs — a revealed
+    preference rather than a survey answer. The checkout itself is deferred behind the counter
+    this feeds (`GROWTH-TG-STARS-CHECKOUT-W1`), which is the whole point: the rail gets built on
+    a measurement, not on an opinion about what our users would do.
+
+    It rides EVERY rendering the picker returns, including the Pro-only one. A paying Starter
+    subscriber asking for Stars is the most valuable row in the table — that is someone who has
+    already proved they will pay, telling us the rail they would rather pay on.
+    """
+    data = f"{STARS_INTEREST_CB}:{campaign}"
+    if len(data.encode()) > _CALLBACK_DATA_MAX_BYTES:
+        data = STARS_INTEREST_CB
+    return [InlineKeyboardButton("⭐ Pay with Stars", callback_data=data)]
+
+
 def plan_picker_kb(
     ladder: Ladder,
     campaign: str,
@@ -97,9 +128,13 @@ def plan_picker_kb(
         [ Pro · $49/mo ]         [ Pro · $129/6mo ]
 
     🛑 RAIL-AGNOSTIC BY CONSTRUCTION, and that is the point rather than a nicety. One ROW per
-    plan, one COLUMN per term — so the next rail, Telegram Stars, is one more column, not a fifth
-    copy of the ladder. The old builders were DELETED rather than left beside this one for the
-    same reason: two builders is how two surfaces end up disagreeing about what we sell.
+    plan, one COLUMN per term, so a new rail costs a row or a column and never a second copy of
+    the ladder — measured: `GROWTH-TG-STARS-DEMAND-PROBE-W1` added its whole surface as the
+    single ⭐ row below, changing no label, no URL and no branch. (That wave also corrects this
+    docstring's original guess that Stars would arrive as a COLUMN; it arrived as a ROW, because
+    a demand probe is not a term of a plan.) The old single-SKU builders were DELETED rather than
+    left beside this one for the same reason: two builders is how two surfaces end up
+    disagreeing about what we sell.
 
     🛑 NO FIGURE IS TYPED HERE. Every label renders through `_usd` from the `ladder` argument,
     which `quota.resolve_ladder` derives from the server's published ladder with pinned per-field
@@ -137,11 +172,11 @@ def plan_picker_kb(
         return None
     pro = row("pro", "Pro", ladder.pro_price_usd, ladder.pro_price_usd_6month)
     if above_tier == "starter":
-        return InlineKeyboardMarkup([pro])
+        return InlineKeyboardMarkup([pro, _stars_interest_row(campaign)])
     starter = row(
         "starter", "Starter", ladder.starter_price_usd, ladder.starter_price_usd_6month
     )
-    return InlineKeyboardMarkup([starter, pro])
+    return InlineKeyboardMarkup([starter, pro, _stars_interest_row(campaign)])
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:

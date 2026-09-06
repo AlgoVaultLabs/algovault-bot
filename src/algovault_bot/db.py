@@ -417,6 +417,37 @@ QUOTA_PARITY_MIGRATIONS = (
     ")",
 )
 
+# GROWTH-TG-STARS-DEMAND-PROBE-W1 R1 — the demand ledger.
+#
+# ONE ROW PER (kind, chat_id), never one per tap. The product is "how many DISTINCT people want
+# this", and a row-per-tap table answers a different question badly: it lets one enthusiastic user
+# look like ten, which is precisely the failure mode a demand probe exists to avoid.
+#
+# 🛑 `kind` IS THE EXTENSION POINT. A second probe — a Gram wallet rail, a Team plan, an annual
+# term — is one more `kind` value and ZERO schema. Do not add a `stars_interest` table; that is how
+# the third probe ends up with three shapes and no shared reader.
+#
+# `campaign` is nullable ON PURPOSE: it records WHICH money surface the tap came from (the picker
+# under /upgrade vs the one stapled to a quota wall), which is a nice-to-have. The COUNT is the
+# product, so a payload that cannot carry a campaign must still record the interest.
+#: The `kind` this wave writes. A CONSTANT because three modules read it (the handler that
+#: writes, the digest that counts, the tests that pin) and a fourth — the deferred checkout
+#: wave — will read it to find its own demand. Three string literals of one value is how the
+#: fourth ends up counting a `kind` nothing writes.
+STARS_INTEREST_KIND: Final = "stars_checkout"
+
+INTEREST_EVENTS_MIGRATIONS = (
+    "CREATE TABLE IF NOT EXISTS interest_events ("
+    "  kind      TEXT NOT NULL,"
+    "  chat_id   INTEGER NOT NULL,"
+    "  campaign  TEXT,"
+    "  first_at  TIMESTAMP NOT NULL,"
+    "  last_at   TIMESTAMP NOT NULL,"
+    "  taps      INTEGER NOT NULL DEFAULT 1,"
+    "  PRIMARY KEY (kind, chat_id)"
+    ")",
+)
+
 # GROWTH-TG-PLAN-PICKER-W1 R2 — the mirror widens from the free + starter rungs to the whole
 # four-SKU ladder the plan picker renders (starter/pro x month/6month, plus both daily caps).
 #
@@ -744,6 +775,8 @@ class Database:
                 # OPS-BOT-DISPATCH-LATENCY-W1 CH1 (2026-09-04): bounded per-bucket retry so a
                 # failed MCP call stops silently consuming the bar.
                 *FETCH_RETRY_MIGRATIONS,
+                # GROWTH-TG-STARS-DEMAND-PROBE-W1 (2026-09-06): the demand ledger.
+                *INTEREST_EVENTS_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1849,6 +1882,59 @@ class Database:
                     fetched_at,
                 ),
             )
+
+    # ── GROWTH-TG-STARS-DEMAND-PROBE-W1: the demand ledger ───────────
+
+    def record_interest(
+        self, kind: str, chat_id: int, campaign: str | None, now_iso: str
+    ) -> None:
+        """Record that this chat wants `kind`. Idempotent per user; taps accumulate.
+
+        🛑 ONE STATEMENT, never a read-modify-write. Two taps arriving in the same second from
+        the dispatch loop and a callback would interleave a SELECT-then-UPDATE and lose one —
+        the same discipline `9892083` applied to the free meter's charge, for the same reason.
+
+        `first_at` is written ONLY on insert (the conflict clause does not touch it), so it stays
+        the moment the user first asked. `campaign` likewise: the FIRST surface that converted
+        them is the interesting one, and letting a later tap overwrite it would quietly turn a
+        first-touch field into a last-touch field with nothing to notice. `COALESCE` fills it in
+        if the first tap could not carry one.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO interest_events (kind, chat_id, campaign, first_at, last_at, taps) "
+                "VALUES (?, ?, ?, ?, ?, 1) "
+                "ON CONFLICT(kind, chat_id) DO UPDATE SET "
+                "  taps = taps + 1,"
+                "  last_at = excluded.last_at,"
+                "  campaign = COALESCE(interest_events.campaign, excluded.campaign)",
+                (kind, chat_id, campaign, now_iso, now_iso),
+            )
+
+    def count_interest(self, kind: str, since_iso: str) -> tuple[int, int]:
+        """``(distinct_users, taps)`` for `kind` with activity at or after `since_iso`.
+
+        Windowed on `last_at`, not `first_at`: the question the trigger answers is "is there
+        demand NOW", and a user who first tapped 40 days ago and tapped again yesterday is
+        current demand. Keying on `first_at` would silently retire live interest.
+
+        `taps` sums only the rows inside the window, so it is taps-by-currently-active-users
+        rather than a lifetime total — stated here because the two diverge and the digest line
+        says which it renders.
+        """
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(taps), 0) FROM interest_events "
+                    "WHERE kind = ? AND last_at >= ?",
+                    (kind, since_iso),
+                )
+            except sqlite3.OperationalError:
+                # A DB predating the migration. Zero is the honest answer, and the digest
+                # renders it rather than dropping the line — a dark probe must be visible.
+                return (0, 0)
+            row = cur.fetchone()
+            return (int(row[0] or 0), int(row[1] or 0))
 
     # ── BOT-ZOMBIE-W1: bot-blocked subscriber bookkeeping ────────────
 

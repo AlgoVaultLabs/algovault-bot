@@ -24,11 +24,12 @@ import logging
 import re
 import os
 from dataclasses import dataclass
+from typing import Final
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from .db import Database, DEFAULT_DB_PATH
+from .db import STARS_INTEREST_KIND, Database, DEFAULT_DB_PATH
 from .quota import count_walled_now
 
 
@@ -135,6 +136,56 @@ class DigestMetrics:
     #: when non-zero, and only so the sub-counts always sum to the total — a breakdown that does
     #: not add up reads as a bug in the digest rather than as honest missing provenance.
     quota_notices_unclassified_24h: int = 0
+    # GROWTH-TG-STARS-DEMAND-PROBE-W1 R4 — the demand probe. Defaulted and last, for the same
+    # reason the three above are: every field before `generated_at` lacks a default, and the
+    # suite constructs `DigestMetrics` positionally in places.
+    #
+    # Deliberately NOT added to the `bot_daily_metrics` Postgres row — that is a shared-schema
+    # change on signal-MCP's database, i.e. a migration and a different wave. The same ruling the
+    # quota-notice breakdown above got, for the same reason.
+    stars_interest_users_30d: int = 0
+    stars_interest_taps_30d: int = 0
+    #: Distinct users whose LAST tap landed in the trailing day — the `+N` in the line. It is a
+    #: movement figure, not a subset total: a user who tapped 20 days ago and again today counts
+    #: here and in the 30d figure, which is correct, because both answer "is this live demand".
+    stars_interest_users_24h: int = 0
+
+
+# ── GROWTH-TG-STARS-DEMAND-PROBE-W1 R4: the demand probe's readout ───────────────────────────
+#
+# 🛑 THIS CONSTANT IS THE CONTRACT the deferred `GROWTH-TG-STARS-CHECKOUT-W1` reads, and it is
+# cited in `research/payments-telegram-stars-usdt-research-2026-09-06.md` §Decision. It is a NAMED
+# constant rather than a literal inside the f-string for the obvious reason and one less obvious
+# one: a threshold nobody can grep is a threshold that gets "adjusted" in a hotfix, and the whole
+# value of a pre-registered trigger is that it was chosen BEFORE the data arrived.
+STARS_PROBE_TRIGGER_USERS: Final = 10
+#: The demand window. 30 days, matching the free meter's own rolling window, so "current demand"
+#: means the same span everywhere in this bot.
+STARS_PROBE_WINDOW_DAYS: Final = 30
+
+
+def _stars_interest_line(m: DigestMetrics) -> str:
+    """The probe's one line. GROWTH-TG-STARS-DEMAND-PROBE-W1 R4.
+
+    🛑 IT RENDERS AT ZERO. An omitted line is indistinguishable from a broken probe, a dead
+    handler or a button that never shipped — and a demand measurement that can silently report
+    nothing is worth less than no measurement, because absence reads as "no demand". The
+    `🚫 Blocked the bot` line one screen up is conditional for a good reason (a count of zero
+    there is genuinely uninteresting); this one is not, and the difference is that this number
+    is the input to a DECISION.
+
+    The trigger is evaluated HERE, by the digest, rather than by a cron or an alert: it is a
+    daily readout for an operator, not operator-action drift, and the alert contract reserves
+    Telegram for the latter.
+    """
+    line = (
+        f"⭐ Stars interest: {m.stars_interest_users_30d} users"
+        f" · {m.stars_interest_taps_30d} taps"
+        f" (24h: +{m.stars_interest_users_24h})"
+    )
+    if m.stars_interest_users_30d >= STARS_PROBE_TRIGGER_USERS:
+        line += " → STARS_PROBE_TRIGGER=FIRED"
+    return line
 
 
 def _link_state_suffix(m: DigestMetrics) -> str:
@@ -246,6 +297,19 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
             + quota_notices_unclassified_24h
         )
 
+        # GROWTH-TG-STARS-DEMAND-PROBE-W1 R4. Read through `count_interest`, which owns the
+        # windowing rule (on `last_at`, so re-engaged demand stays current) and returns (0, 0)
+        # rather than raising on a DB predating the migration — so the line renders on day one.
+        # `now` is the snapshot's ONE clock read — the same instant `generated_at` is stamped
+        # from — so the 30d and 24h windows cannot straddle a second and disagree.
+        stars_interest_users_30d, stars_interest_taps_30d = db.count_interest(
+            STARS_INTEREST_KIND,
+            (now - timedelta(days=STARS_PROBE_WINDOW_DAYS)).isoformat(),
+        )
+        stars_interest_users_24h, _ = db.count_interest(
+            STARS_INTEREST_KIND, (now - timedelta(days=1)).isoformat()
+        )
+
     # BOT-QUOTA-REFUSAL-SEAM-W1: derived by projecting every reachable subscriber
     # through `evaluate_delivery` — the SAME decision the seam enforces. Never a
     # re-implemented `alert_count >= 100` in SQL, which would be a second derivation
@@ -272,6 +336,9 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         quota_notices_monthly_24h=quota_notices_monthly_24h,
         quota_notices_daily_24h=quota_notices_daily_24h,
         quota_notices_unclassified_24h=quota_notices_unclassified_24h,
+        stars_interest_users_30d=stars_interest_users_30d,
+        stars_interest_taps_30d=stars_interest_taps_30d,
+        stars_interest_users_24h=stars_interest_users_24h,
         walled_now=walled_now,
         walled_silent=walled_silent,
         walled_paid=walled_paid,
@@ -310,6 +377,8 @@ def _format_digest(m: DigestMetrics) -> str:
         f"  🩸 Unmetered 24h: {m.unmetered_24h}{_link_state_suffix(m)}",
         f"  🚧 Walled now: {m.walled_now}"
         f"  (notified {m.walled_now - m.walled_silent} · silent {m.walled_silent})",
+        "",
+        _stars_interest_line(m),
         "",
     ])
     return "\n".join(lines)
