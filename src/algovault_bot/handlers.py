@@ -336,7 +336,8 @@ def handle_start(
     db.unmark_subscriber_blocked(chat_id)
     lad = resolve_ladder(db)
     return messages.welcome_message(
-        lad.free_monthly, lad.free_daily, lad.starter_price_usd, lad.starter_monthly_calls
+        lad.free_monthly, lad.free_daily, lad.starter_price_usd, lad.starter_monthly_calls,
+        lad.starter_price_usd_6month,
     )
 
 

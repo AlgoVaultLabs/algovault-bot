@@ -12,6 +12,10 @@ from __future__ import annotations
 from typing import Final
 
 from .batch import DEFAULT_TOP_N, TF_ORDER
+# `plan_ladder` is a pure-data LEAF that imports nothing from the package — see its docstring.
+# `quota` imports THIS module, so the pinned ladder cannot be read from there; a default argument
+# is evaluated at `def` time, which also rules out the deferred import `paywall.py` uses.
+from .plan_ladder import STARTER_PRICE_6MONTH_USD
 # `unlock` imports nothing local, so this cannot cycle — same edge `referral.py` uses.
 from .unlock import normalize_lang
 
@@ -52,12 +56,22 @@ def signup_url(campaign: str, source: str | None = None) -> str:
 # handle_start sends without parse_mode so the plain domain auto-links). The clickable
 # Upgrade CTA moved to /help (byte-identical URL); /start is link-light by design.
 def _usd(amount: float) -> str:
-    """`$9.99` / `$49` — a price as it renders in copy, trailing `.00` never emitted.
+    """`$9.99` / `$49` / `$39.90` — a price as it renders in copy.
 
     Mirrors signal-MCP's `plans.ts::planPriceLabel` so the same number renders identically on both
-    sides of the estate. GROWTH-TG-QUOTA-PARITY-W1 CH3b-2.
+    sides of the estate: a WHOLE number gets no decimals, and everything else gets EXACTLY two.
+    GROWTH-TG-QUOTA-PARITY-W1 CH3b-2.
+
+    🛑 DO NOT "TIDY" A TRAILING ZERO AWAY. This function used to end
+    `.rstrip("0").rstrip(".")`, which is NOT what `planPriceLabel` does — that helper is
+    `Number.isInteger(p) ? p : p.toFixed(2)` and never strips. The divergence was invisible for as
+    long as every price the bot rendered happened to have a non-zero cent (`$9.99`, `$49`), and it
+    surfaced the moment GROWTH-TG-PLAN-PICKER-W1 R2 fed it the six-month total: the ratified brand
+    figure `$39.90` came out as `$39.9`. `planPrepayPriceLabel(starter, 6)` returns `"$39.90"`,
+    measured, and brand-facts.md carries `$39.90/6mo` as standing copy — so the bug was here, in
+    the mirror, not in the number. Every previously-rendered value is byte-identical either way.
     """
-    return f"${amount:.2f}".rstrip("0").rstrip(".") if amount % 1 else f"${int(amount)}"
+    return f"${amount:.2f}" if amount % 1 else f"${int(amount)}"
 
 
 def welcome_message(
@@ -65,6 +79,7 @@ def welcome_message(
     daily_total: int,
     starter_price_usd: float,
     starter_monthly_calls: int,
+    starter_price_usd_6month: float = STARTER_PRICE_6MONTH_USD,
 ) -> str:
     """GROWTH-TG-QUOTA-PARITY-W1 CH3a — a FUNCTION, because a constant cannot interpolate.
 
@@ -72,6 +87,11 @@ def welcome_message(
     It was a module-level `Final` holding the allowance as a literal, bound to `quota.py` by
     nothing at all — which is precisely the defect this wave exists to retire. Gate leg L5 now
     makes the literal form unwritable, so this cannot regress quietly.
+
+    GROWTH-TG-PLAN-PICKER-W1 R2 added the six-month total, which CH3a had to leave hand-typed
+    because `/api/plans/public` carried no prepay field. It is DEFAULTED so every pre-existing
+    caller and fixture emits a BYTE-IDENTICAL string with no edit — the default is the very
+    constant `quota` would have served on the fallback path.
     """
     return (
     "👋 Welcome to AlgoVault, the brain layer for AI trading agents.\n"
@@ -99,8 +119,8 @@ def welcome_message(
     "✅ Live, on-chain-verified results → algovault.com/track-record\n"
     "\n"
     f"Free: {monthly_total} alerts/month, {daily_total}/day. Want more? Starter is "
-    f"{_usd(starter_price_usd)}/mo or $39.90/6mo for {starter_monthly_calls:,} API "
-    "calls/mo, or pay per call with x402."
+    f"{_usd(starter_price_usd)}/mo or {_usd(starter_price_usd_6month)}/6mo for "
+    f"{starter_monthly_calls:,} API calls/mo, or pay per call with x402."
     )
 
 

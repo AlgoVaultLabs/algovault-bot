@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -67,6 +68,37 @@ FREE_TIER_DAILY_QUOTA: Final = 100
 #: Starter rung, mirrored for COPY only — it gates nothing. CH3 renders the upgrade line from it.
 STARTER_PRICE_USD: Final = 9.99
 STARTER_MONTHLY_CALLS: Final = 10_000
+
+# GROWTH-TG-PLAN-PICKER-W1 R2 — the rest of the four-SKU ladder, pinned on the same terms as the
+# two above: COPY ONLY, gating nothing, and they SERVE when the mirror is absent or stale.
+#
+# RE-EXPORTED, not defined here, and this module stays the place to import them from. They live in
+# the leaf `plan_ladder.py` for one measured reason: `messages.welcome_message` needs the six-month
+# total as a DEFAULT ARGUMENT, defaults are evaluated at `def` time, and `quota` imports `messages`
+# — so the deferred-import trick `paywall.py` uses for this same cycle cannot supply one. The only
+# alternative was hand-typing 39.90 a second time in `messages.py`, which is the `_TIER_QUOTA`
+# defect this wave exists to retire. See that module's docstring for the full argument.
+#
+# Before this wave the two six-month totals were hand-typed inside shipped copy strings, because
+# `/api/plans/public` carried no prepay field. R1 of this wave added `price_usd_6month` to that
+# endpoint, so they are mirrored now and these constants are the fallback, not the source.
+from .plan_ladder import (  # noqa: E402  (re-export beside its siblings, not at the import block)
+    PRO_DAILY_CALLS,
+    PRO_MONTHLY_CALLS,
+    PRO_PRICE_6MONTH_USD,
+    PRO_PRICE_USD,
+    STARTER_DAILY_CALLS,
+    STARTER_PRICE_6MONTH_USD,
+)
+
+__all__ = [
+    "PRO_DAILY_CALLS",
+    "PRO_MONTHLY_CALLS",
+    "PRO_PRICE_6MONTH_USD",
+    "PRO_PRICE_USD",
+    "STARTER_DAILY_CALLS",
+    "STARTER_PRICE_6MONTH_USD",
+]
 
 WINDOW_DAYS: Final = 30
 WINDOW = timedelta(days=WINDOW_DAYS)
@@ -182,6 +214,13 @@ class QuotaState:
     # CH3 renders the upgrade line from these. COPY ONLY — neither gates anything.
     starter_price_usd: float = STARTER_PRICE_USD
     starter_monthly_calls: int = STARTER_MONTHLY_CALLS
+    # GROWTH-TG-PLAN-PICKER-W1 R2 — the six-month total, carried exactly the way the two above
+    # are. It retires the `$39.90/6mo` string that `cta.py` hand-typed beside them, which was the
+    # last figure in this lane bound to the server's ladder by nothing at all.
+    #
+    # 🛑 It keeps a default for the same reason they do: the suite constructs QuotaState
+    # POSITIONALLY, so a non-defaulted field breaks every such test at CONSTRUCTION.
+    starter_price_usd_6month: float = STARTER_PRICE_6MONTH_USD
 
     @property
     def plan_state(self) -> PlanState:
@@ -370,15 +409,79 @@ def _parse_ts(raw: str | None) -> datetime | None:
 
 
 class Ladder(NamedTuple):
-    """The free + starter rungs the meter and the copy serve from, and where they came from."""
+    """The whole ladder the meter and the copy serve from, and where it came from.
+
+    GROWTH-TG-PLAN-PICKER-W1 R2 widened this from the free + starter rungs to all four SKUs the
+    plan picker renders. ONE VOCABULARY throughout: the field names here are the wire names
+    `/api/plans/public` publishes and the column names `free_tier_ladder` stores, so a figure keeps
+    the same name from `plans.ts` to the button label. Two names for one number is how the two
+    sides of a mirror drift apart while every individual file reads correct.
+    """
 
     free_monthly: int
     free_daily: int
     starter_price_usd: float
     starter_monthly_calls: int
+    starter_daily_calls: int
+    starter_price_usd_6month: float
+    pro_price_usd: float
+    pro_monthly_calls: int
+    pro_daily_calls: int
+    pro_price_usd_6month: float
     #: 'mirror' = the live ladder signal-MCP published. 'fallback' = the pinned constants, because
     #: the mirror was absent, stale, or unreadable. Carried so a caller can SAY which it served.
+    #:
+    #: 🛑 KEEP THIS LAST and construct `Ladder` by KEYWORD. It is a NamedTuple, so a positional
+    #: construction silently re-binds every field when the ladder next widens — and this one has
+    #: already widened once.
     source: Literal["mirror", "fallback"]
+
+
+def _fallback_ladder() -> Ladder:
+    """The pinned ladder, served whenever the mirror is absent, stale or unreadable.
+
+    ONE construction site rather than one per fallback branch: two literals of the same ladder is
+    the duplication this whole module exists to retire, and the second copy is the one that gets
+    forgotten when a rung is added.
+    """
+    return Ladder(
+        free_monthly=FREE_TIER_MONTHLY_QUOTA,
+        free_daily=FREE_TIER_DAILY_QUOTA,
+        starter_price_usd=STARTER_PRICE_USD,
+        starter_monthly_calls=STARTER_MONTHLY_CALLS,
+        starter_daily_calls=STARTER_DAILY_CALLS,
+        starter_price_usd_6month=STARTER_PRICE_6MONTH_USD,
+        pro_price_usd=PRO_PRICE_USD,
+        pro_monthly_calls=PRO_MONTHLY_CALLS,
+        pro_daily_calls=PRO_DAILY_CALLS,
+        pro_price_usd_6month=PRO_PRICE_6MONTH_USD,
+        source="fallback",
+    )
+
+
+def _row_get(row: sqlite3.Row, column: str) -> Any:
+    """A column's value, or None when the row predates the migration that added it.
+
+    `sqlite3.Row` raises `IndexError` on an unknown column rather than returning None, so a bot
+    running against a DB that has not yet applied `PLAN_PICKER_MIGRATIONS` would crash the whole
+    serving path on a read the caller is fully prepared to fall back on. The same tolerance
+    `build_plan_refusal_text` already applies to `lang_code`.
+    """
+    return row[column] if column in row.keys() else None
+
+
+def _pos_int(value: Any, pinned: int) -> int:
+    """A mirrored count, or the pinned fallback. `bool` is not a count; zero is not a cap."""
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else pinned
+
+
+def _pos_float(value: Any, pinned: float) -> float:
+    """A mirrored price, or the pinned fallback. A free plan is not something this ladder sells."""
+    return (
+        float(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+        else pinned
+    )
 
 
 def resolve_ladder(db: Database, now: datetime | None = None) -> Ladder:
@@ -395,29 +498,35 @@ def resolve_ladder(db: Database, now: datetime | None = None) -> Ladder:
     Per-field fallback rather than all-or-nothing: the starter rung feeds COPY and the free rung
     feeds ENFORCEMENT, so a response that carried the free rung but no starter tier should still
     move the meter. `parse_ladder` already refuses a payload missing the free rung outright.
+
+    GROWTH-TG-PLAN-PICKER-W1 R2: the six new rungs inherit that discipline UNCHANGED. A DB that
+    predates their migration returns a row without them, so `row[...]` is read through
+    `_row_get` and every one of them independently degrades to its pinned constant. The source
+    still reads 'mirror' in that case, and it is honest: the free rung — the only part that gates
+    anything — genuinely did come from the mirror.
     """
     row = db.get_free_tier_ladder()
     if row is None:
-        return Ladder(
-            FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA,
-            STARTER_PRICE_USD, STARTER_MONTHLY_CALLS, "fallback",
-        )
+        return _fallback_ladder()
     fetched = _parse_ts(row["fetched_at"])
     if fetched is None or ((now or _now()) - fetched) > LADDER_STALE_AFTER:
-        return Ladder(
-            FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA,
-            STARTER_PRICE_USD, STARTER_MONTHLY_CALLS, "fallback",
-        )
-    monthly = row["free_monthly"]
-    daily = row["free_daily"]
-    price = row["starter_price_usd"]
-    calls = row["starter_monthly_calls"]
+        return _fallback_ladder()
     return Ladder(
-        int(monthly) if isinstance(monthly, int) and monthly > 0 else FREE_TIER_MONTHLY_QUOTA,
-        int(daily) if isinstance(daily, int) and daily > 0 else FREE_TIER_DAILY_QUOTA,
-        float(price) if isinstance(price, (int, float)) and price > 0 else STARTER_PRICE_USD,
-        int(calls) if isinstance(calls, int) and calls > 0 else STARTER_MONTHLY_CALLS,
-        "mirror",
+        free_monthly=_pos_int(_row_get(row, "free_monthly"), FREE_TIER_MONTHLY_QUOTA),
+        free_daily=_pos_int(_row_get(row, "free_daily"), FREE_TIER_DAILY_QUOTA),
+        starter_price_usd=_pos_float(_row_get(row, "starter_price_usd"), STARTER_PRICE_USD),
+        starter_monthly_calls=_pos_int(_row_get(row, "starter_monthly_calls"), STARTER_MONTHLY_CALLS),
+        starter_daily_calls=_pos_int(_row_get(row, "starter_daily_calls"), STARTER_DAILY_CALLS),
+        starter_price_usd_6month=_pos_float(
+            _row_get(row, "starter_price_usd_6month"), STARTER_PRICE_6MONTH_USD
+        ),
+        pro_price_usd=_pos_float(_row_get(row, "pro_price_usd"), PRO_PRICE_USD),
+        pro_monthly_calls=_pos_int(_row_get(row, "pro_monthly_calls"), PRO_MONTHLY_CALLS),
+        pro_daily_calls=_pos_int(_row_get(row, "pro_daily_calls"), PRO_DAILY_CALLS),
+        pro_price_usd_6month=_pos_float(
+            _row_get(row, "pro_price_usd_6month"), PRO_PRICE_6MONTH_USD
+        ),
+        source="mirror",
     )
 
 
@@ -437,6 +546,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
             day_total=ladder.free_daily,
             starter_price_usd=ladder.starter_price_usd,
             starter_monthly_calls=ladder.starter_monthly_calls,
+            starter_price_usd_6month=ladder.starter_price_usd_6month,
         )
 
     used = int(row["alert_count"] or 0)
@@ -482,6 +592,7 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
         quota_day_notice_day=_m("quota_day_notice_day"),
         starter_price_usd=ladder.starter_price_usd,
         starter_monthly_calls=ladder.starter_monthly_calls,
+        starter_price_usd_6month=ladder.starter_price_usd_6month,
         quota_75_last_fired_at=last_75,
         quota_90_last_fired_at=last_90,
         quota_100_last_fired_at=last_100,
@@ -564,6 +675,7 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
         quota_day_notice_day=state.quota_day_notice_day,
         starter_price_usd=state.starter_price_usd,
         starter_monthly_calls=state.starter_monthly_calls,
+        starter_price_usd_6month=state.starter_price_usd_6month,
     )
 
 

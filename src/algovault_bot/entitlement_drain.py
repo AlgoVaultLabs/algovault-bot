@@ -468,6 +468,16 @@ def drain_entitlement_debits(
                 starter_price_usd=ladder["starter_price_usd"],
                 starter_monthly_calls=ladder["starter_monthly_calls"],
                 fetched_at=now.isoformat(),
+                # GROWTH-TG-PLAN-PICKER-W1 R2 — the rest of the four-SKU ladder. `.get` rather
+                # than `[...]`: absence must write NULL (which `resolve_ladder` reads as "serve
+                # the pinned constant"), never raise inside the drain and take the debit pass
+                # above it down with it.
+                starter_daily_calls=ladder.get("starter_daily_calls"),
+                starter_price_usd_6month=ladder.get("starter_price_usd_6month"),
+                pro_price_usd=ladder.get("pro_price_usd"),
+                pro_monthly_calls=ladder.get("pro_monthly_calls"),
+                pro_daily_calls=ladder.get("pro_daily_calls"),
+                pro_price_usd_6month=ladder.get("pro_price_usd_6month"),
             )
             counts["ladder_fetched"] = 1
 

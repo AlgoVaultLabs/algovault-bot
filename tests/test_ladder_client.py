@@ -15,13 +15,48 @@ from algovault_bot.ladder_client import ladder_url, parse_ladder
 from algovault_bot.quota import (
     FREE_TIER_DAILY_QUOTA,
     FREE_TIER_MONTHLY_QUOTA,
+    PRO_DAILY_CALLS,
+    PRO_MONTHLY_CALLS,
+    PRO_PRICE_6MONTH_USD,
+    PRO_PRICE_USD,
+    STARTER_DAILY_CALLS,
     STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_6MONTH_USD,
     STARTER_PRICE_USD,
 )
 
-#: The live response, captured verbatim 2026-08-27 from
-#: `GET https://api.algovault.com/api/plans/public`.
+_CTA = {
+    "brand": "The Brain Layer for AI Trading Agents",
+    "note": "Building an agent? Get a free API key — higher limits, all tools, x402 pay-per-call.",
+    "get_started": "https://algovault.com/#pricing",
+    "docs": "https://algovault.com/docs.html",
+}
+
+#: The live response, captured verbatim 2026-09-06 from the real registrar after
+#: GROWTH-TG-PLAN-PICKER-W1 R1 added `price_usd_6month`.
+#: Contract: audits/api-plans-public-shape-snapshot-2026-09-06.json (signal-MCP).
 LIVE_BODY = {
+    "free": {"monthly_calls": 200, "daily_calls": 100},
+    "tiers": [
+        {"id": "starter", "label": "Starter", "monthly_calls": 10000,
+         "daily_calls": 1000, "price_usd": 9.99, "price_usd_6month": 39.9},
+        {"id": "pro", "label": "Pro", "monthly_calls": 100000,
+         "daily_calls": 10000, "price_usd": 49, "price_usd_6month": 129},
+        {"id": "enterprise", "label": "Enterprise", "monthly_calls": 100000,
+         "daily_calls": None, "price_usd": 299, "price_usd_6month": None},
+    ],
+    "generated_at": "2026-09-06T14:58:22.411Z",
+    "_algovault": _CTA,
+}
+
+#: The response as it was BEFORE R1 — captured verbatim 2026-08-27, kept on purpose.
+#:
+#: 🛑 This is not dead history. It is the DEPLOY-ORDER fixture: for the window between the bot
+#: deploying and signal-MCP deploying (or if that deploy is ever rolled back), this is what the
+#: mirror actually receives. The parser must read the absent prepay field as None — never as a
+#: synthetic zero, and never by rejecting the whole payload — so the caller serves its pinned
+#: constant. That property is what makes the two repos' deploy order free rather than lockstep.
+PRE_PREPAY_BODY = {
     "free": {"monthly_calls": 200, "daily_calls": 100},
     "tiers": [
         {"id": "starter", "label": "Starter", "monthly_calls": 10000,
@@ -32,12 +67,7 @@ LIVE_BODY = {
          "daily_calls": None, "price_usd": 299},
     ],
     "generated_at": "2026-08-27T12:59:58.767Z",
-    "_algovault": {
-        "brand": "The Brain Layer for AI Trading Agents",
-        "note": "Building an agent? Get a free API key — higher limits, all tools, x402 pay-per-call.",
-        "get_started": "https://algovault.com/#pricing",
-        "docs": "https://algovault.com/docs.html",
-    },
+    "_algovault": _CTA,
 }
 
 
@@ -48,7 +78,45 @@ def test_parses_the_live_response() -> None:
         "free_daily": 100,
         "starter_price_usd": 9.99,
         "starter_monthly_calls": 10000,
+        "starter_daily_calls": 1000,
+        "starter_price_usd_6month": 39.9,
+        "pro_price_usd": 49.0,
+        "pro_monthly_calls": 100000,
+        "pro_daily_calls": 10000,
+        "pro_price_usd_6month": 129.0,
     }
+
+
+def test_a_body_without_the_prepay_field_reads_ABSENT_never_synthetic() -> None:
+    """GROWTH-TG-PLAN-PICKER-W1 R2 — the deploy-order property, asserted.
+
+    A bot deployed BEFORE signal-MCP's R1 (or after a rollback of it) receives exactly
+    `PRE_PREPAY_BODY`. Every other rung must still mirror, and the two prepay totals must be
+    None — the caller's signal to serve its pinned constant. A zero here would render `$0/6mo`
+    to a paying prospect; a rejected payload would drop the whole free base to the fallback.
+    """
+    out = parse_ladder(PRE_PREPAY_BODY)
+    assert out is not None
+    assert out["starter_price_usd_6month"] is None
+    assert out["pro_price_usd_6month"] is None
+    # Everything the older endpoint DID carry still mirrors — absence is per-field, not total.
+    assert out["free_monthly"] == 200 and out["free_daily"] == 100
+    assert out["starter_price_usd"] == 9.99 and out["starter_daily_calls"] == 1000
+    assert out["pro_price_usd"] == 49.0 and out["pro_daily_calls"] == 10000
+
+
+def test_the_pro_rung_is_selected_by_id_not_position() -> None:
+    """The same rule as the starter rung, on the generalised `_rung` reader.
+
+    Reversing the ladder puts Enterprise first. A position-indexed reader would mirror
+    Enterprise's $299 as Pro's price and publish it on a button.
+    """
+    body = {**LIVE_BODY, "tiers": list(reversed(LIVE_BODY["tiers"]))}
+    out = parse_ladder(body)
+    assert out is not None
+    assert out["pro_price_usd"] == 49.0
+    assert out["pro_monthly_calls"] == 100000
+    assert out["pro_price_usd_6month"] == 129.0
 
 
 def test_unknown_keys_are_IGNORED_never_rejected() -> None:
@@ -133,6 +201,14 @@ def test_the_pinned_fallbacks_equal_the_captured_live_ladder() -> None:
     assert out["free_daily"] == FREE_TIER_DAILY_QUOTA
     assert out["starter_price_usd"] == STARTER_PRICE_USD
     assert out["starter_monthly_calls"] == STARTER_MONTHLY_CALLS
+    # GROWTH-TG-PLAN-PICKER-W1 R2 — the six new rungs inherit the criterion. A pinned fallback
+    # that has drifted from the ladder it stands in for renders a WRONG PRICE on a live button.
+    assert out["starter_daily_calls"] == STARTER_DAILY_CALLS
+    assert out["starter_price_usd_6month"] == STARTER_PRICE_6MONTH_USD
+    assert out["pro_price_usd"] == PRO_PRICE_USD
+    assert out["pro_monthly_calls"] == PRO_MONTHLY_CALLS
+    assert out["pro_daily_calls"] == PRO_DAILY_CALLS
+    assert out["pro_price_usd_6month"] == PRO_PRICE_6MONTH_USD
 
 
 @pytest.mark.skipif(
@@ -158,3 +234,9 @@ def test_live_endpoint_still_matches_the_pinned_fallbacks() -> None:
     assert out["free_daily"] == FREE_TIER_DAILY_QUOTA
     assert out["starter_price_usd"] == STARTER_PRICE_USD
     assert out["starter_monthly_calls"] == STARTER_MONTHLY_CALLS
+    assert out["starter_daily_calls"] == STARTER_DAILY_CALLS
+    assert out["starter_price_usd_6month"] == STARTER_PRICE_6MONTH_USD
+    assert out["pro_price_usd"] == PRO_PRICE_USD
+    assert out["pro_monthly_calls"] == PRO_MONTHLY_CALLS
+    assert out["pro_daily_calls"] == PRO_DAILY_CALLS
+    assert out["pro_price_usd_6month"] == PRO_PRICE_6MONTH_USD

@@ -39,9 +39,14 @@ log = logging.getLogger(__name__)
 
 HTTP_TIMEOUT = 10.0
 
-#: The starter rung, as mirrored. `None` for either field means "the response did not carry it" —
-#: absence, never a synthetic zero. The caller falls back per field.
-StarterRung = tuple[float | None, int | None]
+#: One rung, as mirrored: (price_usd, monthly_calls, daily_calls, price_usd_6month). `None` for
+#: any field means "the response did not carry it" — absence, never a synthetic zero. The caller
+#: falls back PER FIELD.
+#:
+#: GROWTH-TG-PLAN-PICKER-W1 R2 widened this from the starter-only pair. The bot's plan picker
+#: renders four SKUs and both daily caps, so every one of those figures now arrives from the
+#: server instead of being hand-typed beside a derived one.
+Rung = tuple[float | None, int | None, int | None, float | None]
 
 
 def ladder_url() -> str:
@@ -51,24 +56,36 @@ def ladder_url() -> str:
     return f"{base}/api/plans/public"
 
 
-def _starter_rung(payload: dict[str, Any]) -> StarterRung:
-    """Pull the starter tier's price + monthly calls, or (None, None) if it is not present.
+_ABSENT_RUNG: Rung = (None, None, None, None)
+
+
+def _rung(payload: dict[str, Any], tier_id: str) -> Rung:
+    """Pull one tier's price + monthly calls + daily cap + 6-month total, or absence per field.
 
     Selected BY ID, never by position: `tiers[0]` would silently become Pro the day the ladder is
-    reordered, and a reorder is not a change anyone would think to test the bot against.
+    reordered, and a reorder is not a change anyone would think to test the bot against. That rule
+    is the whole reason this generalises to a `tier_id` parameter rather than growing a second
+    position-indexed reader beside the first.
+
+    `bool` is a subclass of `int` in Python, so `True` would otherwise mirror as a cap of 1 — the
+    same guard `parse_ladder` applies to the free rung. Every numeric read here rejects it.
     """
     tiers = payload.get("tiers")
     if not isinstance(tiers, list):
-        return (None, None)
+        return _ABSENT_RUNG
     for t in tiers:
-        if isinstance(t, dict) and t.get("id") == "starter":
+        if isinstance(t, dict) and t.get("id") == tier_id:
             price = t.get("price_usd")
             calls = t.get("monthly_calls")
+            daily = t.get("daily_calls")
+            six = t.get("price_usd_6month")
             return (
-                float(price) if isinstance(price, (int, float)) else None,
-                int(calls) if isinstance(calls, int) else None,
+                float(price) if isinstance(price, (int, float)) and not isinstance(price, bool) else None,
+                int(calls) if isinstance(calls, int) and not isinstance(calls, bool) else None,
+                int(daily) if isinstance(daily, int) and not isinstance(daily, bool) else None,
+                float(six) if isinstance(six, (int, float)) and not isinstance(six, bool) else None,
             )
-    return (None, None)
+    return _ABSENT_RUNG
 
 
 def parse_ladder(payload: Any) -> dict[str, Any] | None:
@@ -92,12 +109,23 @@ def parse_ladder(payload: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(daily, int) or isinstance(daily, bool) or daily <= 0:
         return None
-    price, calls = _starter_rung(payload)
+    s_price, s_calls, s_daily, s_six = _rung(payload, "starter")
+    p_price, p_calls, p_daily, p_six = _rung(payload, "pro")
     return {
         "free_monthly": monthly,
         "free_daily": daily,
-        "starter_price_usd": price,
-        "starter_monthly_calls": calls,
+        "starter_price_usd": s_price,
+        "starter_monthly_calls": s_calls,
+        # GROWTH-TG-PLAN-PICKER-W1 R2 — the rest of the four-SKU ladder the picker renders.
+        # An endpoint that has not yet shipped `price_usd_6month` yields None here, and None
+        # means the caller serves its pinned constant. That is what makes the deploy ORDER of
+        # the two repos free: this file can land before the server field does.
+        "starter_daily_calls": s_daily,
+        "starter_price_usd_6month": s_six,
+        "pro_price_usd": p_price,
+        "pro_monthly_calls": p_calls,
+        "pro_daily_calls": p_daily,
+        "pro_price_usd_6month": p_six,
     }
 
 

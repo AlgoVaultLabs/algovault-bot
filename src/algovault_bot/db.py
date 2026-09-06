@@ -417,6 +417,27 @@ QUOTA_PARITY_MIGRATIONS = (
     ")",
 )
 
+# GROWTH-TG-PLAN-PICKER-W1 R2 — the mirror widens from the free + starter rungs to the whole
+# four-SKU ladder the plan picker renders (starter/pro x month/6month, plus both daily caps).
+#
+# ALL NULLABLE, deliberately. A drain that runs against a signal-MCP which has not yet deployed
+# `price_usd_6month` writes NULL here, and `quota.resolve_ladder` reads NULL as "absent" and
+# serves its pinned constant. That is what makes the deploy ORDER of the two repos free rather
+# than lockstep — and a NOT NULL column without a default would take the serving path down for
+# the whole window between the two deploys.
+#
+# A separate tuple rather than more lines in QUOTA_PARITY_MIGRATIONS: these run against a table
+# the previous tuple CREATES, so the ordering is a real dependency, and a tuple named for its
+# wave is how the next reader can tell which columns arrived together.
+PLAN_PICKER_MIGRATIONS = (
+    "ALTER TABLE free_tier_ladder ADD COLUMN starter_daily_calls INTEGER",
+    "ALTER TABLE free_tier_ladder ADD COLUMN starter_price_usd_6month REAL",
+    "ALTER TABLE free_tier_ladder ADD COLUMN pro_price_usd REAL",
+    "ALTER TABLE free_tier_ladder ADD COLUMN pro_monthly_calls INTEGER",
+    "ALTER TABLE free_tier_ladder ADD COLUMN pro_daily_calls INTEGER",
+    "ALTER TABLE free_tier_ladder ADD COLUMN pro_price_usd_6month REAL",
+)
+
 # PRICING-BOT-DELIVERY-METERING-W1 CH4a — the DEBIT OUTBOX.
 #
 # A delivery must never be blocked, delayed or lost by a metering call. The recorder enqueues here
@@ -715,6 +736,9 @@ class Database:
                 *LINK_LIFECYCLE_MIGRATIONS,
                 # GROWTH-TG-QUOTA-PARITY-W1 (2026-08-27): daily free meter + ladder mirror.
                 *QUOTA_PARITY_MIGRATIONS,
+                # GROWTH-TG-PLAN-PICKER-W1 (2026-09-06): the mirror carries all four SKUs.
+                # MUST follow QUOTA_PARITY_MIGRATIONS — it ALTERs the table that one creates.
+                *PLAN_PICKER_MIGRATIONS,
                 # …and the notice ledger learns WHICH wall fired (runs after the table exists).
                 *QUOTA_NOTICE_LIMIT_KIND_MIGRATIONS,
                 # OPS-BOT-DISPATCH-LATENCY-W1 CH1 (2026-09-04): bounded per-bucket retry so a
@@ -1759,10 +1783,14 @@ class Database:
             try:
                 cur.execute(
                     "SELECT free_monthly, free_daily, starter_price_usd, starter_monthly_calls, "
+                    "starter_daily_calls, starter_price_usd_6month, pro_price_usd, "
+                    "pro_monthly_calls, pro_daily_calls, pro_price_usd_6month, "
                     "fetched_at FROM free_tier_ladder WHERE id = 1"
                 )
             except sqlite3.OperationalError:
-                # A DB that predates the migration. Same tolerance as the per-row mirror columns.
+                # A DB that predates EITHER migration. Same tolerance as the per-row mirror
+                # columns — and `quota._row_get` gives the caller a second, per-column layer,
+                # because a partial migration must degrade one figure rather than the ladder.
                 return None
             return cur.fetchone()
 
@@ -1773,24 +1801,51 @@ class Database:
         starter_price_usd: float | None,
         starter_monthly_calls: int | None,
         fetched_at: str,
+        *,
+        starter_daily_calls: int | None = None,
+        starter_price_usd_6month: float | None = None,
+        pro_price_usd: float | None = None,
+        pro_monthly_calls: int | None = None,
+        pro_daily_calls: int | None = None,
+        pro_price_usd_6month: float | None = None,
     ) -> None:
-        """Replace the single mirror row. `id = 1` is pinned by the table's own CHECK."""
+        """Replace the single mirror row. `id = 1` is pinned by the table's own CHECK.
+
+        GROWTH-TG-PLAN-PICKER-W1 R2 added the six keyword-only rungs. They default to None so
+        every pre-existing caller and fixture emits an IDENTICAL row — absence writes NULL, and
+        `quota.resolve_ladder` reads NULL as "serve the pinned constant". Keyword-only because a
+        ten-argument positional call is where a price and a call count get swapped.
+        """
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO free_tier_ladder "
-                "(id, free_monthly, free_daily, starter_price_usd, starter_monthly_calls, fetched_at) "
-                "VALUES (1, ?, ?, ?, ?, ?) "
+                "(id, free_monthly, free_daily, starter_price_usd, starter_monthly_calls, "
+                " starter_daily_calls, starter_price_usd_6month, pro_price_usd, "
+                " pro_monthly_calls, pro_daily_calls, pro_price_usd_6month, fetched_at) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  free_monthly = excluded.free_monthly,"
                 "  free_daily = excluded.free_daily,"
                 "  starter_price_usd = excluded.starter_price_usd,"
                 "  starter_monthly_calls = excluded.starter_monthly_calls,"
+                "  starter_daily_calls = excluded.starter_daily_calls,"
+                "  starter_price_usd_6month = excluded.starter_price_usd_6month,"
+                "  pro_price_usd = excluded.pro_price_usd,"
+                "  pro_monthly_calls = excluded.pro_monthly_calls,"
+                "  pro_daily_calls = excluded.pro_daily_calls,"
+                "  pro_price_usd_6month = excluded.pro_price_usd_6month,"
                 "  fetched_at = excluded.fetched_at",
                 (
                     free_monthly,
                     free_daily,
                     starter_price_usd,
                     starter_monthly_calls,
+                    starter_daily_calls,
+                    starter_price_usd_6month,
+                    pro_price_usd,
+                    pro_monthly_calls,
+                    pro_daily_calls,
+                    pro_price_usd_6month,
                     fetched_at,
                 ),
             )

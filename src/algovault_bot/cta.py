@@ -28,6 +28,7 @@ from .messages import _usd, signup_url
 from .quota import (
     FREE_TIER_MONTHLY_QUOTA,
     STARTER_MONTHLY_CALLS,
+    STARTER_PRICE_6MONTH_USD,
     STARTER_PRICE_USD,
     QuotaState,
 )
@@ -124,7 +125,8 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
             return ""
         return (
             "⏰ You've used 75% of your free alerts. "
-            f"Upgrade to Starter ({_usd(state.starter_price_usd)}/mo or $39.90/6mo "
+            f"Upgrade to Starter ({_usd(state.starter_price_usd)}/mo or "
+            f"{_usd(state.starter_price_usd_6month)}/6mo "
             f"→ {state.starter_monthly_calls:,} API calls/mo):\n"
             f"→ {signup_url('quota_75')}"
         )
@@ -165,15 +167,20 @@ def quota_exhausted_message(state: QuotaState | None = None) -> str:
 
     GROWTH-TG-QUOTA-PARITY-W1 CH3b-2: every figure now derives. `state` is optional so existing
     callers keep working; absent it, the pinned fallbacks are used — which SERVE, as everywhere
-    else in this lane. `$39.90/6mo` stays hand-typed by ruling: `/api/plans/public` carries no
-    prepay field, and widening a shipped public contract for one string is
-    `OPS-PLANS-PUBLIC-PREPAY-FIELD-W1`, not this wave. The figure is currently correct.
+    else in this lane.
+
+    GROWTH-TG-PLAN-PICKER-W1 R2: the six-month total now derives too. CH3b-2's note here recorded
+    that it stayed hand-typed BY RULING — `/api/plans/public` carried no prepay field, and widening
+    a shipped public contract for one string was scoped to `OPS-PLANS-PUBLIC-PREPAY-FIELD-W1`.
+    R1 of this wave IS that wave: the endpoint publishes `price_usd_6month`, the mirror carries it,
+    and the last hand-typed figure in this lane is gone. The obligation is DISCHARGED.
     """
     total = state.total if state is not None else FREE_TIER_MONTHLY_QUOTA
     price = state.starter_price_usd if state is not None else STARTER_PRICE_USD
     calls = state.starter_monthly_calls if state is not None else STARTER_MONTHLY_CALLS
+    six = state.starter_price_usd_6month if state is not None else STARTER_PRICE_6MONTH_USD
     return (
         f"Free tier limit reached ({total}/{total} "
-        f"alerts this month). Upgrade to Starter ({_usd(price)}/mo or $39.90/6mo) for "
+        f"alerts this month). Upgrade to Starter ({_usd(price)}/mo or {_usd(six)}/6mo) for "
         f"{calls:,} API calls/mo, or pay per call via x402."
     )
