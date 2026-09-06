@@ -42,8 +42,20 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable, Final, Literal, NamedTuple
 
+from telegram import InlineKeyboardMarkup
+
 from .db import Database
-from .messages import signup_url
+# GROWTH-TG-PLAN-PICKER-W1 R4 — the wall notice carries the picker, so this module imports the
+# keyboard builder. NOT a cycle: `keyboards` imports `messages` and `validators` only, and its
+# `Ladder` annotation is TYPE_CHECKING-only for exactly this reason. The `alert_engine` leaf
+# property this module protects is unaffected — that edge is still injected via `send`.
+from .keyboards import plan_picker_kb
+from .messages import (
+    TOP_SELF_SERVE_EN,
+    TOP_SELF_SERVE_ID,
+    TOP_SELF_SERVE_ZH,
+    signup_url,
+)
 from .paywall import format_paywall_body
 
 
@@ -993,9 +1005,13 @@ def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> st
         )
         upsell_id = upsell_zh = upsell_en
     else:
-        upsell_en = "You are on the top self-serve plan — reply here and we will size the next step with you."
-        upsell_id = "Anda sudah di paket mandiri tertinggi — balas di sini dan kami bantu langkah berikutnya."
-        upsell_zh = "您已使用最高自助套餐——请回复，我们将为您安排后续方案。"
+        # GROWTH-TG-PLAN-PICKER-W1 R3 — ONE derivation, shared with `messages.plan_picker_text`.
+        # The picker answers the same question this wall does ("what is above me?") and a Pro
+        # subscriber must not get two different answers from two surfaces. The strings are
+        # byte-identical to what this branch shipped; only their home moved.
+        upsell_en = TOP_SELF_SERVE_EN
+        upsell_id = TOP_SELF_SERVE_ID
+        upsell_zh = TOP_SELF_SERVE_ZH
 
     if lang.startswith("id"):
         return f"Kuota paket {tier} habis: {figures} alert. {when_id} {upsell_id}"
@@ -1009,17 +1025,29 @@ async def refuse_and_notify(
     chat_id: int,
     source: str,
     *,
-    send: Callable[[str], Awaitable[bool]],
+    send: Callable[[str, InlineKeyboardMarkup | None], Awaitable[bool]],
     decision: QuotaDecision | None = None,
 ) -> bool:
     """Refuse ONE push-lane delivery, and tell the user the first time it happens.
 
     Returns True iff a notice was delivered on this call.
 
-    ``send`` is INJECTED rather than imported so this module stays a leaf — importing
-    ``alert_engine._push`` here would close a cycle (alert_engine already imports this
-    module). ``decision`` may be passed by a caller that already evaluated, so a lane
-    never derives the decision twice within one cycle.
+    ``send`` is INJECTED rather than imported so this module stays a leaf against
+    ``alert_engine`` — importing ``alert_engine._push`` here would close a cycle (alert_engine
+    already imports this module). ``decision`` may be passed by a caller that already evaluated,
+    so a lane never derives the decision twice within one cycle.
+
+    GROWTH-TG-PLAN-PICKER-W1 R4: the notice now carries the plan picker, and ``send`` takes the
+    markup as its SECOND argument. The wall is the single highest-intent moment this bot has —
+    the user wanted one more alert and could not have it — and until now it offered a bare URL to
+    ONE SKU. The ≤300-char BODY is unchanged in all three languages; only a keyboard was attached.
+
+    Which picker depends on the lane, and both are derived, never branched on a literal:
+      free lane  -> the full ladder, campaign ``quota_exhausted_push``
+      paid lane  -> ``above_tier`` = the subscriber's effective tier, campaign ``plan_wall``, so
+                    a walled Starter is offered Pro and a walled Pro gets NO keyboard at all
+                    (``plan_picker_kb`` returns None there, and ``build_plan_refusal_text``
+                    already ends with the ratified top-of-ladder sentence for that case).
 
     Telemetry is a LOG LINE, never a table row: refusals run at ~10k/week and a row
     per refusal is write amplification for a quantity that is a STATE, not an event.
@@ -1027,7 +1055,8 @@ async def refuse_and_notify(
 
     Refuses, never throws (`build-and-runtime.md`: a guard on a live serving path
     REFUSES, it does not THROW). A failure to render or send a notice must not take
-    the dispatch loop down for every other subscriber.
+    the dispatch loop down for every other subscriber — and that now covers the keyboard build
+    too, since it sits inside the same try.
     """
     d = decision if decision is not None else evaluate_delivery(db, chat_id)
     notified = False
@@ -1035,12 +1064,17 @@ async def refuse_and_notify(
         if d.notify:
             # CH5e: the paid lane gets the PLAN wall's copy (server figures, plan clock); the free
             # lane keeps its own, byte-identical to before this wave.
-            text = (
-                build_plan_refusal_text(db, chat_id, d.state)
-                if d.state.is_paid
-                else build_refusal_text(db, chat_id, d.state)
-            )
-            if await send(text):
+            src = db.get_acquisition_source(chat_id)
+            ladder = resolve_ladder(db)
+            if d.state.is_paid:
+                text = build_plan_refusal_text(db, chat_id, d.state)
+                markup = plan_picker_kb(
+                    ladder, "plan_wall", src, above_tier=d.state.effective_tier.tier
+                )
+            else:
+                text = build_refusal_text(db, chat_id, d.state)
+                markup = plan_picker_kb(ladder, "quota_exhausted_push", src)
+            if await send(text, markup):
                 # Stamp ONLY after a delivered send — a blocked or rate-limited
                 # subscriber must not silently burn the one notice of the episode
                 # (the discipline the pre-seam watch lane already applied to

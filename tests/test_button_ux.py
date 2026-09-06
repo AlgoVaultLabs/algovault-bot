@@ -30,8 +30,10 @@ def test_keyboard_main_menu_shape_and_callbacks():
     _assert_cb_valid(kb)
     cbs = [b.callback_data for b in _buttons(kb) if b.callback_data]
     assert "mnu:watch" in cbs and "mnu:scan" in cbs
-    urls = [b.url for b in _buttons(kb) if b.url]
-    assert any(u.startswith("https://") and "utm_campaign=start_welcome" in u for u in urls)
+    # GROWTH-TG-PLAN-PICKER-W1 R4: Upgrade is a CALLBACK now, not a url button — it opens the
+    # four-SKU picker inside Telegram. The menu therefore carries NO urls at all.
+    assert "mnu:upgrade" in cbs
+    assert [b.url for b in _buttons(kb) if b.url] == []
     assert all(len(row) <= 3 for row in kb.inline_keyboard)
 
 

@@ -204,6 +204,7 @@ CURATED_COMMANDS: list[BotCommand] = [
     BotCommand("unwatchall", "Clear your entire watchlist"),
     BotCommand("unscanwatch", "Stop a scan digest"),
     BotCommand("referral", "Invite friends — they get bonus calls, you earn"),
+    BotCommand("upgrade", "Plans and pricing — upgrade in two taps"),
     BotCommand("help", "Full command list"),
 ]
 
@@ -1361,6 +1362,25 @@ def register_handlers(app: Application, db: Database) -> None:
             )
             return None
 
+    def _picker_above_tier(chat_id: int) -> str | None:
+        """The rung this chat is ALREADY on, so the picker never sells it back to them.
+
+        GROWTH-TG-PLAN-PICKER-W1 R4. Projects `quota.effective_tier` — the ONE derivation every
+        tier label in this bot reads — rather than re-deriving from `linked_tier`, which is the
+        second-derivation drift `quota.py` documents at length.
+
+        Fail-soft, deliberately: a DB read error returns None, which renders the FULL ladder. The
+        worst case is showing a Starter subscriber the Starter row, which is a cosmetic miss; the
+        alternative failure (hiding the ladder from a free user on a transient error) is a lost
+        sale. Same direction as every other fallback in this lane — it SERVES.
+        """
+        try:
+            tier = get_quota_state(db, chat_id).effective_tier.tier
+        except Exception:
+            log.exception('{"event": "picker_tier_read_failed", "chat_id": %d}', chat_id)
+            return None
+        return tier if tier in ("starter", "pro", "enterprise") else None
+
     async def _start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
@@ -1399,12 +1419,12 @@ def register_handlers(app: Application, db: Database) -> None:
             # tags) — send WITHOUT parse_mode so the plain track-record domain auto-links.
             reply = handle_start(db, chat_id, username, lang)
             # TG-BUTTON-UX-W1 (C4): append the inline button menu.
-            # GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): the menu's Upgrade button carries
-            # the stored first-touch source as utm_medium. None (every pre-CH1 and every
-            # untagged subscriber) → byte-identical URL to before this wave.
+            # GROWTH-TG-PLAN-PICKER-W1 R4: ⬆️ Upgrade is a callback (`mnu:upgrade`) now, so the
+            # menu is static and the acquisition source is threaded at the CALLBACK instead —
+            # which is where the chat_id is, and where the picker's four URLs are actually built.
             await update.message.reply_text(
                 reply, disable_web_page_preview=True,
-                reply_markup=keyboards.main_menu_kb(_acquisition_source_or_none(chat_id)),
+                reply_markup=keyboards.main_menu_kb(),
             )
         # TG-WATCH-ADOPTION-BROADCAST-W1 (R1): fire the one-time first-watch
         # nudge for a 0-engagement sub right after /start. Gated by the go-live
@@ -1477,11 +1497,16 @@ def register_handlers(app: Application, db: Database) -> None:
         chat_id, username, lang = _user_meta(update)
         _maybe_fire_first_command_event(db, chat_id)
         reply = handle_help(db, chat_id, username, lang)
-        # TG-SCANWATCH-TF-CADENCE-W1 (B): the Upgrade CTA is now an inline button (shared
-        # upgrade_button; utm_campaign=help_message), not a raw URL in the body.
+        # TG-SCANWATCH-TF-CADENCE-W1 (B): the Upgrade CTA is an inline button, not a raw URL in
+        # the body. GROWTH-TG-PLAN-PICKER-W1 R4: that one button became the four-SKU picker, and
+        # a LINKED payer sees only what is actually above them (`_picker_above_tier`).
         await update.message.reply_text(
             reply, disable_web_page_preview=True,
-            reply_markup=keyboards.upgrade_markup("help_message"),
+            reply_markup=keyboards.plan_picker_kb(
+                resolve_ladder(db), "help_message",
+                _acquisition_source_or_none(chat_id),
+                above_tier=_picker_above_tier(chat_id),
+            ),
         )
 
     async def _send_referral_card(message: Message, code_data: dict, lang: str | None) -> None:
@@ -1527,8 +1552,15 @@ def register_handlers(app: Application, db: Database) -> None:
 
     async def _on_menu_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Main-menu buttons that map to existing handlers (Watch/Scan are the wizards'
-        OWN entry_points; Upgrade is a url button). mnu:regime/call need a coin → the
-        handler's no-arg usage reply guides the user to type it."""
+        OWN entry_points). mnu:regime/call need a coin → the handler's no-arg usage reply
+        guides the user to type it.
+
+        GROWTH-TG-PLAN-PICKER-W1 R4 adds `mnu:upgrade` (the ⬆️ Upgrade button, formerly a
+        single-SKU url button) and attaches the picker to `mnu:help` as well. That second part
+        closes a real inconsistency: `/help` typed as a command carried the Upgrade CTA and the
+        SAME help text reached through the menu button did not, so which surface a user tapped
+        decided whether they were ever shown a price.
+        """
         q = update.callback_query
         if q is None or q.data is None or q.from_user is None:
             return
@@ -1537,10 +1569,26 @@ def register_handlers(app: Application, db: Database) -> None:
         cid, un, lg = u.id, u.username, u.language_code
         _maybe_fire_first_command_event(db, cid)
         action = q.data.split(":", 1)[1]
-        if action == "list":
+        # The picker rides ONE campaign per surface, so the funnel can tell them apart.
+        markup: InlineKeyboardMarkup | None = None
+        if action == "upgrade":
+            text = messages.plan_picker_text(
+                resolve_ladder(db), above_tier=_picker_above_tier(cid)
+            )
+            markup = keyboards.plan_picker_kb(
+                resolve_ladder(db), "start_welcome",
+                _acquisition_source_or_none(cid),
+                above_tier=_picker_above_tier(cid),
+            )
+        elif action == "list":
             text = handle_list(db, cid, un, lg)
         elif action == "help":
             text = handle_help(db, cid, un, lg)
+            markup = keyboards.plan_picker_kb(
+                resolve_ladder(db), "help_message",
+                _acquisition_source_or_none(cid),
+                above_tier=_picker_above_tier(cid),
+            )
         elif action == "funding":
             text = handle_funding(db, cid, un, lg, [])
         elif action == "regime":
@@ -1550,7 +1598,35 @@ def register_handlers(app: Application, db: Database) -> None:
         else:
             return
         if isinstance(q.message, Message):
-            await q.message.reply_text(text, disable_web_page_preview=True)
+            await q.message.reply_text(
+                text, disable_web_page_preview=True, reply_markup=markup
+            )
+
+    async def _upgrade(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """`/upgrade` — the plan picker as a first-class command. GROWTH-TG-PLAN-PICKER-W1 R4.
+
+        Before this, asking "what does it cost?" meant running /start and finding a button, or
+        hitting the wall. A curated command puts the ladder two taps from the `/` menu.
+
+        A LINKED payer gets `above_tier`, so a Starter sees only Pro and a Pro sees the
+        top-of-ladder sentence with no buttons — `plan_picker_kb` returns None on exactly the
+        branch where `plan_picker_text` stops offering anything.
+        """
+        if update.message is None:
+            return
+        chat_id, username, lang = _user_meta(update)
+        db.upsert_subscriber(chat_id, username, lang)
+        _maybe_fire_first_command_event(db, chat_id)
+        above = _picker_above_tier(chat_id)
+        await update.message.reply_text(
+            messages.plan_picker_text(resolve_ladder(db), above_tier=above),
+            disable_web_page_preview=True,
+            reply_markup=keyboards.plan_picker_kb(
+                resolve_ladder(db), "upgrade_command",
+                _acquisition_source_or_none(chat_id),
+                above_tier=above,
+            ),
+        )
 
     async def _notifications(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """REFERRAL-PARITY-NOTIFS-W1 / C2: toggle referral join/earnings notifications
@@ -2093,11 +2169,13 @@ def register_handlers(app: Application, db: Database) -> None:
 
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
+    # GROWTH-TG-PLAN-PICKER-W1 R4 — the plan picker as a command.
+    app.add_handler(CommandHandler("upgrade", _upgrade))
     app.add_handler(CommandHandler("referral", _referral))
     # TG-BUTTON-UX-W1 (C4): /menu re-renders the inline menu; the mnu:* router serves the
     # menu buttons mapping to existing handlers (Watch/Scan are the wizards' own entry_points).
     app.add_handler(CommandHandler("menu", _menu))
-    app.add_handler(CallbackQueryHandler(_on_menu_callback, pattern=r"^mnu:(regime|call|funding|list|help)$"))
+    app.add_handler(CallbackQueryHandler(_on_menu_callback, pattern=r"^mnu:(regime|call|funding|list|help|upgrade)$"))
     app.add_handler(CommandHandler("notifications", _notifications))
     # TG-BUTTON-UX-W1 (C2): the Watch wizard's ConversationHandler IS the /watch entry —
     # args → typed _watch (verbatim), no-args → tap wizard; also entered via mnu:watch (C4).

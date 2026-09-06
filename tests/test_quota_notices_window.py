@@ -176,7 +176,7 @@ def test_refusal_seam_records_the_notice_a_real_caller_would_get(tmp_db: Databas
         )
     sent: list[str] = []
 
-    async def _send(text: str) -> bool:
+    async def _send(text: str, markup=None) -> bool:
         sent.append(text)
         return True
 
@@ -210,7 +210,7 @@ def test_refusal_notice_not_recorded_when_send_fails(tmp_db: Database) -> None:
             (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 4343),
         )
 
-    async def _fails(text: str) -> bool:
+    async def _fails(text: str, markup=None) -> bool:
         return False
 
     assert asyncio.run(refuse_and_notify(tmp_db, 4343, "watch", send=_fails)) is False
@@ -218,7 +218,7 @@ def test_refusal_notice_not_recorded_when_send_fails(tmp_db: Database) -> None:
     # Still eligible — a later successful send must be able to deliver it.
     sent: list[str] = []
 
-    async def _ok(text: str) -> bool:
+    async def _ok(text: str, markup=None) -> bool:
         sent.append(text)
         return True
 

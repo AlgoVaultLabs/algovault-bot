@@ -148,7 +148,7 @@ def test_walled_owner_of_a_non_calls_row_is_still_notified(tmp_path: Path) -> No
 
     sent: list[tuple[int, str]] = []
 
-    async def _fake_push(bot, chat_id, text, db=None):  # noqa: ANN001
+    async def _fake_push(bot, chat_id, text, db=None, reply_markup=None):  # noqa: ANN001
         sent.append((chat_id, text))
         return True
 

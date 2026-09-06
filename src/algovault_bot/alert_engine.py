@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import Forbidden, TelegramError
 
 from datetime import datetime, timezone
@@ -182,7 +182,9 @@ def format_trade_call_alert(
     return "\n".join(parts)
 
 
-def _sender(bot: Bot, chat_id: int, db: Database) -> Callable[[str], Awaitable[bool]]:
+def _sender(
+    bot: Bot, chat_id: int, db: Database
+) -> Callable[[str, InlineKeyboardMarkup | None], Awaitable[bool]]:
     """Bind a push target for `quota.refuse_and_notify`.
 
     A named factory rather than a `lambda text, _cid=cid: ...`: the default-arg
@@ -193,10 +195,15 @@ def _sender(bot: Bot, chat_id: int, db: Database) -> Callable[[str], Awaitable[b
     spot. It rendered the walled-user message for the one lane that had one, which is
     precisely how three lanes ended up with three behaviours. The body now comes from
     `quota.build_refusal_text` — one message, every push lane.
+
+    GROWTH-TG-PLAN-PICKER-W1 R4 widened the seam to carry a `reply_markup`. The MARKUP IS DECIDED
+    IN `quota`, not here: which picker a walled user sees depends on their lane and effective
+    tier, which is the refusal decision's own business. This factory stays what it has always
+    been — a transport binding that knows the bot and the chat and nothing else.
     """
 
-    async def send(text: str) -> bool:
-        return await _push(bot, chat_id, text, db=db)
+    async def send(text: str, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
+        return await _push(bot, chat_id, text, db=db, reply_markup=reply_markup)
 
     return send
 
@@ -226,11 +233,27 @@ def _handle_forbidden(db: Database | None, chat_id: int, err: BaseException) -> 
         }))
 
 
-async def _push(bot: Bot, chat_id: int, text: str, db: Database | None = None) -> bool:
-    """Send a message under the per-bot Telegram global semaphore."""
+async def _push(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    db: Database | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Send a message under the per-bot Telegram global semaphore.
+
+    `reply_markup` (GROWTH-TG-PLAN-PICKER-W1 R4) defaults to None, so every one of this
+    function's pre-existing callers issues a BYTE-IDENTICAL `send_message` call — `None` is what
+    python-telegram-bot already sends for an unset markup. Only the wall notice passes one.
+    """
     async with TELEGRAM_GLOBAL_SEMAPHORE:
         try:
-            await bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                disable_web_page_preview=True,
+                reply_markup=reply_markup,
+            )
             return True
         except Forbidden as e:
             _handle_forbidden(db, chat_id, e)

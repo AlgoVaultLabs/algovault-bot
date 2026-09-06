@@ -242,10 +242,15 @@ def test_plain_start_unchanged_and_records_no_source(tmp_db: Database):
     assert upd.message.replies, "plain /start must still send the welcome"
     text, markup = upd.message.replies[0]
     assert markup is not None, "plain /start must still carry the inline menu"
-    # absence is absence — the pre-wave URL has no utm_medium at all
-    urls = [b.url for row in markup.inline_keyboard for b in row if b.url]
-    assert any("utm_campaign=start_welcome" in u for u in urls)
-    assert all("utm_medium" not in u for u in urls)
+    # GROWTH-TG-PLAN-PICKER-W1 R4 moved the Upgrade CTA off the menu and onto `mnu:upgrade`, so
+    # the menu carries no urls and therefore no utm at all. The attribution this file guards did
+    # not disappear — it moved to where the chat_id is: the callback builds the picker's four
+    # urls with `_acquisition_source_or_none(cid)`. That threading is asserted in
+    # tests/test_plan_picker.py, against the real handler with an injected bot double, which is
+    # a STRONGER check than reading a static builder's output was.
+    cbs = {b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data}
+    assert "mnu:upgrade" in cbs, "plain /start must still offer the upgrade path"
+    assert [b.url for row in markup.inline_keyboard for b in row if b.url] == []
 
 
 # ── dark-guard law — a swallowed write must stay countable ────────────────

@@ -17,9 +17,11 @@ reuse the SAME TF/exchange builders (single-derivation — no duplicate arrays).
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from .messages import signup_url
+from .messages import SignupPlan, _usd, plan_signup_url
 from .validators import (
     EXCHANGE_DISPLAY_ORDER,
     EXCHANGES,
@@ -27,6 +29,13 @@ from .validators import (
     TF_SECONDS,
     TIMEFRAMES,
 )
+
+if TYPE_CHECKING:  # pragma: no cover — types only, never a runtime import
+    # `quota` imports THIS module (for `plan_picker_kb`), so importing `Ladder` at runtime would
+    # close the cycle. `from __future__ import annotations` makes every annotation a string, so
+    # this form is complete: mypy sees the real type and Python never performs the import. Same
+    # reason `paywall.py` defers its own `quota` import.
+    from .quota import Ladder
 
 # Wizard TF grid — the full ON-DEMAND set (1m–1d), ordered shortest→longest. In parity
 # with what the engine will ANSWER for, which is what the scan wizard's /scan half needs.
@@ -72,28 +81,80 @@ def _nav_row(prefix: str, *, back: bool = True) -> list[InlineKeyboardButton]:
     return row
 
 
-def upgrade_button(campaign: str, source: str | None = None) -> InlineKeyboardButton:
-    """TG-SCANWATCH-TF-CADENCE-W1 (B): the shared Upgrade CTA button (label + utm-tagged
-    signup URL). /start's menu + /help both build from this → the CTA is single-derived.
-    `campaign` feeds signup_url's utm_campaign (start_welcome / help_message).
+def plan_picker_kb(
+    ladder: Ladder,
+    campaign: str,
+    source: str | None = None,
+    *,
+    above_tier: str | None = None,
+) -> InlineKeyboardMarkup | None:
+    """THE one builder every money CTA in this bot calls. GROWTH-TG-PLAN-PICKER-W1 R3.
 
-    GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): optional `source` feeds utm_medium — the
-    subscriber's first-touch acquisition channel. Defaults to None so every existing
-    caller emits a byte-identical URL."""
-    return InlineKeyboardButton("⬆️ Upgrade", url="https://" + signup_url(campaign, source))
+    Replaces `upgrade_button` / `upgrade_markup`, which offered a SINGLE SKU: a walled user saw
+    one price and never learned the ladder existed. Four SKUs, two rows::
+
+        [ Starter · $9.99/mo ]   [ Starter · $39.90/6mo ]
+        [ Pro · $49/mo ]         [ Pro · $129/6mo ]
+
+    🛑 RAIL-AGNOSTIC BY CONSTRUCTION, and that is the point rather than a nicety. One ROW per
+    plan, one COLUMN per term — so the next rail, Telegram Stars, is one more column, not a fifth
+    copy of the ladder. The old builders were DELETED rather than left beside this one for the
+    same reason: two builders is how two surfaces end up disagreeing about what we sell.
+
+    🛑 NO FIGURE IS TYPED HERE. Every label renders through `_usd` from the `ladder` argument,
+    which `quota.resolve_ladder` derives from the server's published ladder with pinned per-field
+    fallbacks that SERVE. Move a price in `plans.ts` and every button follows within one drain
+    cycle, with no bot deploy.
+
+    `above_tier` is the caller's EFFECTIVE tier (`quota.QuotaState.effective_tier.tier`) or None:
+
+        None                 -> both rows (a free or unlinked chat)
+        'starter'            -> the Pro row only — never sell someone the plan they have
+        'pro' | 'enterprise' -> None. There is no self-serve rung above Pro, and a button that
+                                leads nowhere is worse than no button; the CALLER sends text
+                                only, and `messages.plan_picker_text` returns the ratified
+                                top-of-ladder sentence for exactly these two values.
+
+    PURE — no DB, no network, no clock (this module's contract; see the header). The caller
+    resolves the ladder and passes it in.
+    """
+
+    def row(
+        plan: SignupPlan, label: str, monthly: float, six_month: float
+    ) -> list[InlineKeyboardButton]:
+        return [
+            InlineKeyboardButton(
+                f"{label} · {_usd(monthly)}/mo",
+                url="https://" + plan_signup_url(plan, "month", campaign, source),
+            ),
+            InlineKeyboardButton(
+                f"{label} · {_usd(six_month)}/6mo",
+                url="https://" + plan_signup_url(plan, "6month", campaign, source),
+            ),
+        ]
+
+    if above_tier in ("pro", "enterprise"):
+        return None
+    pro = row("pro", "Pro", ladder.pro_price_usd, ladder.pro_price_usd_6month)
+    if above_tier == "starter":
+        return InlineKeyboardMarkup([pro])
+    starter = row(
+        "starter", "Starter", ladder.starter_price_usd, ladder.starter_price_usd_6month
+    )
+    return InlineKeyboardMarkup([starter, pro])
 
 
-def upgrade_markup(campaign: str, source: str | None = None) -> InlineKeyboardMarkup:
-    """Standalone one-button Upgrade markup — /help attaches this as its reply_markup."""
-    return InlineKeyboardMarkup([[upgrade_button(campaign, source)]])
+def main_menu_kb() -> InlineKeyboardMarkup:
+    """The /start BotFather-style menu. Watch/Scan → wizards; others → existing handlers.
 
+    GROWTH-TG-PLAN-PICKER-W1 R4: ⬆️ Upgrade is now a CALLBACK (`mnu:upgrade`), not a URL button.
+    A URL button can carry one destination, so it could only ever advertise one SKU; the callback
+    opens the four-SKU picker INSIDE Telegram, where the user compares prices before leaving.
 
-def main_menu_kb(source: str | None = None) -> InlineKeyboardMarkup:
-    """The /start BotFather-style menu. Watch/Scan → wizards; others → existing
-    handlers; Upgrade → the shared upgrade_button (utm preserved via signup_url).
-
-    `source` (GROWTH-TG-CHANNEL-ACQUISITION-W1 CH2) is threaded to the Upgrade
-    button only; None → byte-identical to pre-wave."""
+    That also retires this builder's `source` parameter. It existed solely to thread `utm_medium`
+    into the one URL built here; the picker's URLs are now built at the CALLBACK, which is where
+    the chat_id — and therefore the acquisition source — is actually available. Threading it into
+    a static menu was carrying a per-user value through a builder that has no user."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 Watch", callback_data="mnu:watch"),
          InlineKeyboardButton("🔍 Scan", callback_data="mnu:scan")],
@@ -102,7 +163,7 @@ def main_menu_kb(source: str | None = None) -> InlineKeyboardMarkup:
          InlineKeyboardButton("💰 Funding", callback_data="mnu:funding")],
         [InlineKeyboardButton("📋 My list", callback_data="mnu:list"),
          InlineKeyboardButton("❓ Help", callback_data="mnu:help")],
-        [upgrade_button("start_welcome", source)],
+        [InlineKeyboardButton("⬆️ Upgrade", callback_data="mnu:upgrade")],
     ])
 
 

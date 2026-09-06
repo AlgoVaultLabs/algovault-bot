@@ -39,8 +39,12 @@ def test_menu_main_kb_has_all_actions_and_wizard_targets():
     cbs = {b.callback_data for b in btns if b.callback_data}
     # Watch/Scan → wizards; the rest → existing handlers
     assert {"mnu:watch", "mnu:scan", "mnu:regime", "mnu:call", "mnu:funding", "mnu:list", "mnu:help"} <= cbs
-    # Upgrade is a url button — https + utm preserved (signup_url SoT)
-    assert any(b.url and b.url.startswith("https://") and "utm_campaign=start_welcome" in b.url for b in btns)
+    # GROWTH-TG-PLAN-PICKER-W1 R4: Upgrade joined the callback namespace. A url button carries
+    # ONE destination, so it could only ever advertise one of the four SKUs; the callback opens
+    # the picker in-chat. The menu is now url-free, which this asserts POSITIVELY rather than
+    # by deleting the old check — a menu that grew a stray url button is a real regression.
+    assert "mnu:upgrade" in cbs
+    assert [b.url for b in btns if b.url] == []
     assert all(len(row) <= 3 for row in kb.inline_keyboard)
     # every callback button is in the reserved mnu: namespace, ≤64B ASCII
     for b in btns:

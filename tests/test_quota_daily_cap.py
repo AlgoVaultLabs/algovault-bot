@@ -262,7 +262,7 @@ def test_the_free_daily_wall_stamps_its_OWN_key_not_the_monthly_one(db: Database
 
     sent: list[str] = []
 
-    async def _send(text: str) -> bool:
+    async def _send(text: str, markup=None) -> bool:
         sent.append(text)
         return True
 
@@ -292,7 +292,7 @@ def test_the_free_monthly_wall_still_stamps_the_monthly_key(db: Database) -> Non
     dec = evaluate_delivery(db, 21)
     assert dec.limit_kind == "monthly"
 
-    async def _send(_text: str) -> bool:
+    async def _send(_text: str, _markup=None) -> bool:
         return True
 
     assert asyncio.run(refuse_and_notify(db, 21, "watch", send=_send, decision=dec)) is True
@@ -326,7 +326,7 @@ def test_the_notice_ledger_records_which_wall_fired(db: Database) -> None:
 
     from algovault_bot.quota import refuse_and_notify
 
-    async def _send(_t: str) -> bool:
+    async def _send(_t: str, _markup=None) -> bool:
         return True
 
     # daily wall
@@ -348,7 +348,7 @@ def test_the_impact_query_can_separate_the_two_walls(db: Database) -> None:
 
     from algovault_bot.quota import refuse_and_notify
 
-    async def _send(_t: str) -> bool:
+    async def _send(_t: str, _markup=None) -> bool:
         return True
 
     for i, units in ((40, D), (41, D), (42, M)):
@@ -392,7 +392,7 @@ def test_the_digest_breaks_notices_out_by_wall(db: Database) -> None:
     from algovault_bot.digest import compute_digest_metrics
     from algovault_bot.quota import refuse_and_notify
 
-    async def _send(_t: str) -> bool:
+    async def _send(_t: str, _markup=None) -> bool:
         return True
 
     for cid, units in ((60, D), (61, D), (62, M)):
@@ -415,7 +415,7 @@ def test_the_split_renders_on_the_digest_line(db: Database) -> None:
     from algovault_bot.digest import render_digest
     from algovault_bot.quota import refuse_and_notify
 
-    async def _send(_t: str) -> bool:
+    async def _send(_t: str, _markup=None) -> bool:
         return True
 
     db.upsert_subscriber(70, "u", "en")

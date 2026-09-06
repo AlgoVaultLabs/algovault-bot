@@ -40,7 +40,7 @@ def _mock_engine(monkeypatch, result: dict, pushed: list):
     monkeypatch.setattr(alert_engine, "McpClient", lambda cfg: _FakeMcp(result))
     monkeypatch.setattr(alert_engine, "Bot", lambda token: object())
 
-    async def fake_push(bot, chat_id, text, db=None):  # noqa: ANN001
+    async def fake_push(bot, chat_id, text, db=None, reply_markup=None):  # noqa: ANN001
         pushed.append((chat_id, text))
         return True
 
@@ -295,7 +295,7 @@ def test_producer_renders_from_the_enriched_scan_no_depth_call(tmp_db, monkeypat
     monkeypatch.setattr(alert_engine, "McpClient", lambda cfg: mcp)
     monkeypatch.setattr(alert_engine, "Bot", lambda token: object())
 
-    async def fake_push(bot, chat_id, text, db=None):  # noqa: ANN001
+    async def fake_push(bot, chat_id, text, db=None, reply_markup=None):  # noqa: ANN001
         pushed.append((chat_id, text))
         return True
 

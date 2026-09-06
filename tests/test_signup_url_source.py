@@ -27,8 +27,17 @@ DIRECT_TAGS = {            # signup_url('<tag>') literals
     "scan_quota_exhausted", "regime_quota_exhausted",             # handlers.py
     "call_quota_exhausted", "funding_quota_exhausted",            # handlers.py
     "watchlist_cap",                                              # messages.py
+    # GROWTH-TG-PLAN-PICKER-W1 R3 — the free wall's own text CTA, in `quota.py`. It has been
+    # LIVE since BOT-QUOTA-REFUSAL-SEAM-W1 and was invisible to this gate, because the scan
+    # list below did not include `quota.py`. Adding that file is what surfaced it; the tag is
+    # not new, only newly SEEN. It is DIRECT (a real `signup_url(...)` literal at two sites)
+    # even though the picker also rides it as a campaign — the groups must stay disjoint.
+    "quota_exhausted_push",                                       # quota.py
 }
-BUTTON_TAGS = {"start_welcome", "help_message"}   # via upgrade_button/upgrade_markup
+# Tags carried by the plan picker's BUTTONS (keyboards.plan_picker_kb) rather than by a
+# `signup_url(...)` literal. GROWTH-TG-PLAN-PICKER-W1 R3/R4 retired upgrade_button /
+# upgrade_markup; `plan_wall` and `upgrade_command` are this wave's new surfaces.
+BUTTON_TAGS = {"start_welcome", "help_message", "upgrade_command", "plan_wall"}
 # OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice's reactivation link. It is a
 # real conversion surface and so belongs in this inventory, but NOTHING SENDS IT YET: the
 # copy is PENDING-MR1 and the send is gated off behind
@@ -90,15 +99,35 @@ def test_campaign_tag_inventory_matches_the_source():
     count here read `== 11` and had to be edited by this wave anyway, which is the whole
     argument against duplicating a fact that the set beside it already states."""
     found = set()
-    for name in ("cta.py", "handlers.py", "messages.py", "keyboards.py"):
+    # 🛑 `quota.py` IS IN THIS LIST, and adding it is half of what makes the gate meaningful.
+    # It was absent until GROWTH-TG-PLAN-PICKER-W1 R3, so `quota_exhausted_push` — a live
+    # `signup_url(...)` literal at two sites in the free wall's own copy since
+    # BOT-QUOTA-REFUSAL-SEAM-W1 — was never in the inventory and nothing could notice. A gate
+    # over a hand-listed subset of the corpus reports PASS over the files it does not read;
+    # `scripts/check-quota-refusal-seam.py` learned the same lesson and now scans every module.
+    for name in ("cta.py", "handlers.py", "messages.py", "keyboards.py", "quota.py"):
         text = (SRC / name).read_text(encoding="utf-8")
         # strip comments — a mention in a comment is not a call site
         code = "\n".join(
             ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
         )
-        found |= set(re.findall(r"signup_url\(\s*['\"]([a-z0-9_]+)['\"]", code))
+        # 🛑 THE LOOKBEHIND IS LOAD-BEARING. `plan_signup_url` ENDS IN `signup_url`, so a bare
+        # pattern matches its suffix and captures the PLAN ("starter") as if it were a campaign
+        # tag — measured, this exact false positive appeared the moment R3 landed. Reject a
+        # preceding identifier character; do not "simplify" it away.
         found |= set(
-            re.findall(r"upgrade_(?:button|markup)\(\s*['\"]([a-z0-9_]+)['\"]", code)
+            re.findall(r"(?<![A-Za-z0-9_])signup_url\(\s*['\"]([a-z0-9_]+)['\"]", code)
+        )
+        # `plan_signup_url` takes plan + interval FIRST, so the campaign is its third argument;
+        # `plan_picker_kb` takes it second. Both are matched, because this inventory is only
+        # worth having if it sees every builder that can mint a campaign tag.
+        found |= set(
+            re.findall(
+                r"plan_signup_url\(\s*[^,]+,\s*[^,]+,\s*['\"]([a-z0-9_]+)['\"]", code
+            )
+        )
+        found |= set(
+            re.findall(r"plan_picker_kb\(\s*[^,]+,\s*['\"]([a-z0-9_]+)['\"]", code)
         )
     assert found == ALL_TAGS, f"campaign inventory drifted: {found ^ ALL_TAGS}"
     # The groups must stay disjoint: a tag appearing in two of them would make the union
@@ -109,22 +138,27 @@ def test_campaign_tag_inventory_matches_the_source():
 # ── the CTA button paths thread the source through ────────────────────────
 
 
-def test_upgrade_button_threads_source():
-    b = keyboards.upgrade_button("help_message", "geo")
-    assert b.url.startswith("https://")
-    assert "utm_campaign=help_message" in b.url and "utm_medium=geo" in b.url
-    # default stays byte-identical
-    assert "utm_medium" not in keyboards.upgrade_button("help_message").url
+def test_plan_picker_threads_source_into_every_button():
+    """Replaces `test_upgrade_button_threads_source` — the builder it named is retired.
 
+    The property is unchanged and now has four times the surface: EVERY button, not just the
+    one, must carry the acquisition channel, and omitting the source must leave every url
+    byte-identical to the untagged form.
+    """
+    from algovault_bot.quota import _fallback_ladder
 
-def test_main_menu_upgrade_button_carries_source():
-    kb = keyboards.main_menu_kb("awesome_list")
-    urls = [b.url for row in kb.inline_keyboard for b in row if b.url]
-    assert any("utm_medium=awesome_list" in u for u in urls)
-    # and the pre-wave call site is untouched
-    kb0 = keyboards.main_menu_kb()
-    urls0 = [b.url for row in kb0.inline_keyboard for b in row if b.url]
-    assert all("utm_medium" not in u for u in urls0)
+    kb = keyboards.plan_picker_kb(_fallback_ladder(), "help_message", "geo")
+    assert kb is not None
+    urls = [b.url for row in kb.inline_keyboard for b in row]
+    assert len(urls) == 4
+    for u in urls:
+        assert u.startswith("https://")
+        assert "utm_campaign=help_message" in u and "utm_medium=geo" in u
+    kb0 = keyboards.plan_picker_kb(_fallback_ladder(), "help_message")
+    assert kb0 is not None
+    assert all(
+        "utm_medium" not in b.url for row in kb0.inline_keyboard for b in row
+    )
 
 
 def test_existing_cta_text_paths_unchanged_without_a_source():

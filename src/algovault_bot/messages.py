@@ -1,7 +1,9 @@
 """User-facing message strings.
 
-D3-A: every CTA URL points at canonical ``api.algovault.com/signup?plan=starter``
-(NOT ``algovault.com/signup`` — that surface 404s; verified live 2026-05-08).
+D3-A: every CTA URL points at canonical ``api.algovault.com/signup`` (NOT
+``algovault.com/signup`` — that surface 404s; verified live 2026-05-08). The PLAN rides as a
+query parameter: text CTAs use ``signup_url`` (starter/month), and the plan picker's buttons use
+``plan_signup_url`` with the SKU the user tapped (GROWTH-TG-PLAN-PICKER-W1 R3).
 
 The welcome-message constants exposed here are byte-stable: the C1
 verification gate fixtures grep against the literal lines.
@@ -9,7 +11,13 @@ verification gate fixtures grep against the literal lines.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final, Literal
+
+if TYPE_CHECKING:  # pragma: no cover — types only, never a runtime import
+    # `quota` imports THIS module, so importing `Ladder` at runtime would close the cycle.
+    # `from __future__ import annotations` makes every annotation below a string, so the
+    # TYPE_CHECKING-only form is complete: mypy sees the real type, Python never imports it.
+    from .quota import Ladder
 
 from .batch import DEFAULT_TOP_N, TF_ORDER
 # `plan_ladder` is a pure-data LEAF that imports nothing from the package — see its docstring.
@@ -20,36 +28,141 @@ from .plan_ladder import STARTER_PRICE_6MONTH_USD
 from .unlock import normalize_lang
 
 
-SIGNUP_BASE: Final = "api.algovault.com/signup?plan=starter"
+#: The signup path, WITHOUT a plan. GROWTH-TG-PLAN-PICKER-W1 R3 moved `?plan=starter` out of this
+#: constant and into `plan_signup_url`, because the bot now offers four SKUs and the plan is an
+#: ARGUMENT, not part of the address. A bare `/signup` renders the web plan picker (200) — correct
+#: for a human, wrong for a button, because it loses per-button attribution. Every bot button
+#: therefore carries `plan` (and `interval`) itself.
+SIGNUP_BASE: Final = "api.algovault.com/signup"
+
+#: The SKUs the bot can send a buyer to. `enterprise` is deliberately absent: it has no self-serve
+#: Stripe Price, so a button for it would 4xx a paying prospect.
+SignupPlan = Literal["starter", "pro"]
+#: The billing terms `src/index.ts` accepts. `month` is the default and emits NO `interval` param,
+#: which is what keeps the starter/month URL byte-identical to every historical row.
+SignupInterval = Literal["month", "6month"]
 
 
-def signup_url(campaign: str, source: str | None = None) -> str:
-    """Build a UTM-tagged signup URL. Used for every bot-side CTA.
+def plan_signup_url(
+    plan: SignupPlan,
+    interval: SignupInterval,
+    campaign: str,
+    source: str | None = None,
+) -> str:
+    """THE composer for every bot-side signup URL. GROWTH-TG-PLAN-PICKER-W1 R3.
 
-    GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): ``source`` is the subscriber's
-    first-touch acquisition channel (db.get_acquisition_source). Two ORTHOGONAL
-    dimensions ride this URL and must never be collapsed:
+    Shape, and the PARAMETER ORDER is part of the contract::
 
-        utm_campaign -> WHICH in-bot CTA converted   (11 live tags)
-        utm_medium   -> HOW the user found the bot   (this wave)
+        api.algovault.com/signup?plan=<plan>[&interval=6month]&utm_source=tg_bot
+                                &utm_campaign=<campaign>[&utm_medium=<source>]
+
+    🛑 `interval=month` EMITS NOTHING. `src/index.ts` reads
+    `req.query.interval === '6month' ? '6month' : 'month'`, so month is the default there — and
+    emitting it here would change the starter/month URL that ~400 historical
+    `signup_attribution` rows were minted with, for no behavioural gain. Absence is absence, the
+    same rule `source` already follows.
+
+    Three ORTHOGONAL dimensions ride this URL and must never be collapsed:
+
+        plan + interval -> WHICH SKU the buyer chose      (this wave)
+        utm_campaign    -> WHICH in-bot CTA converted
+        utm_medium      -> HOW the user found the bot
 
     ``utm_source`` stays ``tg_bot`` FOREVER. signal-MCP's ``deriveChannel``
-    (src/lib/subscriber-attribution.ts) keys the channel slug off it, so re-slugging
-    would orphan every historical row and break REVENUE-TRUTH-W1's join. Add; never
-    re-slug.
-
-    Carrier choice: ``utm_medium`` is already read by signal-MCP (index.ts) and
-    persisted to ``signup_attribution.utm_medium``, which is verified NULL on all
-    396 live rows — so this needs ZERO change in that repo and collides with nothing.
-
-    ``source=None`` (every pre-CH1 subscriber, and anyone who arrived untagged)
-    emits the URL BYTE-IDENTICALLY to before this wave. Absence is absence: no
-    empty parameter, no ``utm_medium=none``.
+    (src/lib/subscriber-attribution.ts) keys the channel slug off it, so re-slugging would orphan
+    every historical row and break REVENUE-TRUTH-W1's join. Add; never re-slug.
     """
-    url = f"{SIGNUP_BASE}&utm_source=tg_bot&utm_campaign={campaign}"
+    url = f"{SIGNUP_BASE}?plan={plan}"
+    if interval != "month":
+        url = f"{url}&interval={interval}"
+    url = f"{url}&utm_source=tg_bot&utm_campaign={campaign}"
     if source:
         url = f"{url}&utm_medium={source}"
     return url
+
+
+def signup_url(campaign: str, source: str | None = None) -> str:
+    """The starter/month projection of `plan_signup_url`. Used for every TEXT CTA.
+
+    🛑 A PROJECTION, NOT A SECOND COMPOSER. It exists so the ~13 call sites that send a buyer to
+    the default SKU in prose keep reading the way they always did, and so `tests/
+    test_signup_url_source.py`'s byte-identity assertion — the one that guards ~400 historical
+    `signup_attribution` rows against a silent re-slug — keeps passing UNEDITED.
+
+    GROWTH-TG-CHANNEL-ACQUISITION-W1 (CH2): ``source`` is the subscriber's first-touch acquisition
+    channel (db.get_acquisition_source), carried as ``utm_medium``. It is already read by
+    signal-MCP (index.ts) and persisted to ``signup_attribution.utm_medium``, which was verified
+    NULL on all 396 live rows at that wave — so it needed ZERO change in that repo.
+
+    ``source=None`` (every pre-CH1 subscriber, and anyone who arrived untagged) emits the URL
+    BYTE-IDENTICALLY to before that wave. Absence is absence: no empty parameter, no
+    ``utm_medium=none``.
+    """
+    return plan_signup_url("starter", "month", campaign, source)
+
+
+# ── the plan picker's copy (GROWTH-TG-PLAN-PICKER-W1 R3) ─────────────────────────────────────
+#
+# Ratified copy, dispatched as the wave's §Copy block. T2 voice: short sentences, action-verb
+# lead, the `alerts` unit (the Telegram-bot carve-out — this bot meters a DELIVERED ALERT, the API
+# meters a returned verdict), no HOLD claim, and NO urgency or scarcity framing on either prepay
+# price. brand-facts.md: Starter $39.90/6mo is standing copy; Pro $129/6mo is limited-time by
+# owner intent but NO end date exists, so the bot states the price and nothing else.
+#
+# 🛑 EVERY FIGURE IS INTERPOLATED FROM THE LADDER ARGUMENT. Not one is typed here — that is the
+# whole point of R1 + R2, and gate legs L4/L4b/L5 exist to keep it that way.
+
+#: The top-of-ladder sentence. ONE derivation, shared by the plan wall (`quota.
+#: build_plan_refusal_text`) and the picker: a Pro subscriber must not be told two different
+#: things by two surfaces answering the same question. Ratified 2026-08-17
+#: (PRICING-BOT-DELIVERY-METERING-W1 CH5d) and live since.
+TOP_SELF_SERVE_EN: Final = (
+    "You are on the top self-serve plan — reply here and we will size the next step with you."
+)
+TOP_SELF_SERVE_ID: Final = (
+    "Anda sudah di paket mandiri tertinggi — balas di sini dan kami bantu langkah berikutnya."
+)
+TOP_SELF_SERVE_ZH: Final = "您已使用最高自助套餐——请回复，我们将为您安排后续方案。"
+
+
+def plan_picker_text(ladder: Ladder, *, above_tier: str | None = None) -> str:
+    """The message body the plan picker's keyboard hangs under.
+
+    `above_tier` is the caller's EFFECTIVE tier (`quota.QuotaState.effective_tier.tier`, the single
+    derivation every tier label in this bot projects from), or None for a free/unlinked chat:
+
+        None        -> the full ladder, both rungs, four buttons
+        'starter'   -> "move up to Pro": the Pro line only, two buttons
+        'pro' | 'enterprise' -> the top-of-ladder sentence, NO buttons
+
+    Pairs with `keyboards.plan_picker_kb`, which takes the same argument and returns None on
+    exactly the branch that renders no buttons here. The two are kept in step by
+    `tests/test_plan_picker.py` rather than by this comment.
+
+    Plain text, no parse_mode — every caller sends it that way, so the domain auto-links and a
+    stray `<` in a future edit cannot break the send.
+    """
+    if above_tier in ("pro", "enterprise"):
+        return TOP_SELF_SERVE_EN
+    pro_line = (
+        f"Pro · {ladder.pro_monthly_calls:,} alerts/mo · {ladder.pro_daily_calls:,}/day"
+    )
+    if above_tier == "starter":
+        return (
+            "⬆️ Move up to Pro\n"
+            "\n"
+            f"{pro_line}\n"
+            "\n"
+            "Same key works in this bot and in the API. Card checkout via Stripe."
+        )
+    return (
+        "⬆️ Upgrade — pick a plan\n"
+        "\n"
+        f"Starter · {ladder.starter_monthly_calls:,} alerts/mo · {ladder.starter_daily_calls:,}/day\n"
+        f"{pro_line}\n"
+        "\n"
+        "Same key works in this bot and in the API. Card checkout via Stripe."
+    )
 
 
 # TG-COPY-DEFAULTS-VENUES-W1 (R1): plain-language onboarding, PLAIN TEXT (no HTML tags;

@@ -64,10 +64,18 @@ def test_help_upgrade_is_inline_button_utm_intact() -> None:
     # TG-SCANWATCH-TF-CADENCE-W1 (B): the /help Upgrade CTA is now an inline button (no raw
     # URL in the body); the utm-tagged signup URL is byte-identical (utm_campaign=help_message).
     from algovault_bot import keyboards
+    from algovault_bot.quota import _fallback_ladder
     assert "Upgrade → " not in HELP_MESSAGE
     assert f"Need more than {FREE_TIER_MONTHLY_QUOTA} alerts a month?" in HELP_MESSAGE
-    assert keyboards.upgrade_button("help_message").url == (
+    # GROWTH-TG-PLAN-PICKER-W1 R4: the single Upgrade button became the four-SKU picker. The
+    # STARTER/MONTH url — the one ~400 historical signup_attribution rows were minted with — is
+    # still byte-identical, which is the property this test has always existed to pin.
+    kb = keyboards.plan_picker_kb(_fallback_ladder(), "help_message")
+    assert kb is not None
+    urls = [b.url for row in kb.inline_keyboard for b in row]
+    assert (
         "https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=help_message"
+        in urls
     )
 
 

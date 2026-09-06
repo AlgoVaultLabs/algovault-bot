@@ -162,7 +162,7 @@ def test_the_daily_wall_stamps_its_OWN_key(db: Database) -> None:
     db.update_plan_mirror(2, _mirror(allowed=0, limit="daily", daily_day=today), source="debit")
     sent: list[str] = []
 
-    async def _send(text: str) -> bool:
+    async def _send(text: str, markup=None) -> bool:
         sent.append(text)
         return True
 
@@ -221,7 +221,7 @@ def test_the_paid_wall_uses_the_PLAN_copy_not_the_free_copy(db: Database) -> Non
     db.update_plan_mirror(2, _mirror(allowed=0, limit="monthly"), source="debit")
     sent: list[str] = []
 
-    async def _send(text: str) -> bool:
+    async def _send(text: str, markup=None) -> bool:
         sent.append(text)
         return True
 
