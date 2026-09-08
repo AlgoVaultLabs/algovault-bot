@@ -62,8 +62,27 @@ def test_every_declared_lane_is_reachable_from_the_package() -> None:
         assert f"def {lane}(" in blob, f"REFUSAL_LANES declares {lane}, which does not exist"
 
 
-def test_lane_shapes_are_the_two_we_support() -> None:
-    assert set(REFUSAL_LANES.values()) <= {"push", "pull"}
+def test_lane_shapes_are_the_three_we_support() -> None:
+    """🛑 THIS SET LITERAL *IS* THE RUNTIME ENUM GUARD, and it is easy to mistake for a duplicate
+    of `REFUSAL_LANES`' own `Literal`.
+
+    It is not. `scripts/lint.sh` runs `mypy src` — tests are NOT typechecked — so the annotation
+    constrains only what `src/` may write, while this assertion is what catches a shape arriving
+    from anywhere else, including a hand-edit to the dict at runtime.
+
+    Widened to three by GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2: `followup` is the
+    wall-cadence lane, whose rule is enforced in `scan()` — it MUST record its notice inside the
+    delivered-send branch and MUST NOT call `refuse_and_notify`. The old name said "the TWO we
+    support" and became a lie the moment the third landed, which is why it is renamed rather
+    than edited in place: a stale name on a passing test is how the next reader learns the wrong
+    invariant.
+    """
+    assert set(REFUSAL_LANES.values()) <= {"push", "pull", "followup"}
+
+
+def test_the_followup_lane_is_declared_and_real() -> None:
+    """The cadence's own lane, asserted by name so it cannot go dark the way `paywall.py` did."""
+    assert REFUSAL_LANES.get("wall_followup_pass") == "followup"
 
 
 # ── the decision itself ──────────────────────────────────────────────────────

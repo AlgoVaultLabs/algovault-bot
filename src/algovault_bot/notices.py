@@ -34,7 +34,7 @@ below is the price of the inventory staying real. (Architect ruling Q5, 2026-09-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from telegram import InlineKeyboardMarkup
 
@@ -62,9 +62,11 @@ __all__ = [
 #: CONVERSION SURFACE in `signup_attribution`. Two vocabularies for two different questions —
 #: "which notice did we send this chat this episode" versus "which CTA converted" — and the
 #: `entitlement_drain.WALL_FOLLOWUPS` tuple is the one place they are paired.
-WALL_FOLLOWUP_3D = "wall_followup_3d"
-WALL_FOLLOWUP_7D = "wall_followup_7d"
 WallFollowupKind = Literal["wall_followup_3d", "wall_followup_7d"]
+#: Annotated with the Literal, not left to inference — an unannotated `= "wall_followup_3d"` is
+#: `str` to mypy, so every consumer would need a cast and the type would stop meaning anything.
+WALL_FOLLOWUP_3D: Final[WallFollowupKind] = "wall_followup_3d"
+WALL_FOLLOWUP_7D: Final[WallFollowupKind] = "wall_followup_7d"
 
 #: The four on-demand lanes that can refuse for quota.
 PullSource = Literal["scan", "regime", "call", "funding"]

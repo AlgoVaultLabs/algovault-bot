@@ -131,6 +131,17 @@ class DigestMetrics:
     # change on signal-MCP's database, which is a migration and a different wave. The operator's
     # TG digest is where this belongs today.
     quota_notices_monthly_24h: int = 0
+    # V2 CH2 R9 — the wall-follow-up cadence's own row. Its own LINE, deliberately, and not an
+    # entry in `_notice_split`'s parenthesis: that helper renders the breakdown of the QUOTA
+    # notices above it, so appending here would have printed the cadence inside a total it is
+    # not part of. A number rendered under the wrong label is worse than one not rendered.
+    wall_followup_3d_24h: int = 0
+    wall_followup_7d_24h: int = 0
+    wall_followup_superseded_24h: int = 0
+    #: Whether the sender is ARMED. Rendered even when every count is zero, because a dark
+    #: sender and a sender that found nobody produce identical numbers — and one of those is a
+    #: deploy waiting on a human, while the other is a healthy quiet day.
+    wall_followups_enabled: bool = False
     quota_notices_daily_24h: int = 0
     #: Rows in the window predating the 2026-08-28 migration, so `limit_kind IS NULL`. Shown only
     #: when non-zero, and only so the sub-counts always sum to the total — a breakdown that does
@@ -321,6 +332,17 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
     linked_by_state = db.count_linked_by_entitlement_state()
     deployed_sha = read_deployed_sha()
 
+    # V2 CH2 R9 — the cadence's 24h numbers, read from the ledger the pass writes.
+    # `count_notices` returns (sent, superseded) so a cadence that superseded everything is
+    # distinguishable from one that ran and found nobody — reporting `sent` alone would collapse
+    # those two into the same zero.
+    from .entitlement_drain import WALL_FOLLOWUPS, _wall_followups_enabled
+
+    since_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    followup_3d_sent, followup_3d_sup = db.count_notices(WALL_FOLLOWUPS[0][1], since_iso)
+    followup_7d_sent, followup_7d_sup = db.count_notices(WALL_FOLLOWUPS[1][1], since_iso)
+    followups_enabled = _wall_followups_enabled()
+
     return DigestMetrics(
         metric_date=now.strftime("%Y-%m-%d"),
         total_subs=total_subs,
@@ -336,6 +358,10 @@ def compute_digest_metrics(db: Database) -> DigestMetrics:
         quota_notices_monthly_24h=quota_notices_monthly_24h,
         quota_notices_daily_24h=quota_notices_daily_24h,
         quota_notices_unclassified_24h=quota_notices_unclassified_24h,
+        wall_followup_3d_24h=followup_3d_sent,
+        wall_followup_7d_24h=followup_7d_sent,
+        wall_followup_superseded_24h=followup_3d_sup + followup_7d_sup,
+        wall_followups_enabled=followups_enabled,
         stars_interest_users_30d=stars_interest_users_30d,
         stars_interest_taps_30d=stars_interest_taps_30d,
         stars_interest_users_24h=stars_interest_users_24h,
@@ -373,6 +399,9 @@ def _format_digest(m: DigestMetrics) -> str:
         f"(👁 Watch {m.calls_watch} · 🔭 Scanwatch {m.calls_scanwatch} · 🔎 Scan {m.calls_scan})",
         f"  🔒 Quota-exhausted notices: {m.quota_notices_24h}"
         f"  ({_notice_split(m)})",
+        f"  🔁 Wall follow-ups 24h: d3 {m.wall_followup_3d_24h} · d7 {m.wall_followup_7d_24h}"
+        f" (superseded {m.wall_followup_superseded_24h}) · flag "
+        f"{'ON' if m.wall_followups_enabled else 'OFF'}",
         f"  💳 Plan debits 24h: {m.plan_units_debited}  (⏳ {m.outbox_pending} queued)",
         f"  🩸 Unmetered 24h: {m.unmetered_24h}{_link_state_suffix(m)}",
         f"  🚧 Walled now: {m.walled_now}"

@@ -26,13 +26,14 @@ or crash the drain.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final, TypedDict
 
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 
 from .db import Database, DEFAULT_DB_PATH
+from .notices import WALL_FOLLOWUP_3D, WALL_FOLLOWUP_7D, WallFollowupKind
 from .entitlement_client import consume, read_state
 from .link_validator import KeyCheck, validate_api_key
 from .quota import PAID_TIERS, PLAN_MIRROR_STALE_AFTER
@@ -96,6 +97,59 @@ MIN_INVALID_OBSERVATIONS = 24
 #: unset and including the "1" the pre-ratification hosts may carry, enables it — so the flip is
 #: backwards-compatible in the safe direction.
 DOWNGRADE_NOTICE_KILL_SWITCH = "ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED"
+
+
+#: GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH2 R8 — the wall-follow-up cadence.
+#:
+#: (offset_days, LEDGER KIND, CAMPAIGN TAG). Three columns because they answer three different
+#: questions and collapsing any two would lose one: the offset is WHEN, the kind is WHAT WE TOLD
+#: THIS CHAT (a `notice_ledger` row and a log event), and the campaign is WHICH CTA CONVERTED (a
+#: `signup_attribution` value the funnel reads). The kind/campaign asymmetry — `wall_followup_3d`
+#: vs `quota_followup_3d` — is deliberate and this tuple is the ONE place they are paired.
+#:
+#: A FOURTH TOUCH IS A ROW HERE. That is the wave's generator-level claim: a paid-lane cadence, a
+#: downgrade follow-up, or a re-engagement for the never-engaged blockers costs a tuple entry,
+#: not a scheduler and not a migration.
+WALL_FOLLOWUPS: Final[tuple[tuple[int, WallFollowupKind, str], ...]] = (
+    (3, WALL_FOLLOWUP_3D, "quota_followup_3d"),
+    (7, WALL_FOLLOWUP_7D, "quota_followup_7d"),
+)
+
+#: Per-cycle send cap. The drain runs ~10x/hour, so a backlog drains within the hour while a
+#: single cycle can never blast the whole cohort — the blast-radius bound on a sender that DMs
+#: real people.
+WALL_FOLLOWUP_MAX_PER_CYCLE: Final = 20
+
+#: 🛑 DEFAULT **OFF**, and this is the one flag in this module that inverts its neighbour's
+#: polarity. `monitoring-and-recovery.md` (TG-WATCH-ADOPTION-BROADCAST-W1): a user-facing sender
+#: ships behind ONE default-OFF go-live flag, because the flip is both the enable and the instant
+#: rollback. The downgrade notice above defaults ON because it was ratified and soaked long
+#: before its switch existed; this one has never sent a message to anybody. Only the literal "1"
+#: enables it — an unset, empty, "true" or "yes" value all mean OFF, so a typo cannot arm a
+#: sender by accident. That is the OPPOSITE of the downgrade switch's tolerance, deliberately:
+#: there the safe direction is keep sending, here it is stay silent.
+WALL_FOLLOWUPS_FLAG = "ALGOVAULT_WALL_FOLLOWUPS_ENABLED"
+
+
+class FollowupRow(TypedDict):
+    """One row of the dry-run table — the artifact a human approves before the flag is flipped.
+
+    A TypedDict rather than `dict[str, object]` so the renderer cannot silently start printing a
+    field that is not there: the table IS the go-live evidence, and a KeyError at the moment the
+    operator asks for it is the worst possible time to find out.
+    """
+
+    chat_id: int
+    days_since_wall: float
+    due_kinds: list[str]
+    would_send: str | None
+    would_supersede: list[str]
+    skip_reason: str | None
+
+
+def _wall_followups_enabled() -> bool:
+    """Default OFF. Only the literal "1" arms the sender."""
+    return os.environ.get(WALL_FOLLOWUPS_FLAG, "").strip() == "1"
 
 
 def _downgrade_notice_enabled() -> bool:
@@ -488,5 +542,258 @@ def drain_entitlement_debits(
             )
             counts["ladder_fetched"] = 1
 
+    # V2 CH2 R8 — the wall-follow-up pass, on the drain's EXISTING schedule. No new cron, no
+    # second scheduler: a cadence that needs its own timer is a cadence nobody can reason about
+    # alongside the one already running. It REFUSES rather than throws — a follow-up fault must
+    # never take the debit drain above it down.
+    try:
+        followup_counts, followup_table = wall_followup_pass(
+            db, db_path or DEFAULT_DB_PATH, now=now, dry_run=dry_run
+        )
+        counts.update(followup_counts)
+        if dry_run:
+            _print_followup_table(followup_table)
+    except Exception as err:  # noqa: BLE001
+        log.warning('{"event": "wall_followup_pass_failed", "err": "%s"}', str(err)[:200])
+        if dry_run:
+            print("WALL_FOLLOWUP_DRYRUN_VERDICT=INDETERMINATE")
+
     log.info('{"event": "entitlement_drain", %s}' % ", ".join(f'"{k}": {v}' for k, v in counts.items()))
     return counts
+
+
+def _print_followup_table(table: list[FollowupRow]) -> None:
+    """The table a human reads BEFORE the flag is flipped. Printed at column 0, on stdout.
+
+    🛑 THIS IS THE GO-LIVE ARTIFACT, which is why it prints rather than logs. CH3's acceptance
+    is that the operator reads this and compares it to what the first live cycle then does; a
+    cadence approved from a count alone would be approved without anyone seeing WHO it reaches.
+
+    The verdict token is terminal and gated on by the caller, never by the exit code.
+    """
+    print("WALL_FOLLOWUP_DRYRUN_TABLE")
+    print("chat_id | days_since_wall | due_kinds | would_send | would_supersede | skip_reason")
+    for e in table:
+        print(
+            f"{e['chat_id']} | {e['days_since_wall']} | "
+            f"{','.join(e['due_kinds']) or '-'} | "
+            f"{e['would_send'] or '-'} | "
+            f"{','.join(e['would_supersede']) or '-'} | "
+            f"{e['skip_reason'] or '-'}"
+        )
+    print(f"WALL_FOLLOWUP_DRYRUN_ROWS={len(table)}")
+    print("WALL_FOLLOWUP_DRYRUN_VERDICT=PASS")
+
+
+def wall_followup_pass(
+    db: Database, db_path: str, *, now: datetime, dry_run: bool = False
+) -> tuple[dict[str, int], list[FollowupRow]]:
+    """The wall-follow-up cadence — d0 (the wall, elsewhere) then +3d, +7d. CH2 R8.
+
+    Declared in `quota.REFUSAL_LANES` as the `followup` lane, and the seam gate enforces the two
+    rules that make that shape safe: this function MUST call `record_notice` inside the branch
+    guarded by the send result, and MUST NOT call `refuse_and_notify` — a follow-up is not a
+    refusal and must never re-fire the d0 wall's stamps.
+
+    WHY IT EXISTS. A free user walled on the monthly meter was told once and then heard nothing
+    for up to 27 days, while the only surface that has ever converted is one they have to come
+    back to on their own. Blocks are measurably NOT caused by the wall — 0 of 26 blocked users
+    had ever been walled — so a bounded cadence is safe to add; what has to be managed is
+    nagging, and it is, five ways: capped per cycle, idempotent per episode, superseded rather
+    than doubled, silent once the user pays or unwatches everything, and default-OFF.
+
+    Returns `(counts, table)`. The TABLE is what a human reads before the flag is flipped, and
+    it is produced on both paths — a dry run that reported nothing would leave the operator
+    approving a cadence they could not see.
+    """
+    from .broadcast import sendDM
+    from .quota import evaluate_delivery
+
+    counts = {
+        # 🛑 THE DENOMINATOR FIRST. A run of zeroes with no candidate count is indistinguishable
+        # from a pass that never executed — this module's own rule, and the reason `revalidated`
+        # exists one loop up.
+        "wall_followup_candidates": 0,
+        "wall_followup_3d": 0,
+        "wall_followup_7d": 0,
+        "wall_followup_superseded": 0,
+        "wall_followup_skipped": 0,
+        "wall_followup_flag_off": 0,
+    }
+    table: list[FollowupRow] = []
+    enabled = _wall_followups_enabled()
+
+    # 🛑 BOUND AS AN ISO STRING WITH ITS OFFSET, NEVER `datetime('now','-3 days')`.
+    # `quota_100_last_fired_at` is written from Python's `.isoformat()` — T-separated, `+00:00`
+    # — while the house SQL idiom in `db.py` is SQLite's space-separated, offset-less
+    # `datetime()`. Comparing the two lexicographically drops every chat whose wall DATE equals
+    # the boundary date, which is EXACTLY the set that has just become due: measured on the live
+    # cohort it cut candidates from 7 to 5, silently and in one direction, turning a 3-day
+    # cadence into a 4-day one for whoever it hit.
+    cutoff = (now - timedelta(days=WALL_FOLLOWUPS[0][0])).isoformat()
+
+    with db._cursor() as cur:
+        cur.execute(
+            "SELECT chat_id, lang_code, quota_100_last_fired_at, alerts_window_start "
+            "FROM subscribers "
+            "WHERE bot_blocked_at IS NULL "
+            "  AND linked_api_key IS NULL "
+            "  AND quota_100_last_fired_at IS NOT NULL "
+            "  AND alerts_window_start IS NOT NULL "
+            "  AND quota_100_last_fired_at >= alerts_window_start "
+            "  AND quota_100_last_fired_at <= ? "
+            "ORDER BY quota_100_last_fired_at ASC",
+            (cutoff,),
+        )
+        rows = cur.fetchall()
+
+    sent_this_cycle = 0
+    for row in rows:
+        chat_id = int(row["chat_id"])
+        walled_at = _parse_stamp(row["quota_100_last_fired_at"])
+        if walled_at is None:
+            continue
+        counts["wall_followup_candidates"] += 1
+        days_since = (now - walled_at).total_seconds() / 86400.0
+        entry: FollowupRow = {
+            "chat_id": chat_id,
+            "days_since_wall": round(days_since, 2),
+            "due_kinds": [],
+            "would_send": None,
+            "would_supersede": [],
+            "skip_reason": None,
+        }
+        table.append(entry)
+
+        # THE decision, through the one derivation. `persist_roll=not dry_run`: this call rolls
+        # an expired window and WRITES that roll, so a dry run would mutate the very column the
+        # table is reporting on — and `episode_key` is that column.
+        d = evaluate_delivery(db, chat_id, persist_roll=not dry_run)
+        if d.allowed or d.limit_kind != "monthly" or d.state.is_paid:
+            entry["skip_reason"] = (
+                "paid" if d.state.is_paid
+                else "not_walled" if d.allowed
+                else f"limit_kind={d.limit_kind}"
+            )
+            counts["wall_followup_skipped"] += 1
+            continue
+
+        # Nothing to resume => a follow-up is a nag, not a service.
+        if db.count_watches(chat_id) + db.count_scan_watches(chat_id) == 0:
+            entry["skip_reason"] = "no_watches"
+            counts["wall_followup_skipped"] += 1
+            continue
+
+        # `window_start` is guaranteed non-None by `limit_kind == "monthly"` above — NOT by the
+        # SQL, which reads `alerts_window_start` before `get_quota_state` may roll it away.
+        episode_key = d.state.window_start.isoformat() if d.state.window_start else None
+        if episode_key is None:
+            entry["skip_reason"] = "no_episode_key"
+            counts["wall_followup_skipped"] += 1
+            continue
+
+        due = [
+            (offset, kind, campaign)
+            for offset, kind, campaign in WALL_FOLLOWUPS
+            if days_since >= offset and not db.has_notice(chat_id, kind, episode_key)
+        ]
+        if not due:
+            entry["skip_reason"] = "already_told"
+            counts["wall_followup_skipped"] += 1
+            continue
+        entry["due_kinds"] = [k for _, k, _ in due]
+
+        # 🛑 SEND ONLY THE LATEST; RECORD THE EARLIER AS SUPERSEDED. A chat first seen at day 9
+        # is due for both touches at once, and sending two messages in one cycle is the nagging
+        # this cadence is bounded to avoid. 'superseded' is a real ledger status, not a silent
+        # skip: it records that we CHOSE not to send, so the next cycle cannot deliver the
+        # earlier touch late and the digest can tell "we decided" from "we never got there".
+        *earlier, latest = due
+        entry["would_send"] = latest[1]
+        entry["would_supersede"] = [k for _, k, _ in earlier]
+
+        if not enabled:
+            counts["wall_followup_flag_off"] += 1
+            entry["skip_reason"] = "flag_off"
+            continue
+        if dry_run:
+            continue
+        if sent_this_cycle >= WALL_FOLLOWUP_MAX_PER_CYCLE:
+            entry["skip_reason"] = "cycle_cap"
+            counts["wall_followup_skipped"] += 1
+            continue
+
+        offset, kind, campaign = latest
+        try:
+            notice = _compose_followup_notice(
+                db, d, chat_id, row["lang_code"], days_since, kind
+            )
+            delivered = bool(
+                sendDM(chat_id, notice.text, db_path=db_path, reply_markup=notice.markup)
+            )
+        except Exception as err:  # noqa: BLE001 — one bad chat may not take the cycle down
+            log.warning(
+                '{"event": "wall_followup_failed", "chat_id": %d, "kind": "%s", "err": "%s"}',
+                chat_id, kind, str(err)[:200],
+            )
+            entry["skip_reason"] = "send_error"
+            counts["wall_followup_skipped"] += 1
+            continue
+
+        if delivered:
+            # Stamp ONLY after a delivered send — the wall's own discipline. A blocked or
+            # rate-limited subscriber must not burn their one touch of the episode.
+            # (`broadcast._send_with_retry` already marks a blocked chat; adding a second
+            # `mark_subscriber_blocked` here would be a second derivation of one fact.)
+            db.record_notice(chat_id, kind, episode_key, "sent", campaign, now.isoformat())
+            for _, earlier_kind, earlier_campaign in earlier:
+                db.record_notice(
+                    chat_id, earlier_kind, episode_key, "superseded",
+                    earlier_campaign, now.isoformat(),
+                )
+                counts["wall_followup_superseded"] += 1
+            db.increment_total_ctas_shown(chat_id)
+            counts[kind] += 1
+            sent_this_cycle += 1
+            # WARNING, not INFO: this log is read from the file the crontab redirects, and the
+            # CH3 gate greps for this exact event. A counts-dict key alone is invisible to it.
+            log.warning(
+                '{"event": "wall_followup_sent", "chat_id": %d, "kind": "%s", '
+                '"episode_key": "%s", "days_since_wall": %.2f}',
+                chat_id, kind, episode_key, days_since,
+            )
+        else:
+            entry["skip_reason"] = "not_delivered"
+            counts["wall_followup_skipped"] += 1
+
+    if not enabled:
+        log.warning(
+            '{"event": "wall_followup_flag_off", "candidates": %d, "would_send": %d}',
+            counts["wall_followup_candidates"], counts["wall_followup_flag_off"],
+        )
+    return counts, table
+
+
+def _compose_followup_notice(
+    db: Database, decision, chat_id: int, lang, days_since: float, kind: WallFollowupKind
+):
+    """Compose the notice for a kind the CALLER already chose.
+
+    🛑 `kind` IS PASSED, NOT RE-DERIVED. The first draft picked it back out of `WALL_FOLLOWUPS`
+    by comparing `days_since` again — a second derivation of a decision the supersede rule had
+    just made, and the two would disagree the moment that rule changed. It is the same defect
+    class as the copy layer re-deciding which wall was hit, one screen up in `quota.py`. mypy
+    caught it as a Literal mismatch, which is the shape working as intended.
+    """
+    from .notices import compose_followup
+    from .quota import resolve_ladder
+
+    return compose_followup(
+        kind,
+        decision.state,
+        resolve_ladder(db),
+        db.get_acquisition_source(chat_id),
+        lang,
+        n_watches=db.count_watches(chat_id) + db.count_scan_watches(chat_id),
+        days_since_wall=int(days_since),
+    )

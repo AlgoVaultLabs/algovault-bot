@@ -208,8 +208,35 @@ echo
 #
 # LEFT JOIN, not INNER: an unconverted click must stay in the denominator. An inner join
 # would silently report a 100% conversion rate over whoever happened to convert.
+#
+# 🛑 THREE CLICK COLUMNS, AND THE MIDDLE ONE IS NOT A FILTERED VERSION OF THE FIRST.
+# GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH2 R9, architect ruling Q10=D.
+#
+# Measured 2026-09-07: 24 of the 55 tg_bot rows in the 90-day window (43.6%) are MACHINE
+# self-traffic from two ip_hashes — `v2:2781fba6ee47692c` fired 8 `probe` + 8 `upgrade_command`
+# rows in ~1-second loops, and `v2:4f7ed55972eede90` fired a 21-second four-campaign burst.
+# BOTH `quota_exhausted_push` clicks ever recorded — the wall's entire click history — come from
+# the second one, so the wall's ORGANIC demand is measured ZERO, not 1.
+#
+# The obvious fix, `WHERE classification IS DISTINCT FROM 'bot'`, was REJECTED after measuring
+# it: it removes 6 of those 24 and keeps 18, because `signup_attribution.classification` only
+# started populating at 2026-09-07T00:10Z and `NULL IS DISTINCT FROM 'bot'` is TRUE. It would
+# have printed a "human" denominator of 49 against a true 31, and reported the wall at 1 human
+# click when the truth is 0 — manufacturing the exact false organic signal this column exists
+# to retire, with a filter's authority behind it.
+#
+# So: report all three and SUM NOTHING that is not knowable.
+#   raw              — every row
+#   human_classified — classification IN ('browser','unknown'), i.e. positively judged human
+#   unclassified     — classification IS NULL: PRE-CLASSIFIER rows, machine OR human, and the
+#                      18 known machine rows are in here. Not folded into either side.
+# An honest three-way split beats a confident two-way one. The unclassified column reads 0 once
+# FUNNEL-ATTRIBUTION-CLASSIFY-BACKFILL-W{NEXT} backfills `classification` from the stored
+# user_agent through the one canonical classifier — at which point no script needs an IP list.
 S02_SQL="SELECT a.utm_campaign,
-                count(*) AS clicks,
+                count(*) AS raw,
+                count(*) FILTER (WHERE a.classification IN ('browser','unknown')) AS human_classified,
+                count(*) FILTER (WHERE a.classification IS NULL) AS unclassified,
                 count(p.client_reference_id) FILTER (WHERE p.converted_at IS NOT NULL) AS conversions
          FROM signup_attribution a
          LEFT JOIN subscriber_profiles p ON p.client_reference_id = a.client_reference_id
@@ -217,6 +244,8 @@ S02_SQL="SELECT a.utm_campaign,
            AND a.created_at > now() - interval '${WINDOW_DAYS} days'
          GROUP BY 1 ORDER BY 2 DESC, 1;"
 S02_TOTAL_SQL="SELECT 'TOTAL', count(*),
+                count(*) FILTER (WHERE a.classification IN ('browser','unknown')),
+                count(*) FILTER (WHERE a.classification IS NULL),
                 count(p.client_reference_id) FILTER (WHERE p.converted_at IS NOT NULL)
          FROM signup_attribution a
          LEFT JOIN subscriber_profiles p ON p.client_reference_id = a.client_reference_id
@@ -236,8 +265,14 @@ if [ "$s02_rc" -ne 0 ] || ! is_count "$total_clicks"; then
   echo "  UNREADABLE — the store answered with something this script cannot parse:"
   printf '%s\n' "$s02_out" | sed 's/^/    /' | head -12
 else
-  printf "  %-28s %8s %12s\n" "campaign" "clicks" "conversions"
-  printf '%s\n' "$s02_out" | awk -F'|' 'NF>=3{printf "  %-28s %8s %12s\n", $1, $2, $3}'
+  printf "  %-28s %8s %10s %14s %12s\n" \
+    "campaign" "raw" "human" "unclassified" "conversions"
+  printf '%s\n' "$s02_out" | awk -F'|' 'NF>=5{printf "  %-28s %8s %10s %14s %12s\n", $1, $2, $3, $4, $5}'
+  echo "  human = classification IN ('browser','unknown'); unclassified = NULL (pre-classifier,"
+  echo "  machine OR human — NOT summed into either). The classifier began populating"
+  echo "  2026-09-07T00:10Z; the known instrument ip_hashes v2:2781fba6ee47692c and"
+  echo "  v2:4f7ed55972eede90 land in the unclassified column until"
+  echo "  FUNNEL-ATTRIBUTION-CLASSIFY-BACKFILL-W{NEXT} backfills it."
   if [ "$total_clicks" -eq 0 ]; then
     echo "  (zero tg_bot clicks in the window — a fact about the world, not a failed read)"
   fi

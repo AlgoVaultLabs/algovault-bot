@@ -802,6 +802,11 @@ REFUSAL_LANES: Final[dict[str, Literal["push", "pull", "followup"]]] = {
     "handle_regime": "pull",
     "handle_call": "pull",
     "handle_funding": "pull",
+    # V2 CH2 R8 — the ONE line this chapter writes in this file, as a DECLARED firewall
+    # exception. It has to be here and not in CH1 because L2b requires the key to name a real
+    # function that reads the decision, and `wall_followup_pass` does not exist until CH2. CH1
+    # shipped the Literal and the gate's `followup` rule; this is the entry that arms them.
+    "wall_followup_pass": "followup",
 }
 
 
