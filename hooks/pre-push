@@ -33,7 +33,16 @@ bash "$ROOT/scripts/lint.sh"
 echo "[pre-push] running quota-refusal seam gate…"
 SEAM_PY="${ALGOVAULT_PY:-python3}"
 [ -x "$ROOT/.venv/bin/python" ] && SEAM_PY="$ROOT/.venv/bin/python"
-SEAM_OUT="$("$SEAM_PY" "$ROOT/scripts/check-quota-refusal-seam.py" 2>&1)"
+# 🛑 `|| true` IS LOAD-BEARING, AND WITHOUT IT EVERY LINE OF COMMENT ABOVE WAS FALSE.
+# Line 14 is `set -euo pipefail`. Under `set -e` a failing command substitution in a plain
+# assignment aborts the shell AT THIS LINE, so the token-reading `case` below was DEAD CODE for
+# every non-zero gate exit. Measured against a stubbed gate: FAIL exited 1 printing NOTHING (the
+# diagnostic and "push refused" never ran), and INDETERMINATE exited 3 and BLOCKED THE PUSH —
+# the exact opposite of the promise three comments up. The defect predates this wave and was
+# invisible because no leg had ever emitted a non-PASS verdict; V2 CH1 R4 ships the first ones
+# that can. `|| true` hands the exit code back to the `case`, which is what "gates on the TOKEN,
+# never the exit code" actually requires.
+SEAM_OUT="$("$SEAM_PY" "$ROOT/scripts/check-quota-refusal-seam.py" 2>&1 || true)"
 SEAM_VERDICT="$(printf '%s\n' "$SEAM_OUT" | grep -oE '^QUOTA_REFUSAL_SEAM_VERDICT=[A-Z]+' | tail -1)"
 case "$SEAM_VERDICT" in
   QUOTA_REFUSAL_SEAM_VERDICT=PASS)
