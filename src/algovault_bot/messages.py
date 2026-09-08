@@ -25,7 +25,6 @@ from .batch import DEFAULT_TOP_N, TF_ORDER
 # is evaluated at `def` time, which also rules out the deferred import `paywall.py` uses.
 from .plan_ladder import STARTER_PRICE_6MONTH_USD
 # `unlock` imports nothing local, so this cannot cycle — same edge `referral.py` uses.
-from .unlock import normalize_lang
 
 
 #: The signup path, WITHOUT a plan. GROWTH-TG-PLAN-PICKER-W1 R3 moved `?plan=starter` out of this
@@ -647,48 +646,16 @@ def link_invalid_key_message() -> str:
     )
 
 
-def link_downgraded_message(
-    monthly_total: int, daily_total: int, lang_code: str | None = None
-) -> str:
-    """OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice.
-
-    RATIFIED BY THE ARCHITECT 2026-08-21 — approved as-is, and the EN string was verified
-    byte-identical to the approved wording before the send was enabled. It is LIVE: the gate
-    in `entitlement_drain` is now default-ON with `ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED=0`
-    as a kill switch.
-
-    🛑 THIS IS RATIFIED PUBLIC COPY. Editing the EN string is a public-copy change requiring
-    a fresh ratification — not a wording tidy-up. The `id` / `zh-hans` renderings are
-    translations OF that approved string and move with it.
-
-    Shape, and why each part is load-bearing: state the fact, assign no blame, give ONE
-    action, and say explicitly what did NOT change — a subscriber whose watchlist silently
-    vanished would read this as data loss on top of a billing problem. Trilingual through
-    the existing `normalize_lang` path, each under 300 characters.
-    """
-    lang = normalize_lang(lang_code)
-    url = signup_url("link_downgraded")
-    if lang == "id":
-        return (
-            "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
-            f"tier gratis ({monthly_total} alert/bulan, {daily_total}/hari). "
-            "Watchlist Anda tidak berubah. "
-            f"Aktifkan kembali kapan saja: {url}"
-        )
-    if lang == "zh-hans":
-        return (
-            f"你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 {monthly_total} 条提醒，"
-            f"每日 {daily_total} 条）。"
-            f"你的自选列表未受影响。随时可重新订阅：{url}"
-        )
-    return (
-        "Your AlgoVault subscription no longer appears active, so this chat has moved back "
-        f"to the free tier ({monthly_total} alerts/month, {daily_total}/day). "
-        "Your watchlist is unchanged. "
-        f"Reactivate any time: {url}"
-    )
-
-
+# `link_downgraded_message` DELETED — V2 CH2 R7c, architect ruling Q8.
+#
+# It was the LAST `signup_url(...)` literal in this package, and retiring it is what empties
+# `DIRECT_TAGS` and finishes the class "a money CTA is a scheme-less URL in prose". Its copy,
+# ratified 2026-08-21 and re-ratified by this wave's dispatch, now lives in
+# `notices.compose_downgrade`, where the body and the button are composed together — the split
+# between them is what let this exact message ship a broken-looking link.
+#
+# Two live composers for one notice would be the duplication `notices.py` exists to retire, so
+# this is a MOVE, not a fork. `tests/test_link_lifecycle.py` follows it.
 def link_could_not_verify_message() -> str:
     """OPS-BOT-LINKED-TIER-REFRESH-W1 CH1 — the INDETERMINATE reply.
 

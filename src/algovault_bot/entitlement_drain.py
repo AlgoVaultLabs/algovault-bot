@@ -123,19 +123,26 @@ def _send_downgrade_notice(
     """
     try:
         from .broadcast import sendDM
-        from .messages import link_downgraded_message
+        from .notices import compose_downgrade
         from .quota import resolve_ladder
 
         # GROWTH-TG-QUOTA-PARITY-W1 CH3: the notice states the ladder this chat is returning TO,
         # rendered from the mirror rather than the two literals it used to carry in three
         # languages. Lazy import for the same reason `broadcast` is: this module must stay
         # importable on a box with no bot token.
+        #
+        # V2 CH2 R7c — and the reactivation link is now a BUTTON. `sendDM` has always accepted
+        # `reply_markup`; nothing here passed one, so the one message in this bot that exists to
+        # win a customer back shipped its CTA as a scheme-less domain in prose. That is the tap
+        # that failed for the operator on 2026-09-07 and dispatched this wave.
         lad = resolve_ladder(db)
+        notice = compose_downgrade(lad.free_monthly, lad.free_daily, lang_code)
         return bool(
             sendDM(
                 chat_id,
-                link_downgraded_message(lad.free_monthly, lad.free_daily, lang_code),
+                notice.text,
                 db_path=db_path,
+                reply_markup=notice.markup,
             )
         )
     except Exception as err:  # noqa: BLE001 — a notice fault is never fatal to the drain

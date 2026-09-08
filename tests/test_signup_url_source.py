@@ -26,21 +26,27 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "algovault_bot"
 # direction of travel is the whole wave: a money CTA is a BUTTON, so tags move DIRECT -> BUTTON
 # as each surface stops pasting a URL into prose. The sets stay disjoint and their union stays
 # an ENUMERATION — never a count — so a deletion cannot hide inside a total that still adds up.
-DIRECT_TAGS = {            # signup_url('<tag>') literals still in prose
-    # `link_downgraded` is the LAST one, and it is here rather than in BUTTON_TAGS because
-    # `messages.link_downgraded_message` still builds its own URL at this chapter's end. CH2
-    # deletes that function, repoints `_send_downgrade_notice` at `notices.compose_downgrade`,
-    # and moves this tag across in the same commit — at which point DIRECT_TAGS is empty and the
-    # class "a money CTA is a scheme-less URL in prose" is retired by construction, not by
-    # convention. Splitting it this way is what keeps BOTH chapter gates green (ruling Q8).
-    "link_downgraded",                                            # messages.py
-    #
-    # RETIRED THIS CHAPTER, each with the copy that carried it:
-    #   regime_alert   — `cta.regime_cta_text`, reachable only through a bare `return False`
-    #   quota_100      — the caption branch the wall refuses before it can render
-    #   watchlist_cap  — `messages.cap_reached_message`, a cap that does not exist
-    #   quota_75/90, the four `*_quota_exhausted`, quota_exhausted_push — now picker BUTTONS
-}
+# 🛑 DIRECT_TAGS IS EMPTY, AND THAT EMPTINESS IS THE WAVE'S ACCEPTANCE CRITERION.
+#
+# It held ten tags at the start of CH1. Every one of them was a `signup_url('<tag>')` literal
+# sitting in a message body, which is the class this wave exists to retire: Telegram auto-links
+# a scheme-less domain as `http://`, and the operator's own tap on the downgrade notice did not
+# work. `link_downgraded` was the last to go, in CH2 with `messages.link_downgraded_message`.
+#
+# The set STAYS DECLARED rather than being deleted. An empty set is a statement — "no money CTA
+# in this bot is a URL in prose" — and it is the thing that goes RED the moment someone writes
+# the eleventh one. Deleting it would retire the assertion along with the debt.
+#
+# (`set()` and not `{}` — braces with only comments inside are an empty DICT, and `dict | set`
+# raises at import. The gate caught it; recorded because it is a one-character trap.)
+#
+# RETIRED BY THIS WAVE, each with the copy that carried it:
+#   regime_alert    — `cta.regime_cta_text`, reachable only through a bare `return False`
+#   quota_100       — the caption branch the wall refuses before it can render
+#   watchlist_cap   — `messages.cap_reached_message`, a cap that does not exist
+#   quota_75/90, the four `*_quota_exhausted`, quota_exhausted_push — now picker BUTTONS
+#   link_downgraded — `messages.link_downgraded_message`, retired in CH2
+DIRECT_TAGS: set[str] = set()
 # Tags carried by the plan picker's BUTTONS — `keyboards.plan_picker_kb`, called with a STRING
 # LITERAL campaign at each composer's own site in `notices.py`. The literal is not stylistic: the
 # regex below sees only a quoted literal second argument, so a variable would make eight of these
@@ -52,6 +58,7 @@ BUTTON_TAGS = {
     "call_quota_exhausted", "funding_quota_exhausted",
     "quota_75", "quota_90",                                       # notices.py — the captions
     "quota_followup_3d", "quota_followup_7d",                     # notices.py — the cadence
+    "link_downgraded",                                            # notices.py — the win-back
 }
 # GATED_TAGS is EMPTY and stays declared. `link_downgraded` left it because the notice is LIVE —
 # the operator received one on 2026-09-07, which is what dispatched this wave. An empty set here

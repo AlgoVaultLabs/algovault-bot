@@ -419,16 +419,33 @@ def test_the_downgrade_notice_SENDS_by_default_now_that_the_copy_is_ratified(
 
 def test_the_notice_carries_the_RATIFIED_english_string_verbatim() -> None:
     """Pins the approved wording. A wording change is a public-copy change needing fresh
-    ratification, so it must fail here rather than ship quietly."""
-    from algovault_bot.messages import link_downgraded_message, signup_url
+    ratification, so it must fail here rather than ship quietly.
 
-    # GROWTH-TG-QUOTA-PARITY-W1 CH3: the ratified wording gained the daily figure and both
-    # numbers now interpolate. Still pinned verbatim — a wording change must still fail here.
-    assert link_downgraded_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, "en") == (
+    RE-PINNED by GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH2 R7c, whose dispatch is the
+    fresh ratification. Everything up to the final clause is byte-identical to the 2026-08-21
+    approval; the clause that changed is exactly the one that broke — `Reactivate any time:
+    <bare domain>` became `Reactivate any time — tap a plan below`, with the URL moved onto a
+    plan-picker button.
+
+    🛑 THE OLD PIN COULD NOT HAVE CAUGHT THIS. It built its expected string by CALLING
+    `signup_url` — so when the scheme moved into `SIGNUP_BASE`, both sides changed together and
+    the assertion stayed green through a live copy change. The literal below is spelled out in
+    full, with no builder call, for exactly that reason.
+    """
+    from algovault_bot.notices import compose_downgrade
+
+    notice = compose_downgrade(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, "en")
+    assert notice.text == (
         "Your AlgoVault subscription no longer appears active, so this chat has moved back "
         f"to the free tier ({FREE_TIER_MONTHLY_QUOTA} alerts/month, {FREE_TIER_DAILY_QUOTA}/day). "
-        "Your watchlist is unchanged. "
-        "Reactivate any time: " + signup_url("link_downgraded")
+        "Your watchlist is unchanged. Reactivate any time — tap a plan below."
+    )
+    assert "algovault.com" not in notice.text, "the CTA is a button; the body carries no URL"
+    assert notice.campaign == "link_downgraded"
+    urls = [b.url for row in notice.markup.inline_keyboard for b in row if b.url]
+    assert urls and all("utm_campaign=link_downgraded" in u for u in urls)
+    assert all(u.startswith("https://") for u in urls), (
+        "a scheme-less domain is what Telegram auto-linked as http:// and failed to open"
     )
 
 
@@ -495,15 +512,21 @@ def test_the_send_helper_refuses_rather_than_raising(db: Database) -> None:
 
 
 def test_the_notice_copy_is_trilingual_and_within_300_chars() -> None:
-    from algovault_bot.messages import link_downgraded_message
+    from algovault_bot.notices import compose_downgrade
 
     rendered = {
-        lang: link_downgraded_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, lang)
+        lang: compose_downgrade(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, lang).text
         for lang in (None, "en", "id", "zh-Hans")
     }
     for lang, body in rendered.items():
         assert len(body) <= 300, f"{lang} exceeds 300 chars"
-        assert "algovault.com/signup" in body, "one action, and it must be reactivation"
+        # "one action, and it must be reactivation" — unchanged intent, moved surface. The
+        # action used to be asserted by finding a URL in the prose; it is now the BUTTON, and
+        # the body must NOT carry a link at all.
+        assert "algovault.com" not in body
+        assert compose_downgrade(
+            FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, lang
+        ).markup is not None, f"{lang} must offer the reactivation buttons"
         assert "watchlist" in body.lower() or "自选" in body or "Watchlist" in body
     assert len({rendered["en"], rendered["id"], rendered["zh-Hans"]}) == 3
 

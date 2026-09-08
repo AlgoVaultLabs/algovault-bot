@@ -448,6 +448,38 @@ INTEREST_EVENTS_MIGRATIONS = (
     ")",
 )
 
+# GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH2 R7 — the notice ledger.
+#
+# WHY A TABLE AND NOT AN ELEVENTH COLUMN STAMP. `subscribers` already carries ten single-purpose
+# stamps (`quota_100_last_fired_at`, `quota_day_notice_day`, `plan_wall_notice_day`, …), each
+# hard-coding exactly one notice kind. A cadence adds a kind per touch, so that shape means a
+# migration every time the cadence grows — and the wave's whole point is that a fourth touch, a
+# paid-lane cadence or a re-engagement should be a TUPLE in `WALL_FOLLOWUPS`, not a scheduler
+# and not a schema change.
+#
+# The shape is a PROJECTION of two that already work here rather than a third invention: the
+# `(kind, chat_id)` composite PK and single-statement upsert of `interest_events` above, and the
+# `sent_at`-terminal-stamp discipline of `entitlement_outbox`.
+#
+# `episode_key` is `alerts_window_start` — the SAME quantity `QuotaState.window_start` parses,
+# so the ledger key and the candidate filter cannot disagree about which episode a chat is in.
+# When the 30-day window rolls, the key changes and the cadence legitimately re-arms.
+#
+# `status` is CHECK-constrained to two values on purpose. 'superseded' is not a failure: it
+# records that an EARLIER touch was due at the same moment as a later one and was deliberately
+# not sent, so the ledger can distinguish "we chose not to" from "we never got there".
+NOTICE_LEDGER_MIGRATIONS = (
+    "CREATE TABLE IF NOT EXISTS notice_ledger ("
+    "  chat_id     INTEGER NOT NULL,"
+    "  kind        TEXT NOT NULL,"
+    "  episode_key TEXT NOT NULL,"
+    "  status      TEXT NOT NULL CHECK (status IN ('sent','superseded')),"
+    "  campaign    TEXT,"
+    "  sent_at     TIMESTAMP NOT NULL,"
+    "  PRIMARY KEY (chat_id, kind, episode_key)"
+    ")",
+)
+
 # GROWTH-TG-PLAN-PICKER-W1 R2 — the mirror widens from the free + starter rungs to the whole
 # four-SKU ladder the plan picker renders (starter/pro x month/6month, plus both daily caps).
 #
@@ -777,6 +809,9 @@ class Database:
                 *FETCH_RETRY_MIGRATIONS,
                 # GROWTH-TG-STARS-DEMAND-PROBE-W1 (2026-09-06): the demand ledger.
                 *INTEREST_EVENTS_MIGRATIONS,
+                # GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 (2026-09-08): the OUTBOUND
+                # notice ledger — what we have already told this chat, this episode.
+                *NOTICE_LEDGER_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1148,6 +1183,72 @@ class Database:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM watchlists WHERE chat_id = ?", (chat_id,))
             return int(cur.fetchone()[0])
+
+    def count_scan_watches(self, chat_id: int) -> int:
+        """The scan-digest subscriptions, COUNTED rather than listed.
+
+        V2 CH2 R7. `list_scan_watches` existed and the follow-up pass only ever needed the
+        cardinality — building a row list per candidate to call `len()` on it is the shape that
+        turns a cheap cron pass into an O(rows) one, and the pass runs over every walled chat on
+        the drain's schedule.
+        """
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM scan_watches WHERE chat_id = ?", (chat_id,))
+            return int(cur.fetchone()[0])
+
+    # ── the notice ledger (V2 CH2 R7) ───────────────────────────────────────────────────────
+
+    def record_notice(
+        self,
+        chat_id: int,
+        kind: str,
+        episode_key: str,
+        status: str,
+        campaign: str | None,
+        now_iso: str,
+    ) -> None:
+        """Record that we told this chat something, this episode. ONE statement, idempotent.
+
+        `ON CONFLICT DO NOTHING` and not an upsert: the first record of a (chat, kind, episode)
+        is the true one. A second write would move `sent_at` and make a re-send look like a
+        first send, which is precisely the fact the cadence is idempotent on.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO notice_ledger "
+                "(chat_id, kind, episode_key, status, campaign, sent_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (chat_id, kind, episode_key, status, campaign, now_iso),
+            )
+
+    def has_notice(self, chat_id: int, kind: str, episode_key: str) -> bool:
+        """Has this chat already been told this, this episode? Either status counts.
+
+        A 'superseded' row means we DELIBERATELY did not send it, so treating it as unsent would
+        re-open a decision the pass already made and send the earlier touch late.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM notice_ledger "
+                "WHERE chat_id = ? AND kind = ? AND episode_key = ? LIMIT 1",
+                (chat_id, kind, episode_key),
+            )
+            return cur.fetchone() is not None
+
+    def count_notices(self, kind: str, since_iso: str) -> tuple[int, int]:
+        """(sent, superseded) for a kind since a timestamp — the digest's numbers.
+
+        Returns both because reporting only `sent` would make a cadence that superseded
+        everything indistinguishable from one that ran and found nobody.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT status, COUNT(*) FROM notice_ledger "
+                "WHERE kind = ? AND sent_at >= ? GROUP BY status",
+                (kind, since_iso),
+            )
+            counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
+        return counts.get("sent", 0), counts.get("superseded", 0)
 
     # ── FEATURE-PARITY-CHANNELS-W1 CH4 — scan_watches (scheduled scan-digest subs) ──
 
