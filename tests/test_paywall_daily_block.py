@@ -118,7 +118,14 @@ def test_daily_block_is_reached_from_the_single_derivation(tmp_path) -> None:
     consume_quota(db, 1, FREE_TIER_DAILY_QUOTA)
     state = get_quota_state(db, 1)
     assert state.limit_kind == "daily"
-    msg = build_refusal_text(db, 1, state)
+    # V2 CH1 R2c — `build_refusal_text` returns a `MoneyNotice` now, not a string. The single
+    # derivation it asserts is unchanged: `state.limit_kind` picks the wall, so a daily-walled
+    # user is never told to wait 30 days.
+    notice = build_refusal_text(db, 1, state)
+    msg = notice.text
+    assert notice.campaign == "quota_exhausted_push"
+    assert notice.markup is not None, "the wall carries the picker"
+    assert "algovault.com" not in msg, "and no URL in the body"
     assert "Daily limit reached" in msg
     assert "00:00 UTC" in msg
     assert f"{FREE_TIER_DAILY_QUOTA}/{FREE_TIER_DAILY_QUOTA}" in msg, "the DAILY numbers, not the monthly ones"

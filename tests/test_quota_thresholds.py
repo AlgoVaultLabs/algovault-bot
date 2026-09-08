@@ -9,7 +9,9 @@ from algovault_bot.alert_engine import (
     format_regime_alert,
     format_trade_call_alert,
 )
-from algovault_bot.cta import regime_cta_text, trade_call_cta_text
+from algovault_bot.cta import trade_call_cta_text
+from algovault_bot.notices import compose_caption_cta
+from algovault_bot.quota import _fallback_ladder
 from algovault_bot.quota import QuotaState
 
 
@@ -41,31 +43,37 @@ def test_alert_at_47_no_cta() -> None:
 # AC4.2 — soft 75% nudge fires once per 24h per user.
 def test_alert_at_80_quota_75_cta() -> None:
     quota = _state(80)  # last_75/last_90 default None → first fire
-    cta = trade_call_cta_text(quota) or None
+    # V2 CH1 R3 — the bucket is the decision; `notices.compose_caption_cta` is the body, and its
+    # copy is asserted in `tests/test_notices.py`. What this AC pins is that the alert renders
+    # the quota line AND carries whatever caption the bucket produced.
+    assert trade_call_cta_text(quota) == "75"
+    notice = compose_caption_cta("75", quota, _fallback_ladder(), None)
     msg = format_trade_call_alert(
-        _row(), "BUY", 78, 84250.50, "TRENDING_UP", "NORMAL", None, quota, cta=cta,
+        _row(), "BUY", 78, 84250.50, "TRENDING_UP", "NORMAL", None, quota, cta=notice.text,
     )
     assert "📊 Quota: 80/100 free alerts used" in msg
-    assert "utm_campaign=quota_75" in msg
+    assert "75% of your free alerts" in msg
+    assert "algovault.com" not in msg, "the CTA is a BUTTON now, never a URL in the body"
 
 
 # AC4.3 — urgent 90% nudge fires once per 24h per user.
 def test_alert_at_95_quota_90_cta() -> None:
     quota = _state(95)
-    cta = trade_call_cta_text(quota) or None
+    assert trade_call_cta_text(quota) == "90"
+    notice = compose_caption_cta("90", quota, _fallback_ladder(), None)
     msg = format_trade_call_alert(
-        _row(), "SELL", 80, 84250.50, "TRENDING_DOWN", "ELEVATED", None, quota, cta=cta,
+        _row(), "SELL", 80, 84250.50, "TRENDING_DOWN", "ELEVATED", None, quota, cta=notice.text,
     )
     assert "📊 Quota: 95/100 free alerts used" in msg
     assert "Only 5 free alerts left" in msg
-    assert "utm_campaign=quota_90" in msg
+    assert "algovault.com" not in msg, "the CTA is a BUTTON now, never a URL in the body"
 
 
 # AC4.4 — BOT-QUOTA-REFUSAL-SEAM-W1 retired `format_quota_exhausted_alert`: it was
 # the walled-user body for the ONE lane that had one, which is how three lanes ended
 # up with three behaviours. The body is now `quota.build_refusal_text`, shared by
 # every push lane. The assertions below hold the same contract against the new body.
-def test_walled_body_states_the_wall_and_keeps_the_x402_fallback(tmp_path) -> None:
+def test_walled_body_states_the_wall_and_carries_a_button_not_a_url(tmp_path) -> None:
     from algovault_bot.db import Database
     from algovault_bot.quota import FREE_TIER_MONTHLY_QUOTA, build_refusal_text, get_quota_state
 
@@ -76,24 +84,31 @@ def test_walled_body_states_the_wall_and_keeps_the_x402_fallback(tmp_path) -> No
             "UPDATE subscribers SET alert_count=?, alerts_window_start=? WHERE chat_id=?",
             (FREE_TIER_MONTHLY_QUOTA, datetime.now(timezone.utc).isoformat(), 1),
         )
-    msg = build_refusal_text(db, 1, get_quota_state(db, 1))
+    notice = build_refusal_text(db, 1, get_quota_state(db, 1))
+    msg = notice.text
     # GROWTH-TG-QUOTA-PARITY-W1: rendered from the constant this test already imports. The old
     # literal duplicated a value the very next line derives.
     assert f"{FREE_TIER_MONTHLY_QUOTA}/{FREE_TIER_MONTHLY_QUOTA}" in msg
     assert "alerts" in msg, "the BOT's unit, not the API's 'calls'"
-    assert "x402" in msg, "the pay-per-call rail must survive at the wall"
-    assert "utm_campaign=quota_exhausted_push" in msg
+    # V2 CH1 R3 — the x402 clause is GONE from every human surface: a person in Telegram cannot
+    # pay per call with it, so it was an API noun on a consumer body. The rail itself is
+    # untouched and still named where it IS actionable (`alert_image.py`'s "X402 Plan" card
+    # label, `quota.PAID_TIERS`); this asserts its ABSENCE here, which is the ratified change.
+    assert "x402" not in msg
+    # And the CTA is a BUTTON. The campaign rides `plan_picker_kb`, so the body carries no URL
+    # at all — that is the whole wave, asserted at the surface that dispatched it.
+    assert "algovault.com" not in msg
+    assert notice.campaign == "quota_exhausted_push"
+    assert notice.markup is not None
     assert "Resets" in msg and "30 days" not in msg, (
         "must name the real rolling-window date, not a calendar-month horizon"
     )
 
 
-# AC4.5 — regime alert frequency: #1=CTA, #2=none, #3=CTA, #4-6=none, #7=CTA
-def test_regime_alert_5_includes_cta_at_1() -> None:
-    msg = format_regime_alert(_row(), "TRENDING_UP", "RANGING", 76, cta=regime_cta_text())
-    assert "utm_campaign=regime_alert" in msg
-
-
+# AC4.5 — the regime alert renders WITHOUT a CTA, which is now the only reachable shape:
+# V2 CH1 R3 deleted `regime_cta_text` and its always-False gate, and `alert_engine` passes
+# `cta=None` unconditionally. The former "#1 includes a CTA" case is gone with the copy it
+# pinned — it asserted a URL in a body no user could ever have received.
 def test_regime_alert_no_cta_at_2() -> None:
     msg = format_regime_alert(_row(), "RANGING", "TRENDING_UP", 76, cta=None)
     assert "utm_campaign" not in msg

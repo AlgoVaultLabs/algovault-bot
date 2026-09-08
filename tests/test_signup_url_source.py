@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from algovault_bot import cta, keyboards, messages
+from algovault_bot import keyboards, quota
 from algovault_bot.messages import signup_url
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "algovault_bot"
@@ -22,30 +22,41 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "algovault_bot"
 # The FULL live inventory — 11 tags across two call paths. Step 0 verified the count
 # and corrected the spec's attribution: `help_message` is a handlers.py:1301 call
 # site (via keyboards.upgrade_markup), not a keyboards.py literal.
-DIRECT_TAGS = {            # signup_url('<tag>') literals
-    "regime_alert", "quota_100", "quota_90", "quota_75",          # cta.py
-    "scan_quota_exhausted", "regime_quota_exhausted",             # handlers.py
-    "call_quota_exhausted", "funding_quota_exhausted",            # handlers.py
-    # `watchlist_cap` RETIRED here by V2 CH1 R3 with `messages.cap_reached_message`, its only
-    # site. There is no watchlist cap (`bb103cd`), so the tag named a wall no user can hit.
-    # GROWTH-TG-PLAN-PICKER-W1 R3 — the free wall's own text CTA, in `quota.py`. It has been
-    # LIVE since BOT-QUOTA-REFUSAL-SEAM-W1 and was invisible to this gate, because the scan
-    # list below did not include `quota.py`. Adding that file is what surfaced it; the tag is
-    # not new, only newly SEEN. It is DIRECT (a real `signup_url(...)` literal at two sites)
-    # even though the picker also rides it as a campaign — the groups must stay disjoint.
-    "quota_exhausted_push",                                       # quota.py
+# GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH1 R5 rebalanced these three sets, and the
+# direction of travel is the whole wave: a money CTA is a BUTTON, so tags move DIRECT -> BUTTON
+# as each surface stops pasting a URL into prose. The sets stay disjoint and their union stays
+# an ENUMERATION — never a count — so a deletion cannot hide inside a total that still adds up.
+DIRECT_TAGS = {            # signup_url('<tag>') literals still in prose
+    # `link_downgraded` is the LAST one, and it is here rather than in BUTTON_TAGS because
+    # `messages.link_downgraded_message` still builds its own URL at this chapter's end. CH2
+    # deletes that function, repoints `_send_downgrade_notice` at `notices.compose_downgrade`,
+    # and moves this tag across in the same commit — at which point DIRECT_TAGS is empty and the
+    # class "a money CTA is a scheme-less URL in prose" is retired by construction, not by
+    # convention. Splitting it this way is what keeps BOTH chapter gates green (ruling Q8).
+    "link_downgraded",                                            # messages.py
+    #
+    # RETIRED THIS CHAPTER, each with the copy that carried it:
+    #   regime_alert   — `cta.regime_cta_text`, reachable only through a bare `return False`
+    #   quota_100      — the caption branch the wall refuses before it can render
+    #   watchlist_cap  — `messages.cap_reached_message`, a cap that does not exist
+    #   quota_75/90, the four `*_quota_exhausted`, quota_exhausted_push — now picker BUTTONS
 }
-# Tags carried by the plan picker's BUTTONS (keyboards.plan_picker_kb) rather than by a
-# `signup_url(...)` literal. GROWTH-TG-PLAN-PICKER-W1 R3/R4 retired upgrade_button /
-# upgrade_markup; `plan_wall` and `upgrade_command` are this wave's new surfaces.
-BUTTON_TAGS = {"start_welcome", "help_message", "upgrade_command", "plan_wall"}
-# OPS-BOT-LINKED-TIER-REFRESH-W1 CH3d — the downgrade notice's reactivation link. It is a
-# real conversion surface and so belongs in this inventory, but NOTHING SENDS IT YET: the
-# copy is PENDING-MR1 and the send is gated off behind
-# `ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED`. The tag is declared here because the call site
-# exists in messages.py; declaring it is what keeps this gate meaningful rather than
-# something a wave routes around.
-GATED_TAGS = {"link_downgraded"}
+# Tags carried by the plan picker's BUTTONS — `keyboards.plan_picker_kb`, called with a STRING
+# LITERAL campaign at each composer's own site in `notices.py`. The literal is not stylistic: the
+# regex below sees only a quoted literal second argument, so a variable would make eight of these
+# undiscoverable while this gate still printed PASS.
+BUTTON_TAGS = {
+    "start_welcome", "help_message", "upgrade_command",           # handlers.py
+    "plan_wall", "quota_exhausted_push",                          # notices.py — the two walls
+    "scan_quota_exhausted", "regime_quota_exhausted",             # notices.py — the pull lanes
+    "call_quota_exhausted", "funding_quota_exhausted",
+    "quota_75", "quota_90",                                       # notices.py — the captions
+    "quota_followup_3d", "quota_followup_7d",                     # notices.py — the cadence
+}
+# GATED_TAGS is EMPTY and stays declared. `link_downgraded` left it because the notice is LIVE —
+# the operator received one on 2026-09-07, which is what dispatched this wave. An empty set here
+# is a statement (nothing is gated today), not a leftover.
+GATED_TAGS: set[str] = set()
 ALL_TAGS = DIRECT_TAGS | BUTTON_TAGS | GATED_TAGS
 
 
@@ -122,7 +133,12 @@ def test_campaign_tag_inventory_matches_the_source():
     # BOT-QUOTA-REFUSAL-SEAM-W1 — was never in the inventory and nothing could notice. A gate
     # over a hand-listed subset of the corpus reports PASS over the files it does not read;
     # `scripts/check-quota-refusal-seam.py` learned the same lesson and now scans every module.
-    for name in ("cta.py", "handlers.py", "messages.py", "keyboards.py", "quota.py"):
+    # 🛑 AND `notices.py` IS IN IT TOO, for the same reason `quota.py` had to be added: it is
+    # where every campaign literal now LIVES. A composer module absent from this list would make
+    # the whole inventory invisible while the assertion below still passed.
+    for name in (
+        "cta.py", "handlers.py", "messages.py", "keyboards.py", "quota.py", "notices.py"
+    ):
         text = (SRC / name).read_text(encoding="utf-8")
         # strip comments — a mention in a comment is not a call site
         code = "\n".join(
@@ -180,11 +196,27 @@ def test_plan_picker_threads_source_into_every_button():
     )
 
 
-def test_existing_cta_text_paths_unchanged_without_a_source():
-    """cta.py renders identically for every user who has no recorded source."""
-    assert "utm_medium" not in cta.regime_cta_text()
-    assert "utm_campaign=regime_alert" in cta.regime_cta_text()
-    assert "utm_medium" not in messages.signup_url("watchlist_cap")
+def test_composed_notices_carry_no_utm_medium_without_a_source():
+    """Absence is absence, on the path that replaced the text CTAs.
+
+    Re-pointed by V2 CH1 R3. Its two former subjects — `cta.regime_cta_text` and the
+    `watchlist_cap` URL — are both DELETED with the copy that carried them, so the property they
+    protected ("a user with no recorded acquisition source emits no empty `utm_medium`") now has
+    to be asserted where the URLs are actually minted: the picker BUTTONS a composer attaches.
+    Deleting the test with its subjects would have dropped the property silently.
+    """
+    from algovault_bot.notices import compose_wall
+    from algovault_bot.quota import _fallback_ladder
+
+    state = quota.QuotaState(used=200, total=200, window_start=None, pct_used=1.0)
+    notice = compose_wall(state, _fallback_ladder(), None, "en")
+    assert notice.markup is not None
+    urls = [b.url for row in notice.markup.inline_keyboard for b in row if b.url]
+    assert urls, "the wall must carry buttons"
+    for u in urls:
+        assert "utm_medium" not in u
+        assert u.startswith("https://")
+    assert "algovault.com" not in notice.text, "no URL in the body — the wave's whole point"
 
 
 # ── AC 2.4 is enforced by the wave gate (git diff in the other repo), and ──

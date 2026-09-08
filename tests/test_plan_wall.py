@@ -182,7 +182,7 @@ def test_plan_refusal_text_contains_no_figure_absent_from_its_inputs(db: Databas
     m = _mirror(allowed=0, limit="monthly", used=9_876, total=10_000)
     db.update_plan_mirror(2, m, source="debit")
     st = get_quota_state(db, 2)
-    text = build_plan_refusal_text(db, 2, st)
+    text = build_plan_refusal_text(db, 2, st).text
 
     allowed_numbers = set()
     for v in (st.plan_used, st.plan_total):
@@ -204,9 +204,13 @@ def test_plan_refusal_text_contains_no_figure_absent_from_its_inputs(db: Databas
 
 def test_enterprise_next_plan_null_renders_without_a_fabricated_figure(db: Database) -> None:
     db.update_plan_mirror(2, _mirror(allowed=0, limit="monthly", next_plan=None), source="debit")
-    text = build_plan_refusal_text(db, 2, get_quota_state(db, 2))
+    notice = build_plan_refusal_text(db, 2, get_quota_state(db, 2))
+    text = notice.text
     assert "top self-serve plan" in text
     assert "signup?plan=" not in text, "no next rung must be invented"
+    # V2 CH1 R2c — and NO KEYBOARD either. There is nothing above this subscriber to sell, and
+    # a button that leads nowhere is worse than no button.
+    assert notice.markup is None
 
 
 def test_plan_refusal_text_is_trilingual(db: Database) -> None:
@@ -214,7 +218,7 @@ def test_plan_refusal_text_is_trilingual(db: Database) -> None:
     for lang, needle in (("id", "Kuota paket"), ("zh-hans", "套餐额度"), ("fr", "plan allowance")):
         with db._cursor() as cur:
             cur.execute("UPDATE subscribers SET lang_code=? WHERE chat_id=2", (lang,))
-        assert needle in build_plan_refusal_text(db, 2, get_quota_state(db, 2))
+        assert needle in build_plan_refusal_text(db, 2, get_quota_state(db, 2)).text
 
 
 def test_the_paid_wall_uses_the_PLAN_copy_not_the_free_copy(db: Database) -> None:

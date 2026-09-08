@@ -119,15 +119,20 @@ def test_paid_tier_no_cta_at_any_quota(tier: str) -> None:
 def test_free_tier_cta_at_75_first_fire() -> None:
     # First-fire (no last_75 timestamp) — soft nudge appears.
     s = QuotaState(used=80, total=100, window_start=None, pct_used=0.8, linked_tier=None)
-    cta = trade_call_cta_text(s)
-    assert "utm_campaign=quota_75" in cta
+    # V2 CH1 R3 — the bucket, not the body. The copy lives in `tests/test_notices.py`.
+    assert trade_call_cta_text(s) == "75"
 
 
-def test_free_tier_exhausted_cta_still_fires() -> None:
+def test_free_tier_exhausted_gets_NO_caption_because_the_wall_refuses_first() -> None:
+    """Renamed and inverted by V2 CH1 R3 — the old name asserted a defect.
+
+    A caption at 100% was never reachable on the push lane: `alert_engine` reaches
+    `trade_call_cta_text` only in the `else` of `if not decision.allowed`, and for a free user
+    `remaining <= 0` is exactly `monthly_exhausted`, so the wall refuses first. The exhausted
+    user hears about it through `notices.compose_wall`, which carries a button.
+    """
     s = QuotaState(used=100, total=100, window_start=None, pct_used=1.0, linked_tier=None)
-    cta = trade_call_cta_text(s)
-    assert "utm_campaign=quota_100" in cta
-    assert "x402" in cta
+    assert trade_call_cta_text(s) == ""
 
 
 # ── alert format renders tier badge for paid ───────────────────

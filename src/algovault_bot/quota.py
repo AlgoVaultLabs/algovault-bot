@@ -40,23 +40,23 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Final, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Final, Literal, NamedTuple
 
 from telegram import InlineKeyboardMarkup
 
 from .db import Database
-# GROWTH-TG-PLAN-PICKER-W1 R4 — the wall notice carries the picker, so this module imports the
-# keyboard builder. NOT a cycle: `keyboards` imports `messages` and `validators` only, and its
-# `Ladder` annotation is TYPE_CHECKING-only for exactly this reason. The `alert_engine` leaf
-# property this module protects is unaffected — that edge is still injected via `send`.
-from .keyboards import plan_picker_kb
-from .messages import (
-    TOP_SELF_SERVE_EN,
-    TOP_SELF_SERVE_ID,
-    TOP_SELF_SERVE_ZH,
-    signup_url,
-)
-from .paywall import format_paywall_body
+# GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH1 R2c — `plan_picker_kb`, `signup_url` and
+# `format_paywall_body` all left this module in the same edit, and their absence IS the wave.
+# This file decides WHETHER to refuse and stamps that it did; `notices.py` decides what the
+# refusal SAYS and what it attaches. While the keyboard was built here and the body there, the
+# free wall could ship — and did — a working button beside a scheme-less URL in its own text.
+# TYPE_CHECKING-only: `notices` imports this module's pure helpers, so a runtime import here
+# would close a cycle. The composers themselves are imported lazily inside the two builders —
+# the same idiom `paywall.py` already uses for its `quota` import, and for the same reason.
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .notices import MoneyNotice
+
+from .messages import TOP_SELF_SERVE_EN, TOP_SELF_SERVE_ID, TOP_SELF_SERVE_ZH
 
 
 log = logging.getLogger(__name__)
@@ -982,83 +982,41 @@ def reset_sentence(lane: ResetLane, lang: str | None, horizon: tuple[str, int] |
     return "Resets when your 30-day window rolls."
 
 
-def build_refusal_text(db: Database, chat_id: int, state: QuotaState) -> str:
-    """The ONE walled-user message, shared by every push lane.
+def build_refusal_text(db: Database, chat_id: int, state: QuotaState) -> MoneyNotice:
+    """The ONE walled-user notice for the FREE lane. Now a `MoneyNotice`, not a string.
 
-    BOT-QUOTA-REFUSAL-SEAM-W1 R-4(a): reuses ``paywall.format_paywall_body`` —
-    trilingual, ≤300 chars, already tested — but fed from the BOT's own meter
-    (``state.used``/``state.total``) instead of the MCP ``_algovault.tier_warning``
-    it originally keyed on. That field is unreachable here by construction: the bot
-    authenticates with ``X-AlgoVault-Internal-Key`` → ``tier:'internal'``, and
-    signal-MCP's ``withTierWarning`` returns the meta unchanged for bot-internal
-    callers, so the module never once fired in ~80 days live (0/57 subscribers ever
-    stamped). Rewiring it to the meter we actually enforce is what makes it reachable.
+    THE NAME IS KEPT ON PURPOSE. `REFUSAL_LANES` and `scripts/check-quota-refusal-seam.py` cite
+    the LANE functions, not this one — but `tests/` and `alert_engine` both reach for it by name,
+    and renaming a function whose behaviour is changing is how a rename gets blamed for a
+    regression. Only the return type moved.
 
-    ``referral_link``/``bonus_calls`` are deliberately omitted: sourcing them needs a
-    network call to the engine SoT, and this runs on the dispatch loop's refusal path
-    where a guard must be cheap and must not throw. ``format_paywall_body`` documents
-    the absent-referral fallback as the verbatim block copy. Follow-up flagged.
+    The body itself moved to `notices.compose_wall`. What used to happen here — build a string,
+    then have `refuse_and_notify` separately build a keyboard for it — was two derivations of one
+    notice, and it is exactly how the free wall ended up shipping a working button beside a
+    scheme-less URL in its own text. One composer now owns both halves.
     """
+    from .notices import compose_wall
+
     row = db.get_subscriber(chat_id)
     lang_code = None
     if row is not None and "lang_code" in row.keys():
         lang_code = row["lang_code"]
-    src = db.get_acquisition_source(chat_id)
-    # The REAL horizon, not "next month": this meter is a rolling 30-day window
-    # anchored on `alerts_window_start`, so the reset date is a property of when the
-    # user first consumed, not of the calendar.
-    resets_at = None
-    if state.window_start is not None:
-        resets_at = (state.window_start + WINDOW).strftime("%d %b %Y")
-
-    # GROWTH-TG-QUOTA-PARITY-W1 CH3 — the level is PROJECTED from `state.limit_kind`, the single
-    # derivation `evaluate_delivery` already made. The copy layer never re-decides which wall was
-    # hit: two independent derivations of one classification drift to contradiction, and here the
-    # contradiction would be telling a user to wait 30 days when what stopped them resets at
-    # midnight. `daily_block` renders the DAILY numerator/denominator for the same reason.
-    if state.limit_kind == "daily":
-        return format_paywall_body(
-            "daily_block",
-            state.day_used,
-            state.day_total,
-            signup_url("quota_exhausted_push", src),
-            lang_code,
-            starter_price_usd=state.starter_price_usd,
-            starter_monthly_calls=state.starter_monthly_calls,
-        )
-    return format_paywall_body(
-        "block",
-        state.used,
-        state.total,
-        signup_url("quota_exhausted_push", src),
-        lang_code,
-        resets_at=resets_at,
-        starter_price_usd=state.starter_price_usd,
-        starter_monthly_calls=state.starter_monthly_calls,
-    )
+    return compose_wall(state, resolve_ladder(db), db.get_acquisition_source(chat_id), lang_code)
 
 
-def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> str:
-    """The PAID lane's walled message. PRICING-BOT-DELIVERY-METERING-W1 CH5d.
+def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> MoneyNotice:
+    """The PAID lane's walled notice. PRICING-BOT-DELIVERY-METERING-W1 CH5d, recomposed.
 
-    🛑 ZERO HAND-TYPED FIGURES. Every number here comes from the mirror (`plan_used`,
-    `plan_total`) or from `plan_next_json`, both of which are the server's own answer projected
-    from `plans.ts`. That is not stylistic: `messages._TIER_QUOTA` hard-coded the ladder and was
-    WRONG for every linked subscriber from the day the ladder moved, and gate leg L4 (CH6) exists
-    to make that unwritable. A literal here would also trip L3's `\b100\b…calls?` ban the moment
-    Pro's "100,000 calls" appeared.
+    🛑 ZERO HAND-TYPED FIGURES still holds, and the next rung is still the SERVER's answer, not
+    ours: `plan_next_json` is passed straight through to the composer, which renders the label
+    and the allowance the server declared for THIS subscriber. Naming a rung in the copy would
+    make the bot the authority on the shape of the ladder — the `_TIER_QUOTA` failure mode that
+    was wrong for every linked subscriber from the day the ladder moved (architect ruling Q6).
 
-    The two walls re-open on different clocks and the copy must say which:
-      monthly — the server's ROLLING 30 days from `plan_period_start`, so state the date.
-      daily   — 00:00 UTC, a calendar boundary that can simply be named.
-
-    Like its free-lane sibling: cheap, and it REFUSES rather than throws.
+    `next_plan is None` (enterprise, or a server that declared no next rung) still renders the
+    ratified top-of-ladder sentence with NO keyboard.
     """
-    used = state.plan_used
-    total = state.plan_total
-    limit = state.plan_limit_kind or "monthly"
-    # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2 — same single derivation as every other label.
-    tier = (state.effective_tier.tier or "").capitalize()
+    from .notices import compose_plan_wall
 
     row = db.get_subscriber(chat_id)
     lang = None
@@ -1066,23 +1024,6 @@ def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> st
         lang = row["lang_code"]
     lang = (lang or "en").lower().replace("_", "-")
 
-    figures = f"{used}/{total}" if used is not None and total is not None else ""
-
-    if limit == "daily":
-        when_en = "Resets 00:00 UTC."
-        when_id = "Direset pukul 00:00 UTC."
-        when_zh = "UTC 00:00 重置。"
-    else:
-        reopen = ""
-        period = _parse_ts(state.plan_period_start)
-        if period is not None:
-            reopen = (period + timedelta(days=30)).strftime("%d %b %Y")
-        when_en = f"Resets {reopen}." if reopen else "Resets when your 30-day plan window rolls."
-        when_id = f"Direset {reopen}." if reopen else "Direset saat jendela 30 hari paket Anda berputar."
-        when_zh = f"{reopen} 重置。" if reopen else "您的 30 天套餐周期结束后重置。"
-
-    # The next rung, projected verbatim from the server. `null` (enterprise) means there is NO
-    # self-serve next rung — say so plainly rather than fabricate one.
     nxt = None
     if state.plan_next_json:
         try:
@@ -1090,28 +1031,20 @@ def build_plan_refusal_text(db: Database, chat_id: int, state: QuotaState) -> st
         except (ValueError, TypeError):
             nxt = None
 
-    if nxt:
-        calls = nxt.get("monthly_calls")
-        upsell_en = (
-            f"Upgrade to {nxt.get('label') or nxt.get('id')}"
-            + (f" ({calls:,} calls/mo)" if isinstance(calls, int) else "")
-            + f": {nxt.get('signup_url', '')}"
-        )
-        upsell_id = upsell_zh = upsell_en
-    else:
-        # GROWTH-TG-PLAN-PICKER-W1 R3 — ONE derivation, shared with `messages.plan_picker_text`.
-        # The picker answers the same question this wall does ("what is above me?") and a Pro
-        # subscriber must not get two different answers from two surfaces. The strings are
-        # byte-identical to what this branch shipped; only their home moved.
-        upsell_en = TOP_SELF_SERVE_EN
-        upsell_id = TOP_SELF_SERVE_ID
-        upsell_zh = TOP_SELF_SERVE_ZH
-
+    top = TOP_SELF_SERVE_EN
     if lang.startswith("id"):
-        return f"Kuota paket {tier} habis: {figures} alert. {when_id} {upsell_id}"
-    if lang.startswith("zh"):
-        return f"{tier} 套餐额度已用完：{figures}。{when_zh}{upsell_zh}"
-    return f"{tier} plan allowance used: {figures}. {when_en} {upsell_en}"
+        top = TOP_SELF_SERVE_ID
+    elif lang.startswith("zh"):
+        top = TOP_SELF_SERVE_ZH
+
+    return compose_plan_wall(
+        state,
+        resolve_ladder(db),
+        db.get_acquisition_source(chat_id),
+        lang,
+        next_plan=nxt,
+        top_of_ladder=top,
+    )
 
 
 def picker_above_tier(state: QuotaState) -> str | None:
@@ -1189,17 +1122,15 @@ async def refuse_and_notify(
         if d.notify:
             # CH5e: the paid lane gets the PLAN wall's copy (server figures, plan clock); the free
             # lane keeps its own, byte-identical to before this wave.
-            src = db.get_acquisition_source(chat_id)
-            ladder = resolve_ladder(db)
-            if d.state.is_paid:
-                text = build_plan_refusal_text(db, chat_id, d.state)
-                markup = plan_picker_kb(
-                    ladder, "plan_wall", src, above_tier=picker_above_tier(d.state)
-                )
-            else:
-                text = build_refusal_text(db, chat_id, d.state)
-                markup = plan_picker_kb(ladder, "quota_exhausted_push", src)
-            if await send(text, markup):
+            # ONE composer owns the body AND the keyboard. This block used to build the text
+            # here and the markup there, which is how the wall shipped a working button beside a
+            # broken-looking link in its own body — two derivations of one notice.
+            notice = (
+                build_plan_refusal_text(db, chat_id, d.state)
+                if d.state.is_paid
+                else build_refusal_text(db, chat_id, d.state)
+            )
+            if await send(notice.text, notice.markup):
                 # Stamp ONLY after a delivered send — a blocked or rate-limited
                 # subscriber must not silently burn the one notice of the episode
                 # (the discipline the pre-seam watch lane already applied to

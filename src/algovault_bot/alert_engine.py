@@ -37,17 +37,17 @@ from .capabilities import rank_label  # SCAN-RANKBY-W1: shared lens display labe
 from .caption import compose_caption, format_verdict_caption_line
 from .cta import (
     quota_threshold,
-    regime_alert_should_show_cta,
-    regime_cta_text,
     referral_nudge_text,
     trade_call_cta_text,
 )
 from .db import Database, DEFAULT_DB_PATH, MAX_FETCH_ATTEMPTS_PER_BUCKET
 from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
+from .notices import compose_caption_cta
 from .quota import (
     QuotaState,
     evaluate_delivery,
+    resolve_ladder,
     record_call_delivered,
     record_regime_delivered,
     refuse_and_notify,
@@ -271,10 +271,14 @@ async def _push_photo(
     photo_bytes: bytes,
     caption: str | None = None,
     db: Database | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Send a photo (PNG bytes) under the global semaphore. Used for the
-    image-format trade-call alerts. Caption holds optional CTA text (URLs are
-    clickable in Telegram captions).
+    image-format trade-call alerts. Caption holds optional CTA text.
+
+    ``reply_markup`` — V2 CH1 R3. The 75%/90% caption nudges used to paste a signup URL into the
+    caption and rely on Telegram auto-linking it; they now ride the plan picker like every other
+    money CTA. It DEFAULTS TO None, so every other caller is byte-identical.
     """
     async with TELEGRAM_GLOBAL_SEMAPHORE:
         try:
@@ -282,6 +286,7 @@ async def _push_photo(
                 chat_id=chat_id,
                 photo=photo_bytes,
                 caption=caption,
+                reply_markup=reply_markup,
             )
             return True
         except Forbidden as e:
@@ -509,10 +514,13 @@ async def process_one_row(
                         )
                         fetched["regime"] = "refused_quota"
                     else:
-                        # C4 frequency-driven soft CTA on alerts #1, 3, 7, 15, then every 10.
-                        # No 24h cap — Telegram doesn't impose one, neither do we.
+                        # V2 CH1 R3 — the regime CTA is GONE, with the two functions that
+                        # produced it. `regime_alert_should_show_cta` was a bare `return False`
+                        # that read none of its arguments, so this expression could only ever
+                        # evaluate to None. The counter still ticks: it feeds the digest, not
+                        # the CTA.
                         next_count = db.increment_total_regime_alerts(row.chat_id)
-                        cta = regime_cta_text() if regime_alert_should_show_cta(next_count) else None
+                        cta = None
                         text = format_regime_alert(
                             row, row.regime_last_seen, current_regime, confidence, cta=cta,
                         )
@@ -609,7 +617,22 @@ async def process_one_row(
                             quota_total=state.total,
                         )
                 else:
-                    cta = trade_call_cta_text(state, now=now)
+                    # V2 CH1 R3 — `trade_call_cta_text` now returns the THRESHOLD ("75"/"90")
+                    # or "", and `notices.compose_caption_cta` owns the body and the keyboard.
+                    # The 24h-per-threshold throttle it applies is unchanged and still lives in
+                    # `cta.py`; only the copy moved.
+                    caption_bucket = trade_call_cta_text(state, now=now)
+                    cta_markup = None
+                    if caption_bucket == "75" or caption_bucket == "90":
+                        notice = compose_caption_cta(
+                            caption_bucket,
+                            state,
+                            resolve_ladder(db),
+                            db.get_acquisition_source(row.chat_id),
+                        )
+                        cta, cta_markup = notice.text, notice.markup
+                    else:
+                        cta = ""
                     threshold = quota_threshold(state)
                     # TG-REFERRAL-W1 (C3): at a value moment with no quota CTA to
                     # show, maybe append the referral nudge (throttled ≤1/7d; never
@@ -635,7 +658,9 @@ async def process_one_row(
                         row.coin, row.timeframe, call, primary_conf, row.exchange
                     )
                     caption = compose_caption(verdict_line, cta or None)
-                    if await _push_photo(bot, row.chat_id, photo_bytes, caption, db=db):
+                    if await _push_photo(
+                        bot, row.chat_id, photo_bytes, caption, db=db, reply_markup=cta_markup
+                    ):
                         # BOT-DIGEST-COUNT-ALL-CALLS-W1: ONE delivery seam (alerts_fired
                         # INSERT + consume_quota), recorded only after _push_photo
                         # returned True; quota-exhausted notices (handled above) are

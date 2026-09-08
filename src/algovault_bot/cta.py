@@ -22,38 +22,34 @@ Trade-call alert behavior:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Final
+from typing import Final, Literal
 
-from .messages import _usd, signup_url
-from .quota import (
-    FREE_TIER_MONTHLY_QUOTA,
-    STARTER_MONTHLY_CALLS,
-    STARTER_PRICE_6MONTH_USD,
-    STARTER_PRICE_USD,
-    QuotaState,
-)
+# V2 CH1 R3 — `signup_url`, `_usd` and the four pinned ladder constants all left this module in
+# the same edit, and their absence is the point: this file no longer writes copy or renders a
+# figure. It owns the THROTTLE and the bucket; `notices.py` owns what the user reads.
+from .quota import QuotaState
 from .referral import format_referral_nudge
 
+
+#: What `trade_call_cta_text` answers: WHICH caption nudge is due, or "" for none. It used to
+#: return the rendered body; V2 CH1 R3 reduced it to the decision so `notices.compose_caption_cta`
+#: could own the copy. Typed as a Literal so a caller cannot pass an arbitrary string into the
+#: composer — mypy is the enforcement, and without it the narrowing at the one call site is a
+#: convention rather than a check.
+CaptionBucket = Literal["75", "90", ""]
 
 THROTTLE_WINDOW: Final = timedelta(hours=24)
 # TG-REFERRAL-W1 (C3): the value-moment referral nudge fires at most once per 7d.
 REFERRAL_NUDGE_THROTTLE: Final = timedelta(days=7)
 
 
-def regime_alert_should_show_cta(total_regime_alerts: int) -> bool:
-    """Regime-alert CTA disabled. Always returns False.
-
-    Previously fired on alerts #1, 3, 7, 15, then every 10. Re-enable by
-    restoring the prior sequence logic if A/B data argues for it.
-    """
-    return False
-
-
-def regime_cta_text() -> str:
-    return (
-        "📈 Want directional BUY/SELL calls (not just regime shifts)?\n"
-        f"→ {signup_url('regime_alert')}"
-    )
+# `regime_alert_should_show_cta` and `regime_cta_text` DELETED — V2 CH1 R3.
+#
+# The gate was a bare `return False` that consulted none of its arguments, so the copy behind it
+# was unreachable for every input. Deleting the predicate and the string together is the point:
+# leaving either half would have left dark copy for L6 to police, and a `False` constant is not a
+# feature flag — nothing could ever flip it without a code change anyway. The `regime_alert`
+# campaign tag leaves the inventory with them.
 
 
 def quota_threshold(state: QuotaState) -> str | None:
@@ -85,7 +81,7 @@ def _within_throttle(last_at: datetime | None, now: datetime) -> bool:
     return (now - last_at) < THROTTLE_WINDOW
 
 
-def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> str:
+def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> CaptionBucket:
     """Returns the CTA snippet for a trade-call alert, or ''.
 
     Soft 75% and urgent 90% nudges are throttled to at most once per 24h per
@@ -103,33 +99,24 @@ def trade_call_cta_text(state: QuotaState, *, now: datetime | None = None) -> st
     if now is None:
         now = datetime.now(timezone.utc)
 
-    if threshold == "100":
-        # Always render — essential UX, not a marketing nudge.
-        return (
-            f"→ {signup_url('quota_100')}\n"
-            "\n"
-            "Or pay per call via x402 (no signup) — see x402.org"
-        )
-
+    # The "100" branch is DELETED — V2 CH1 R3. It was unreachable on this lane: `alert_engine`
+    # reaches this function only in the `else` of `if not decision.allowed`, and for a free user
+    # `remaining <= 0` is exactly `monthly_exhausted`, which makes `exhausted` true and
+    # `allowed` false. The wall refuses before a caption can render. `quota_threshold` still
+    # RETURNS "100" — `referral_nudge_text` guards on that value and is unaffected.
+    # 🛑 THE THROTTLE STAYS HERE; THE COPY DOES NOT. This function still owns WHETHER a caption
+    # fires — the 24h-per-threshold window and the bucket — and returns the THRESHOLD, which the
+    # caller composes through `notices.compose_caption_cta`. One throttle, one composer, instead
+    # of a throttle that also writes copy.
     if threshold == "90":
         if _within_throttle(state.quota_90_last_fired_at, now):
             return ""
-        remaining = state.remaining
-        return (
-            f"🔥 Only {remaining} free alerts left. Upgrade now to keep getting them:\n"
-            f"→ {signup_url('quota_90')}"
-        )
+        return "90"
 
     if threshold == "75":
         if _within_throttle(state.quota_75_last_fired_at, now):
             return ""
-        return (
-            "⏰ You've used 75% of your free alerts. "
-            f"Upgrade to Starter ({_usd(state.starter_price_usd)}/mo or "
-            f"{_usd(state.starter_price_usd_6month)}/6mo "
-            f"→ {state.starter_monthly_calls:,} API calls/mo):\n"
-            f"→ {signup_url('quota_75')}"
-        )
+        return "75"
     return ""
 
 
@@ -160,27 +147,7 @@ def referral_nudge_text(state: QuotaState, *, now: datetime | None = None) -> st
     return ""
 
 
-def quota_exhausted_message(state: QuotaState | None = None) -> str:
-    """Drop-in replacement for signal-MCP's getQuotaExhaustedMessage when the
-    bot detects 100% usage locally (D1-C: signal-MCP doesn't tick bot quota,
-    bot owns the gate). Mirrors the upstream message shape.
-
-    GROWTH-TG-QUOTA-PARITY-W1 CH3b-2: every figure now derives. `state` is optional so existing
-    callers keep working; absent it, the pinned fallbacks are used — which SERVE, as everywhere
-    else in this lane.
-
-    GROWTH-TG-PLAN-PICKER-W1 R2: the six-month total now derives too. CH3b-2's note here recorded
-    that it stayed hand-typed BY RULING — `/api/plans/public` carried no prepay field, and widening
-    a shipped public contract for one string was scoped to `OPS-PLANS-PUBLIC-PREPAY-FIELD-W1`.
-    R1 of this wave IS that wave: the endpoint publishes `price_usd_6month`, the mirror carries it,
-    and the last hand-typed figure in this lane is gone. The obligation is DISCHARGED.
-    """
-    total = state.total if state is not None else FREE_TIER_MONTHLY_QUOTA
-    price = state.starter_price_usd if state is not None else STARTER_PRICE_USD
-    calls = state.starter_monthly_calls if state is not None else STARTER_MONTHLY_CALLS
-    six = state.starter_price_usd_6month if state is not None else STARTER_PRICE_6MONTH_USD
-    return (
-        f"Free tier limit reached ({total}/{total} "
-        f"alerts this month). Upgrade to Starter ({_usd(price)}/mo or {_usd(six)}/6mo) for "
-        f"{calls:,} API calls/mo, or pay per call via x402."
-    )
+# `quota_exhausted_message` DELETED — V2 CH1 R3. It had ZERO callers anywhere: not in `src/`,
+# not in `scripts/`, not even in a test. It was a mirror of a signal-MCP string for a path the
+# bot stopped taking, and it carried the x402 line onto a human surface. The one live
+# walled-user body is `notices.compose_wall`.

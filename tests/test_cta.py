@@ -12,8 +12,6 @@ from datetime import datetime, timedelta, timezone
 
 from algovault_bot.cta import (
     quota_threshold,
-    regime_alert_should_show_cta,
-    regime_cta_text,
     trade_call_cta_text,
 )
 from algovault_bot.quota import QuotaState
@@ -47,47 +45,35 @@ def test_trade_call_cta_no_cta_below_75() -> None:
         assert trade_call_cta_text(_state(used), now=_NOW) == "", f"used={used}"
 
 
-def test_trade_call_cta_quota_75_at_75pct_first_fire() -> None:
-    cta = trade_call_cta_text(_state(75), now=_NOW)
-    assert "75%" in cta
-    # PRICING-FOLLOWUPS-GENERATOR-W1 CH5: Starter has been 10,000 API calls/mo since
-    # 2026-08-09, and the nudge counts THIS BOT'S alerts, not the API's calls.
-    assert "Starter ($9.99/mo or $39.90/6mo → 10,000 API calls/mo)" in cta
-    assert "free alerts" in cta, "the bot meters DELIVERED ALERTS — see docs/METERING-DIVERGENCE.md"
-    assert "3,000 calls" not in cta, "retired API figure"
-    assert "utm_campaign=quota_75" in cta
+def test_trade_call_cta_returns_the_BUCKET_not_a_body() -> None:
+    """V2 CH1 R3 — this function decides WHICH nudge is due; `notices` decides what it says.
+
+    It used to return a rendered body carrying a pasted `signup_url(...)`, which is the class
+    this wave retires. The copy assertions that lived here moved to `tests/test_notices.py`,
+    where they run against the composer for all three languages; what stays here is the
+    DECISION, which is what this module still owns.
+    """
+    assert trade_call_cta_text(_state(75), now=_NOW) == "75"
+    assert trade_call_cta_text(_state(89), now=_NOW) == "75"
+    assert trade_call_cta_text(_state(90), now=_NOW) == "90"
+    assert trade_call_cta_text(_state(99), now=_NOW) == "90"
 
 
-def test_trade_call_cta_quota_75_at_89pct_first_fire() -> None:
-    cta = trade_call_cta_text(_state(89), now=_NOW)
-    assert "utm_campaign=quota_75" in cta
-    assert "utm_campaign=quota_90" not in cta
+def test_trade_call_cta_is_silent_at_and_above_the_wall() -> None:
+    """The "100" caption branch is DELETED and this is the assertion that keeps it deleted.
 
+    It was unreachable on the push lane — `alert_engine` reaches this function only in the
+    `else` of `if not decision.allowed`, and for a free user `remaining <= 0` is exactly
+    `monthly_exhausted`, so `exhausted` is true and `allowed` is false: the WALL refuses before
+    a caption can render. An exhausted state must therefore produce no caption at all, and the
+    user hears about it through `notices.compose_wall` instead.
 
-def test_trade_call_cta_quota_90_at_90pct_first_fire() -> None:
-    cta = trade_call_cta_text(_state(90), now=_NOW)
-    assert "Only 10 free alerts left" in cta
-    assert "utm_campaign=quota_90" in cta
-
-
-def test_trade_call_cta_quota_90_at_99pct_first_fire() -> None:
-    cta = trade_call_cta_text(_state(99), now=_NOW)
-    assert "Only 1 free alerts left" in cta
-    assert "utm_campaign=quota_90" in cta
-
-
-def test_trade_call_cta_quota_100_at_exhausted() -> None:
-    cta = trade_call_cta_text(_state(100), now=_NOW)
-    assert "utm_campaign=quota_100" in cta
-    assert "x402" in cta
-
-
-def test_trade_call_cta_quota_100_above_cap() -> None:
-    cta = trade_call_cta_text(_state(105), now=_NOW)
-    assert "utm_campaign=quota_100" in cta
-
-
-# ── 24h throttle (BOT-ALERT-CLEANUP-W1) ────────────────────────
+    `quota_threshold` still RETURNS "100" — `referral_nudge_text` guards on that value — so this
+    pins the CAPTION's silence, not the bucket's disappearance.
+    """
+    assert trade_call_cta_text(_state(100), now=_NOW) == ""
+    assert trade_call_cta_text(_state(105), now=_NOW) == ""
+    assert quota_threshold(_state(100)) == "100", "the bucket survives for referral_nudge_text"
 
 
 def test_trade_call_cta_75_suppressed_within_24h() -> None:
@@ -99,7 +85,7 @@ def test_trade_call_cta_75_suppressed_within_24h() -> None:
 def test_trade_call_cta_75_re_fires_after_24h() -> None:
     last = _NOW - timedelta(hours=24, seconds=1)
     cta = trade_call_cta_text(_state(80, last_75=last), now=_NOW)
-    assert "utm_campaign=quota_75" in cta
+    assert cta == "75"
 
 
 def test_trade_call_cta_90_suppressed_within_24h() -> None:
@@ -111,7 +97,7 @@ def test_trade_call_cta_90_suppressed_within_24h() -> None:
 def test_trade_call_cta_90_re_fires_after_24h() -> None:
     last = _NOW - timedelta(hours=25)
     cta = trade_call_cta_text(_state(95, last_90=last), now=_NOW)
-    assert "utm_campaign=quota_90" in cta
+    assert cta == "90"
 
 
 def test_trade_call_cta_75_throttle_does_not_block_90_threshold() -> None:
@@ -119,7 +105,7 @@ def test_trade_call_cta_75_throttle_does_not_block_90_threshold() -> None:
     # throttle is independent, so the urgent nudge fires.
     last_75 = _NOW - timedelta(hours=5)
     cta = trade_call_cta_text(_state(92, last_75=last_75), now=_NOW)
-    assert "utm_campaign=quota_90" in cta
+    assert cta == "90"
 
 
 def test_trade_call_cta_100_not_throttled_by_75_or_90() -> None:
@@ -128,7 +114,7 @@ def test_trade_call_cta_100_not_throttled_by_75_or_90() -> None:
     cta = trade_call_cta_text(
         _state(100, last_75=last_75, last_90=last_90), now=_NOW
     )
-    assert "utm_campaign=quota_100" in cta
+    assert cta == ""
 
 
 # ── quota_threshold helper ─────────────────────────────────────
@@ -150,16 +136,21 @@ def test_quota_threshold_returns_none_for_paid() -> None:
     assert quota_threshold(s) is None
 
 
-# ── regime alert CTA — disabled (always returns False) ─────────
+# ── regime alert CTA — DELETED, and the absence is what is asserted now ─────────
 
 
-def test_regime_cta_never_fires() -> None:
-    for n in (1, 2, 3, 5, 7, 10, 15, 20, 25, 35, 45, 55, 105, 1000):
-        assert regime_alert_should_show_cta(n) is False, f"n={n}"
+def test_the_regime_cta_pair_is_gone() -> None:
+    """V2 CH1 R3 deleted `regime_alert_should_show_cta` and `regime_cta_text` together.
 
+    The predicate was a bare `return False` that read none of its arguments, so the copy behind
+    it was unreachable for every input. This asserts the DELETION rather than the old behaviour:
+    the previous two tests pinned "the gate always returns False" and "the text still renders
+    when called", which together described dark copy and would have gone on passing forever.
 
-def test_regime_cta_text_still_renders_when_called() -> None:
-    msg = regime_cta_text()
-    assert "api.algovault.com/signup" in msg
-    assert "utm_campaign=regime_alert" in msg
-    assert "BUY/SELL" in msg
+    Asserting an absence is the only thing that can fail if someone re-adds a regime CTA without
+    a wave — at which point it needs a picker keyboard, not a pasted URL.
+    """
+    import algovault_bot.cta as cta_module
+
+    assert not hasattr(cta_module, "regime_alert_should_show_cta")
+    assert not hasattr(cta_module, "regime_cta_text")
