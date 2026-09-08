@@ -498,9 +498,16 @@ def test_the_starter_month_url_is_byte_identical_through_both_paths() -> None:
     assert messages.signup_url("quota_100") == messages.plan_signup_url(
         "starter", "month", "quota_100"
     )
+    # Re-pinned to the https form by V2 CH1 R3, alongside the twin pin in
+    # `tests/test_signup_url_source.py`. There are TWO because the URL is minted through two
+    # paths, and editing one while the other fails is how a scheme change half-ships.
     assert messages.signup_url("quota_100") == (
-        "api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_100"
+        "https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_100"
     )
+    # And exactly ONE scheme: `keyboards.plan_picker_kb` used to prepend `"https://" +`, so the
+    # base and the keyboard had to flip in the same commit or every button url became
+    # `https://https://…`. This assertion is what makes that non-atomic edit impossible.
+    assert messages.signup_url("quota_100").count("https://") == 1
 
 
 # ── R4b — only a FRESH MIRROR may withhold a rung ────────────────────────────

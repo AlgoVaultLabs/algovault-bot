@@ -26,7 +26,8 @@ DIRECT_TAGS = {            # signup_url('<tag>') literals
     "regime_alert", "quota_100", "quota_90", "quota_75",          # cta.py
     "scan_quota_exhausted", "regime_quota_exhausted",             # handlers.py
     "call_quota_exhausted", "funding_quota_exhausted",            # handlers.py
-    "watchlist_cap",                                              # messages.py
+    # `watchlist_cap` RETIRED here by V2 CH1 R3 with `messages.cap_reached_message`, its only
+    # site. There is no watchlist cap (`bb103cd`), so the tag named a wall no user can hit.
     # GROWTH-TG-PLAN-PICKER-W1 R3 — the free wall's own text CTA, in `quota.py`. It has been
     # LIVE since BOT-QUOTA-REFUSAL-SEAM-W1 and was invisible to this gate, because the scan
     # list below did not include `quota.py`. Adding that file is what surfaced it; the tag is
@@ -52,10 +53,26 @@ ALL_TAGS = DIRECT_TAGS | BUTTON_TAGS | GATED_TAGS
 
 
 def test_untagged_url_is_byte_identical_to_pre_wave():
-    """Every pre-CH1 subscriber must emit exactly the old string."""
+    """The QUERY STRING is the historical artifact; the SCHEME is not.
+
+    Re-pinned by GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH1 R3, which moved `https://`
+    out of `keyboards.py` and into `SIGNUP_BASE` so a TEXT CTA could never again emit a
+    scheme-less domain for Telegram to guess at.
+
+    🛑 WHAT THIS PIN PROTECTS IS UNCHANGED, and it is asserted separately below: ~400 historical
+    `signup_attribution` rows were minted with this exact PATH AND QUERY, and signal-MCP's
+    `deriveChannel` keys the channel slug off `utm_source=tg_bot`. Re-slugging any of that would
+    orphan every one of them. The emitted BUTTON url is byte-identical before and after this
+    wave — measured — because the keyboard used to prepend the very scheme the base now carries.
+    """
     assert (
         signup_url("quota_100")
-        == "api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_100"
+        == "https://api.algovault.com/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_100"
+    )
+    # The half that is genuinely historical, pinned on its own so a future scheme change cannot
+    # take the query string with it.
+    assert signup_url("quota_100").endswith(
+        "/signup?plan=starter&utm_source=tg_bot&utm_campaign=quota_100"
     )
     # absence is absence: no empty parameter, no utm_medium=none
     for falsy in (None, ""):

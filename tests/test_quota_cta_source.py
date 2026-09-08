@@ -82,7 +82,7 @@ def test_quota_cta_untagged_is_byte_identical(tmp_db: Database, handler, campaig
     out = handler(tmp_db, chat_id, "tester", "en", [])
 
     assert (
-        f"Upgrade for more: api.algovault.com/signup?plan=starter"
+        f"Upgrade for more: https://api.algovault.com/signup?plan=starter"
         f"&utm_source=tg_bot&utm_campaign={campaign}" in out
     ), out
     # absence is absence — no empty parameter, no utm_medium=none

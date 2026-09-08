@@ -160,11 +160,11 @@ def plan_picker_kb(
         return [
             InlineKeyboardButton(
                 f"{label} · {_usd(monthly)}/mo",
-                url="https://" + plan_signup_url(plan, "month", campaign, source),
+                url=plan_signup_url(plan, "month", campaign, source),
             ),
             InlineKeyboardButton(
                 f"{label} · {_usd(six_month)}/6mo",
-                url="https://" + plan_signup_url(plan, "6month", campaign, source),
+                url=plan_signup_url(plan, "6month", campaign, source),
             ),
         ]
 

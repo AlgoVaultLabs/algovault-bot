@@ -33,7 +33,14 @@ from .unlock import normalize_lang
 #: ARGUMENT, not part of the address. A bare `/signup` renders the web plan picker (200) — correct
 #: for a human, wrong for a button, because it loses per-button attribution. Every bot button
 #: therefore carries `plan` (and `interval`) itself.
-SIGNUP_BASE: Final = "api.algovault.com/signup"
+#: GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH1 R3 — the scheme is PART OF THE ADDRESS.
+#: It was absent, so every text CTA emitted a scheme-less domain and Telegram auto-linked it as
+#: `http://`; the operator's own tap on the downgrade notice did not work. The BUTTON URLs were
+#: already correct only because `keyboards.py` concatenated `"https://" +` at two sites — a
+#: scheme living in the keyboard builder rather than in the address. Both halves move here.
+#: Measured: the emitted BUTTON url is byte-identical before and after, so no historical
+#: `signup_attribution` row, `deriveChannel` slug or REVENUE-TRUTH-W1 join moves.
+SIGNUP_BASE: Final = "https://api.algovault.com/signup"
 
 #: The SKUs the bot can send a buyer to. `enterprise` is deliberately absent: it has no self-serve
 #: Stripe Price, so a button for it would 4xx a paying prospect.
@@ -242,11 +249,15 @@ def welcome_message(
     "\n"
     "📋 See your picks → /list\n"
     "❓ Every command → /help\n"
-    "✅ Live, on-chain-verified results → algovault.com/track-record\n"
+    "✅ Live, on-chain-verified results → https://algovault.com/track-record\n"
     "\n"
+    # The x402 clause is gone from this body: a human in Telegram cannot pay per call with
+    # x402, so it was an API noun on a consumer surface. The rail itself is untouched and is
+    # still named where it IS actionable — `alert_image.py`'s "X402 Plan" card label and
+    # `quota.PAID_TIERS`. (V2 CH1 R3 / architect ruling Q14(i).)
     f"Free: {monthly_total} alerts/month, {daily_total}/day. Want more? Starter is "
     f"{_usd(starter_price_usd)}/mo or {_usd(starter_price_usd_6month)}/6mo for "
-    f"{starter_monthly_calls:,} API calls/mo, or pay per call with x402."
+    f"{starter_monthly_calls:,} API calls/mo."
     )
 
 
@@ -320,12 +331,14 @@ def help_message(monthly_total: int, daily_total: int) -> str:
     )
 
 
-def cap_reached_message(cap: int = 50) -> str:
-    return (
-        f"⚠️ You've hit the per-user watchlist cap of {cap} entries.\n"
-        f"Use /unwatch to drop one before adding more, or upgrade for unlimited tracking:\n"
-        f"→ {signup_url('watchlist_cap')}"
-    )
+# `cap_reached_message` DELETED — V2 CH1 R3, architect ruling Q2.
+#
+# There is no per-user watchlist cap. `bb103cd` removed it ("bulk-capable /watch + /unwatch +
+# /unwatchall, uncapped"); `handle_watch`'s own docstring says "The cap is GONE"; and
+# `PER_USER_WATCHLIST_CAP` survives ONLY as the `/list` paging threshold, which is why it stays
+# in `db.py`. This function had ZERO callers and hand-typed its own `50` beside that constant, so
+# it was simultaneously dead copy, a second source of truth for a number, and — had it ever been
+# sent — an offer of "unlimited tracking" to users who already have it.
 
 
 def watch_added_message(coin: str, timeframe: str, exchange: str, alert_type: str) -> str:
