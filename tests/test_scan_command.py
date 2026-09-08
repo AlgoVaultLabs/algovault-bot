@@ -82,7 +82,12 @@ def test_exhausted_free_user_blocked_no_scan(tmp_db, monkeypatch):
 
     monkeypatch.setattr(handlers, "_scan_via_mcp", fake)
     reply = handlers.handle_scan(tmp_db, 555, "u", "en", [])
-    assert "Upgrade" in reply
+    # V2 CH1 R3 — the refusal is a `MoneyNotice`. "Upgrade" left the body with the URL it used
+    # to introduce; what the user now taps is a picker button, so the assertion moves to the
+    # notice's own shape rather than to a word that the ratified copy no longer contains.
+    assert "used all" in reply.text.lower()
+    assert reply.campaign == "scan_quota_exhausted"
+    assert reply.markup is not None
     assert called["n"] == 0  # exhausted → no scan
     assert get_quota_state(tmp_db, 555).used == FREE_TIER_MONTHLY_QUOTA  # not charged
 

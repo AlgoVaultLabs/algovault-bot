@@ -52,11 +52,19 @@ async def send_reply(
     else:
         text, markup = reply, extra_markup
 
-    if isinstance(target, CallbackQuery):
+    # 🛑 DISPATCH ON CAPABILITY, NOT ON CONCRETE TYPE. `edit_message_text` is a `CallbackQuery`
+    # method and `reply_text` is a `Message` method, so the attribute IS the discriminator —
+    # and an `isinstance` against the PTB classes makes this helper unusable from the suite's
+    # own lightweight doubles. Measured: `tests/test_wizard_scan.py` drives the wizard with a
+    # `_Query` stand-in, and the isinstance form sent its one-shot down the `reply_text` branch
+    # and raised. A helper that only works with real Telegram objects cannot be unit-tested at
+    # the seam it exists to own.
+    if isinstance(target, CallbackQuery) or hasattr(target, "edit_message_text"):
         await target.edit_message_text(
             text, disable_web_page_preview=disable_web_page_preview, reply_markup=markup
         )
         return
+    assert isinstance(target, Message) or hasattr(target, "reply_text")
     await target.reply_text(
         text, disable_web_page_preview=disable_web_page_preview, reply_markup=markup
     )

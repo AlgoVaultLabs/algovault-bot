@@ -52,6 +52,8 @@ from .validators import (
     normalize_push_timeframe,
     normalize_timeframe,
 )
+from .notices import MoneyNotice, compose_pull_refusal
+from .reply import send_reply
 from .quota import (
     consume_quota,
     get_quota_state,
@@ -496,7 +498,7 @@ def _format_scan_reply(
 
 def handle_scan(
     db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
-) -> str:
+) -> str | MoneyNotice:
     """Pull the market scanner (scan_trade_calls) + meter max(1, non-HOLD) against the
     user's monthly quota (HOLD-only scan = 1; paid tiers = no-op via consume_quota)."""
     db.upsert_subscriber(chat_id, username, lang_code)
@@ -511,10 +513,13 @@ def handle_scan(
         # source. This is the CTA that produced BOTH real conversions, so without
         # it the readout can say a user converted but not where they came from —
         # on the one path where conversion actually happens.
-        src = db.get_acquisition_source(chat_id)
-        return (
-            f"You've used all {state.total} free alerts. "
-            f"Upgrade for more: {messages.signup_url('scan_quota_exhausted', src)}"
+        # V2 CH1 R3 — the refusal branch still RETURNS a value (L2's rule for a `pull` lane),
+        # but the value is a `MoneyNotice` and the CTA is a picker BUTTON. The acquisition
+        # source still rides it: it is carried into every button URL as `utm_medium`, which is
+        # what `tests/test_quota_cta_source.py` now asserts. This is the CTA that produced both
+        # real conversions, so the attribution property MOVED — it was never dropped.
+        return compose_pull_refusal(
+            "scan", state, resolve_ladder(db), db.get_acquisition_source(chat_id), lang_code
         )
     try:
         result = _scan_via_mcp(top_n, timeframe, exchange, rank)
@@ -644,7 +649,7 @@ def _format_regime_reply(coin: str, timeframe: str, exchange: str, result: dict)
 
 def handle_regime(
     db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
-) -> str:
+) -> str | MoneyNotice:
     """On-demand get_market_regime for one coin. Per-call quota (not HOLD-free):
     an exhausted user is asked to upgrade before the call fires (like /scan)."""
     db.upsert_subscriber(chat_id, username, lang_code)
@@ -657,10 +662,11 @@ def handle_regime(
             return _USAGE_REGIME  # self-contained friendly error (R5)
     state = get_quota_state(db, chat_id)
     if state.exhausted:
-        src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
-        return (
-            f"You've used all {state.total} free alerts. "
-            f"Upgrade for more: {messages.signup_url('regime_quota_exhausted', src)}"
+        # V2 CH1 R3 — still RETURNS a value (L2's `pull` rule), but the value is a
+        # `MoneyNotice` and the CTA is a picker BUTTON. The acquisition source rides every
+        # button URL as `utm_medium`, so the attribution property MOVED, it was not dropped.
+        return compose_pull_refusal(
+            "regime", state, resolve_ladder(db), db.get_acquisition_source(chat_id), lang_code
         )
     regime_tf = timeframe if timeframe in REGIME_TFS else "1h"
     try:
@@ -700,7 +706,7 @@ def _format_call_reply(
 
 def handle_call(
     db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
-) -> str:
+) -> str | MoneyNotice:
     """On-demand get_trade_call for one coin. HOLD-free metering (parity with the
     watch engine): a HOLD is always shown free; a BUY/SELL costs 1 call and is
     gated behind the monthly quota."""
@@ -723,10 +729,11 @@ def handle_call(
     if call in ("BUY", "SELL"):
         state = get_quota_state(db, chat_id)
         if state.exhausted:
-            src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
-            return (
-                f"You've used all {state.total} free alerts. "
-                f"Upgrade for more: {messages.signup_url('call_quota_exhausted', src)}"
+            # V2 CH1 R3 — still RETURNS a value (L2's `pull` rule), but the value is a
+            # `MoneyNotice` and the CTA is a picker BUTTON. The acquisition source rides every
+            # button URL as `utm_medium`, so the attribution property MOVED, it was not dropped.
+            return compose_pull_refusal(
+                "call", state, resolve_ladder(db), db.get_acquisition_source(chat_id), lang_code
             )
         consume_quota(db, chat_id, units=1)
     return _format_call_reply(coin, timeframe, exchange, result)
@@ -809,7 +816,7 @@ def _format_funding_reply(opps: list, limit: int) -> str:
 
 def handle_funding(
     db: Database, chat_id: int, username: str | None, lang_code: str | None, args: list[str]
-) -> str:
+) -> str | MoneyNotice:
     """On-demand scan_funding_arb (cross-venue). Per-call quota (like /scan): an
     exhausted user is asked to upgrade before the scan fires."""
     db.upsert_subscriber(chat_id, username, lang_code)
@@ -819,10 +826,11 @@ def handle_funding(
         return _USAGE_FUNDING  # R6: self-contained friendly error (bare /funding = top 5)
     state = get_quota_state(db, chat_id)
     if state.exhausted:
-        src = db.get_acquisition_source(chat_id)  # GROWTH-TG-LEVER-ACTIVATION-W1 CH2
-        return (
-            f"You've used all {state.total} free alerts. "
-            f"Upgrade for more: {messages.signup_url('funding_quota_exhausted', src)}"
+        # V2 CH1 R3 — still RETURNS a value (L2's `pull` rule), but the value is a
+        # `MoneyNotice` and the CTA is a picker BUTTON. The acquisition source rides every
+        # button URL as `utm_medium`, so the attribution property MOVED, it was not dropped.
+        return compose_pull_refusal(
+            "funding", state, resolve_ladder(db), db.get_acquisition_source(chat_id), lang_code
         )
     try:
         result = _funding_via_mcp(limit, _DEFAULT_FUNDING_MIN_BPS)
@@ -1580,6 +1588,9 @@ def register_handlers(app: Application, db: Database) -> None:
         cid, un, lg = u.id, u.username, u.language_code
         _maybe_fire_first_command_event(db, cid)
         action = q.data.split(":", 1)[1]
+        # V2 CH1 R3 — the money lanes return `str | MoneyNotice`, so the local that
+        # carries their answer is a union too. `send_reply` unwraps it below.
+        text: str | MoneyNotice
         # The picker rides ONE campaign per surface, so the funnel can tell them apart.
         markup: InlineKeyboardMarkup | None = None
         if action == "upgrade":
@@ -1609,9 +1620,13 @@ def register_handlers(app: Application, db: Database) -> None:
         else:
             return
         if isinstance(q.message, Message):
-            await q.message.reply_text(
-                text, disable_web_page_preview=True, reply_markup=markup
-            )
+            # V2 CH1 R3 — `q.message` and NOT `q`: this site deliberately posts a NEW message
+            # below the menu rather than editing it. `send_reply` picks reply-vs-edit from the
+            # target's type, so passing the Message preserves that exactly. `markup` is the menu
+            # keyboard and rides as `extra_markup`, which a MoneyNotice's own picker OVERRIDES —
+            # when the answer to /scan is "you are out of alerts", the plan picker is what the
+            # user needs and a menu must never displace it.
+            await send_reply(q.message, text, extra_markup=markup)
 
     async def _on_stars_interest(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """⭐ Pay with Stars — GROWTH-TG-STARS-DEMAND-PROBE-W1 R3.
@@ -1700,7 +1715,7 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_scan(db, chat_id, username, lang, args)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+        await send_reply(update.message, reply)
 
     async def _scanwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1726,7 +1741,7 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_regime(db, chat_id, username, lang, args)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+        await send_reply(update.message, reply)
 
     async def _call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1735,7 +1750,7 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_call(db, chat_id, username, lang, args)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+        await send_reply(update.message, reply)
 
     async def _funding(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1744,7 +1759,7 @@ def register_handlers(app: Application, db: Database) -> None:
         _maybe_fire_first_command_event(db, chat_id)
         args = ctx.args or []
         reply = handle_funding(db, chat_id, username, lang, args)
-        await update.message.reply_text(reply, disable_web_page_preview=True)
+        await send_reply(update.message, reply)
 
     async def _watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:

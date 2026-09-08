@@ -28,6 +28,8 @@ from telegram.ext import (
 from telegram.warnings import PTBUserWarning
 
 from . import keyboards
+from .notices import MoneyNotice
+from .reply import send_reply
 from .validators import ValidationError, normalize_coin
 
 # Watch wizard states.
@@ -245,7 +247,7 @@ def build_scan_conversation(
     *,
     typed_scan: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
     typed_scanwatch: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
-    run_scan: Callable[[int, str | None, str | None, int, str, str], str],
+    run_scan: Callable[[int, str | None, str | None, int, str, str], str | MoneyNotice],
     commit_scanwatch: Callable[[int, str | None, str | None, int, str, str], str],
 ) -> ConversationHandler:
     """Scan wizard: KIND (one-shot vs standing) → TOP_N → TF → EXCHANGE → result/card.
@@ -332,7 +334,12 @@ def build_scan_conversation(
             await q.edit_message_text("🔍 Scanning the top perps…")
             result = run_scan(u.id, u.username, u.language_code, top_n, tf, exch)
             # One-shot: the verdict IS the result — NO "subscribed" card.
-            await q.edit_message_text(result, disable_web_page_preview=True)
+            #
+            # V2 CH1 R3 — `q` and NOT `q.message`: this site EDITS its own "🔍 Scanning the top
+            # perps…" placeholder in place, which is the behaviour `send_reply` reproduces for a
+            # CallbackQuery target. It also keeps `disable_web_page_preview=True`, which is the
+            # helper's DEFAULT precisely so no call site has to remember it.
+            await send_reply(q, result)
         pick.clear()
         return ConversationHandler.END
 

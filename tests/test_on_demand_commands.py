@@ -60,8 +60,16 @@ def test_regime_exhausted_returns_upgrade(tmp_db: Database, monkeypatch: pytest.
     monkeypatch.setattr(handlers, "_regime_via_mcp", lambda c, tf, ex: {"regime": "RANGING"})
     _exhaust(tmp_db, 1)
     reply = handle_regime(tmp_db, 1, "u", "en", ["BTC", "1h"])
-    assert "used all" in reply.lower()
-    assert "upgrade" in reply.lower()
+    # V2 CH1 R3 — the refusal is a `MoneyNotice`, so read `.text`. What this asserts is the
+    # `pull` lane's L2 rule: the branch RETURNS a value rather than sending, and that value is
+    # now the composed notice the caller routes through `send_reply`.
+    assert "used all" in reply.text.lower()
+    assert reply.markup is not None, "the refusal carries the plan picker"
+    assert "algovault.com" not in reply.text, "and no URL in the body"
+    # "upgrade" left the BODY with the URL it used to introduce — §Copy E says "Tap a plan
+    # below for more". The intent it stood for is asserted structurally instead: there IS a
+    # money CTA, and it is a button.
+    assert reply.campaign.endswith("_quota_exhausted")
 
 
 def test_regime_unknown_symbol_not_charged(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,8 +128,13 @@ def test_call_buy_when_exhausted_returns_upgrade(tmp_db: Database, monkeypatch: 
     )
     _exhaust(tmp_db, 1)
     reply = handle_call(tmp_db, 1, "u", "en", ["BTC", "1h"])
-    assert "used all" in reply.lower()
-    assert "SELL" not in reply, "the paid call is not revealed to an exhausted user"
+    # V2 CH1 R3 — the refusal is a `MoneyNotice`, so read `.text`. What this asserts is the
+    # `pull` lane's L2 rule: the branch RETURNS a value rather than sending, and that value is
+    # now the composed notice the caller routes through `send_reply`.
+    assert "used all" in reply.text.lower()
+    assert reply.markup is not None, "the refusal carries the plan picker"
+    assert "algovault.com" not in reply.text, "and no URL in the body"
+    assert "SELL" not in reply.text, "the paid call is not revealed to an exhausted user"
 
 
 def test_call_unknown_symbol_not_charged(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,7 +228,12 @@ def test_funding_exhausted_returns_upgrade(tmp_db: Database, monkeypatch: pytest
     monkeypatch.setattr(handlers, "_funding_via_mcp", lambda limit, bps: _FUNDING_RESULT)
     _exhaust(tmp_db, 1)
     reply = handlers.handle_funding(tmp_db, 1, "u", "en", [])
-    assert "used all" in reply.lower()
+    # V2 CH1 R3 — the refusal is a `MoneyNotice`, so read `.text`. What this asserts is the
+    # `pull` lane's L2 rule: the branch RETURNS a value rather than sending, and that value is
+    # now the composed notice the caller routes through `send_reply`.
+    assert "used all" in reply.text.lower()
+    assert reply.markup is not None, "the refusal carries the plan picker"
+    assert "algovault.com" not in reply.text, "and no URL in the body"
 
 
 def test_funding_mcp_error_graceful(tmp_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
