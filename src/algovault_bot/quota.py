@@ -542,8 +542,22 @@ def resolve_ladder(db: Database, now: datetime | None = None) -> Ladder:
     )
 
 
-def get_quota_state(db: Database, chat_id: int) -> QuotaState:
+def get_quota_state(
+    db: Database, chat_id: int, *, persist_roll: bool = True
+) -> QuotaState:
     """Read the user's current quota state. Auto-rolls expired window.
+
+    ``persist_roll`` — GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 R2b. This function's
+    docstring said "auto-rolls" and its callers read that as a pure read; measured, the roll
+    below EXECUTES an ``UPDATE``, so a "dry run" through ``evaluate_delivery`` mutated the very
+    column it was inspecting. The roll is now always COMPUTED (the returned state is identical
+    either way) and WRITTEN only when ``persist_roll`` is true, which is the default — every
+    existing call site keeps byte-identical behaviour. The wall-follow-up dry run passes False.
+
+    🛑 Keyword-only ON PURPOSE. ``tests/test_quota_consume_atomicity.py`` monkeypatches this
+    function with a rigid two-positional double and no ``**kwargs``; a positional third argument
+    would break it at CALL time, in a test whose subject is unrelated. Forward it ONLY from
+    ``evaluate_delivery`` — ``consume_quota`` must keep calling with two positionals.
 
     BOT-W2 C3: when the subscriber is linked to a paid tier, the QuotaState's ``linked_tier``
     field is populated and the FREE meter is skipped. Since
@@ -578,12 +592,13 @@ def get_quota_state(db: Database, chat_id: int) -> QuotaState:
     if window_start is not None and (_now() - window_start) > WINDOW:
         used = 0
         window_start = None
-        with db._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET alert_count = 0, alerts_window_start = NULL "
-                "WHERE chat_id = ?",
-                (chat_id,),
-            )
+        if persist_roll:
+            with db._cursor() as cur:
+                cur.execute(
+                    "UPDATE subscribers SET alert_count = 0, alerts_window_start = NULL "
+                    "WHERE chat_id = ?",
+                    (chat_id,),
+                )
 
     # GROWTH-TG-QUOTA-PARITY-W1 CH2c — the DAILY meter, rolled on READ as well as on write.
     # Reading a stale day as 0 is what makes the roll free: no cron, no timer, and a subscriber who
@@ -772,10 +787,14 @@ def record_regime_delivered(db: Database, chat_id: int, source: str) -> None:
 #            MUST call ``refuse_and_notify``.
 #   'pull' — the user is PRESENT and waiting on a reply. The returned message IS the
 #            notice, so the lane MUST return a value from the refusal branch.
+#   'followup' — the user is ABSENT and was ALREADY refused in an earlier episode. There is no
+#            refusal to notify, because the follow-up IS the notice; what makes it safe is that
+#            it is recorded, so it cannot repeat. The lane MUST call ``record_notice`` inside the
+#            delivered-send branch and MUST NOT call ``refuse_and_notify``.
 # Adding a lane without declaring it here FAILS the gate; declaring one that no
 # longer reads the decision FAILS it too (a stale entry rots into a permission slip
 # — that is exactly how the dark `paywall.py` survived 80 days).
-REFUSAL_LANES: Final[dict[str, Literal["push", "pull"]]] = {
+REFUSAL_LANES: Final[dict[str, Literal["push", "pull", "followup"]]] = {
     "process_one_row": "push",
     "run_cycle": "push",
     "process_scan_digests": "push",
@@ -862,14 +881,22 @@ def _notice_due(state: QuotaState) -> bool:
     return False
 
 
-def evaluate_delivery(db: Database, chat_id: int) -> QuotaDecision:
-    """THE decision. Pure read — no writes, no network, safe to call on every cycle.
+def evaluate_delivery(
+    db: Database, chat_id: int, *, persist_roll: bool = True
+) -> QuotaDecision:
+    """THE decision. No network; safe to call on every cycle.
+
+    🛑 NOT a pure read by default, and the old docstring's "Pure read — no writes" was FALSE.
+    ``get_quota_state`` rolls an expired 30-day window and, when ``persist_roll`` is true,
+    WRITES that roll. Callers that must not mutate — the wall-follow-up dry run — pass
+    ``persist_roll=False`` and get the identical decision with nothing written.
+    (GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 R2b.)
 
     CH5: for a paid-linked subscriber this projects from the local plan MIRROR, which is why the
     mirror lives on `subscribers` and why the drainer keeps it warm. This function must never
     acquire network I/O — it runs O(subscribers)/minute on the dispatch loop.
     """
-    state = get_quota_state(db, chat_id)
+    state = get_quota_state(db, chat_id, persist_roll=persist_roll)
     if state.is_paid and state.plan_state is PlanState.INDETERMINATE:
         # SERVE, and say so. A paying customer is never walled on a measurement we could not take;
         # CH6 counts these so a silently-dark mirror is visible rather than free service forever.
@@ -886,6 +913,73 @@ def evaluate_delivery(db: Database, chat_id: int) -> QuotaDecision:
         # CH2d — projected from the state's single derivation, never re-decided downstream.
         limit_kind=state.limit_kind,
     )
+
+
+#: The reset DATE format. ONE literal, because it was two — `build_refusal_text` and
+#: `build_plan_refusal_text` each carried their own `.strftime("%d %b %Y")`, and a third would
+#: have arrived with the wall follow-ups. Every rendered reset date in the estate comes from here.
+_RESET_DATE_FMT: Final = "%d %b %Y"
+
+#: Which meter a reset sentence is describing. NOT cosmetic — see `reset_sentence`.
+ResetLane = Literal["free", "plan"]
+
+
+def reset_horizon(
+    window_start: datetime | None, *, span: timedelta = WINDOW, now: datetime | None = None
+) -> tuple[str, int] | None:
+    """THE one derivation of "when does this window re-open, and how far away is that".
+
+    Returns ``(formatted_date, days_left)`` or ``None`` when the window has no start — which is
+    a real state, not an error: a subscriber who has never consumed, and the value the 30-day
+    roll writes back. Callers MUST branch on ``None`` rather than render it; `reset_sentence`
+    is that branch.
+
+    ``days_left`` is CEILED, not truncated. `timedelta.days` floors, so a user 0.9 days from
+    their reset would be told "0 days" — a sentence that names a future date and a zero in the
+    same breath. It floors at 0 for a window that is already due.
+
+    GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 R2a (drift row 14).
+    """
+    if window_start is None:
+        return None
+    resets_at = window_start + span
+    remaining = resets_at - (now or _now())
+    days_left = max(0, -((-remaining.total_seconds()) // 86400))
+    return resets_at.strftime(_RESET_DATE_FMT), int(days_left)
+
+
+def reset_sentence(lane: ResetLane, lang: str | None, horizon: tuple[str, int] | None) -> str:
+    """The ratified "Resets …" sentence for a lane, in the caller's language.
+
+    🛑 TWO fallback sets, selected by LANE, and that is deliberate — a sanctioned exception to
+    single-derivation, because they are two different FACTS about two different windows. The free
+    lane's window is the subscriber's own 30-day alert window; the paid lane's is their PLAN
+    period. Collapsing them into one sentence would tell a paying subscriber that their *free*
+    window rolls, which is both false and an unratified trilingual copy change. What IS shared is
+    the DATE — `reset_horizon` — which is the derived quantity. (Q13, 2026-09-07.)
+
+    Both fallback strings are byte-identical to what shipped before this wave: the free lane's
+    from `paywall.py`, the paid lane's from `build_plan_refusal_text`.
+    """
+    code = (lang or "en").lower().replace("_", "-")
+    if horizon is not None:
+        date = horizon[0]
+        if code.startswith("id"):
+            return f"Direset {date}."
+        if code.startswith("zh"):
+            return f"{date} 重置。"
+        return f"Resets {date}."
+    if lane == "plan":
+        if code.startswith("id"):
+            return "Direset saat jendela 30 hari paket Anda berputar."
+        if code.startswith("zh"):
+            return "您的 30 天套餐周期结束后重置。"
+        return "Resets when your 30-day plan window rolls."
+    if code.startswith("id"):
+        return "Direset saat jendela 30 hari Anda berputar."
+    if code.startswith("zh"):
+        return "您的 30 天周期结束后重置。"
+    return "Resets when your 30-day window rolls."
 
 
 def build_refusal_text(db: Database, chat_id: int, state: QuotaState) -> str:
