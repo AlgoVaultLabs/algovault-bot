@@ -34,7 +34,6 @@ from algovault_bot.unlock import (
     generate_track_token,
     is_pending_npm_expired,
     is_pending_x_expired,
-    normalize_lang,
     REFERRAL_URL,
     x_follow_unlock_enabled,
 )
@@ -174,21 +173,6 @@ def test_is_pending_x_not_expired_within_24h():
 def test_is_pending_npm_expired_after_24h():
     pending_since = FIXED_NOW - timedelta(hours=25)
     assert is_pending_npm_expired(pending_since, now=FIXED_NOW)
-
-
-# ── normalize_lang ───────────────────────────────────────────────────────
-
-
-def test_normalize_lang_routing():
-    assert normalize_lang(None) == "en"
-    assert normalize_lang("") == "en"
-    assert normalize_lang("en") == "en"
-    assert normalize_lang("en-US") == "en"
-    assert normalize_lang("id") == "id"
-    assert normalize_lang("id-ID") == "id"
-    assert normalize_lang("zh-Hans") == "zh-hans"
-    assert normalize_lang("zh-CN") == "zh-hans"
-    assert normalize_lang("fr") == "en"  # fallback
 
 
 # ── DB state machine integration ─────────────────────────────────────────

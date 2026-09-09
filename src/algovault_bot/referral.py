@@ -1,6 +1,6 @@
 """TG-REFERRAL-W1 / C2 — referral surface copy (PURE; no telegram/httpx/db).
 
-Trilingual (en / id / zh-hans, via unlock.normalize_lang — mirrors the other
+Trilingual (en / id / zh-hans, via lang.normalize_lang — mirrors the other
 viral flow). Every program number (bonus calls / commission % / months) is
 interpolated from the engine's ``terms`` payload (the REFERRAL_TERMS SoT in
 crypto-quant-signal-mcp) — NEVER hardcoded here, so the bot can't drift from the
@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from .unlock import normalize_lang
+from .lang import normalize_lang
 
 
 def build_share_url(deep_link: str, share_text: str) -> str:
