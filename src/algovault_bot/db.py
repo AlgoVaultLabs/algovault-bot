@@ -223,6 +223,10 @@ BROADCASTS_TABLE_MIGRATIONS = (
 # (per-month idempotency; resets via separate monthly-rollover process).
 # NULL means threshold has never fired for this subscriber.
 PAYWALL_HOOK_MIGRATIONS = (
+    # DEAD since OPS-BOT-DEAD-SURFACE-SWEEP-W1 (2026-09-09) — `has_fired_this_month` and
+    # `mark_fired` died with the composer wave, so these three columns have ZERO readers
+    # anywhere outside these ALTERs. Kept, never read; dropping them on live SQLite
+    # reclaims nothing and risks the file.
     "ALTER TABLE subscribers ADD COLUMN quota_hit_soft_at TIMESTAMP",
     "ALTER TABLE subscribers ADD COLUMN quota_hit_hard_at TIMESTAMP",
     "ALTER TABLE subscribers ADD COLUMN quota_hit_block_at TIMESTAMP",
@@ -534,6 +538,12 @@ ENTITLEMENT_OUTBOX_MIGRATIONS = (
 # 'pending_npm_call' | 'verified' | 'expired'. unlock_method: 'x_follow'
 # | 'npm_install'. NULL on all 4 columns until first /unlock attempt.
 UNLOCK_STATE_MIGRATIONS = (
+    # DEAD since OPS-BOT-DEAD-SURFACE-SWEEP-W1 (2026-09-09) — the /unlock_premium_alerts
+    # grant was retired with 0 rows ever written. Columns and table kept, never read;
+    # dropping them on live SQLite reclaims nothing and risks the file.
+    # The FIFTH statement in this tuple (`referral_code`) is LIVE and NOT covered by the
+    # note above — it is read by handlers.py + referral_drain.py. That is why this comment
+    # sits above the four unlock ALTERs and never above the tuple as a whole.
     "ALTER TABLE subscribers ADD COLUMN unlock_status TEXT",
     "ALTER TABLE subscribers ADD COLUMN unlock_verified_at TIMESTAMP",
     "ALTER TABLE subscribers ADD COLUMN unlock_method TEXT",
@@ -550,6 +560,9 @@ UNLOCK_STATE_MIGRATIONS = (
 # chat_id PK = one active grant per subscriber at a time; insert-or-replace
 # semantics on re-grant (e.g. extended via another verified action).
 PRO_GRANTS_TABLE_MIGRATIONS = (
+    # DEAD since OPS-BOT-DEAD-SURFACE-SWEEP-W1 (2026-09-09) — the /unlock_premium_alerts
+    # grant was retired with 0 rows ever written. Columns and table kept, never read;
+    # dropping them on live SQLite reclaims nothing and risks the file.
     "CREATE TABLE IF NOT EXISTS tg_pro_grants ("
     "  chat_id     INTEGER PRIMARY KEY,"
     "  granted_at  TIMESTAMP NOT NULL DEFAULT (datetime('now')),"
@@ -564,6 +577,9 @@ PRO_GRANTS_TABLE_MIGRATIONS = (
 # [Install] inline button. npm_unlock_detected_at = when scripts/check-npm-
 # unlocks.py first detected a matching funnel_events row.
 NPM_UNLOCK_MIGRATIONS = (
+    # DEAD since OPS-BOT-DEAD-SURFACE-SWEEP-W1 (2026-09-09) — the /unlock_premium_alerts
+    # grant was retired with 0 rows ever written. Columns and table kept, never read;
+    # dropping them on live SQLite reclaims nothing and risks the file.
     "ALTER TABLE subscribers ADD COLUMN npm_unlock_session_id TEXT",
     "ALTER TABLE subscribers ADD COLUMN npm_unlock_detected_at TIMESTAMP",
 )
@@ -1556,127 +1572,6 @@ class Database:
                 "UPDATE subscribers SET first_command_fired_at = ? WHERE chat_id = ?",
                 (now_iso, chat_id),
             )
-
-    # ── TG-BROADCAST-STACK-W1 C4: /unlock_premium_alerts state machine ────
-
-    def get_unlock_state(self, chat_id: int) -> tuple[str | None, str | None, str | None, str | None]:
-        """Return (unlock_status, unlock_method, unlock_screenshot_path,
-        npm_unlock_session_id) for a subscriber, or (None, None, None, None)
-        if not present.
-        """
-        row = self.get_subscriber(chat_id)
-        if row is None:
-            return None, None, None, None
-        return (
-            row["unlock_status"],
-            row["unlock_method"],
-            row["unlock_screenshot_path"],
-            row["npm_unlock_session_id"],
-        )
-
-    def set_unlock_pending(
-        self,
-        chat_id: int,
-        new_status: str,
-        method: str,
-        track_token: str | None = None,
-    ) -> None:
-        """Transition subscriber to pending_x_screenshot OR pending_npm_call.
-
-        ``track_token`` is set only for the npm path; ignored for X path.
-        """
-        with self._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET unlock_status = ?, unlock_method = ?, "
-                "npm_unlock_session_id = COALESCE(?, npm_unlock_session_id) "
-                "WHERE chat_id = ?",
-                (new_status, method, track_token, chat_id),
-            )
-
-    def set_unlock_screenshot_path(self, chat_id: int, path: str) -> None:
-        with self._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET unlock_screenshot_path = ? WHERE chat_id = ?",
-                (path, chat_id),
-            )
-
-    def set_unlock_verified(self, chat_id: int, now_iso: str) -> None:
-        with self._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET unlock_status = 'verified', "
-                "unlock_verified_at = ? WHERE chat_id = ?",
-                (now_iso, chat_id),
-            )
-
-    def set_unlock_expired(self, chat_id: int) -> None:
-        with self._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET unlock_status = 'expired' WHERE chat_id = ?",
-                (chat_id,),
-            )
-
-    def reset_unlock_state(self, chat_id: int) -> None:
-        """Used by [Reject] callback — return subscriber to not_started so
-        they can retry /unlock_premium_alerts with a clearer screenshot.
-        """
-        with self._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET unlock_status = NULL, "
-                "unlock_method = NULL, unlock_screenshot_path = NULL "
-                "WHERE chat_id = ?",
-                (chat_id,),
-            )
-
-    def set_npm_unlock_detected_at(self, chat_id: int, now_iso: str) -> None:
-        with self._cursor() as cur:
-            cur.execute(
-                "UPDATE subscribers SET npm_unlock_detected_at = ? WHERE chat_id = ?",
-                (now_iso, chat_id),
-            )
-
-    # ── TG-BROADCAST-STACK-W1 C4: tg_pro_grants CRUD ──────────────────────
-
-    def get_pro_grant(self, chat_id: int) -> sqlite3.Row | None:
-        """Return the active tg_pro_grants row for a subscriber, or None if
-        no active grant. Caller checks ``expires_at > NOW()`` for liveness.
-        """
-        with self._cursor() as cur:
-            cur.execute(
-                "SELECT chat_id, granted_at, expires_at, method "
-                "FROM tg_pro_grants WHERE chat_id = ?",
-                (chat_id,),
-            )
-            return cur.fetchone()
-
-    def insert_or_replace_pro_grant(
-        self, chat_id: int, expires_at_iso: str, method: str
-    ) -> None:
-        """Upsert a 30-day Pro grant. Per spec: ``chat_id PK`` so one active
-        grant per subscriber at a time; re-grant (e.g. via second method)
-        REPLACES the current grant.
-        """
-        with self._cursor() as cur:
-            cur.execute(
-                "INSERT OR REPLACE INTO tg_pro_grants "
-                "(chat_id, granted_at, expires_at, method) "
-                "VALUES (?, datetime('now'), ?, ?)",
-                (chat_id, expires_at_iso, method),
-            )
-
-    def find_subscriber_by_npm_token(self, track_token: str) -> sqlite3.Row | None:
-        """Look up subscriber whose npm_unlock_session_id matches the given
-        track_token AND is currently in state pending_npm_call. Used by
-        scripts/check-npm-unlocks.py (C6) to map detected funnel_events
-        rows back to a subscriber for grant issuance.
-        """
-        with self._cursor() as cur:
-            cur.execute(
-                "SELECT chat_id, lang_code, npm_unlock_session_id "
-                "FROM subscribers WHERE npm_unlock_session_id = ? "
-                "AND unlock_status = 'pending_npm_call'",
-                (track_token,),
-            )
-            return cur.fetchone()
 
     # ── BOT-ALERT-CLEANUP-W1: soft/urgent CTA per-threshold throttle ────
 
