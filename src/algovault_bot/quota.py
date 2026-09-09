@@ -47,12 +47,16 @@ from telegram import InlineKeyboardMarkup
 from .db import Database
 # GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 CH1 R2c — `plan_picker_kb`, `signup_url` and
 # `format_paywall_body` all left this module in the same edit, and their absence IS the wave.
+# (`format_paywall_body` lived in `paywall.py`, which OPS-BOT-DEAD-SURFACE-SWEEP-W1 deleted once
+# it had been a docstring-only tombstone with zero importers for a day; its two reachable
+# levels are `notices.compose_wall`. Do not go looking for the file.)
 # This file decides WHETHER to refuse and stamps that it did; `notices.py` decides what the
 # refusal SAYS and what it attaches. While the keyboard was built here and the body there, the
 # free wall could ship — and did — a working button beside a scheme-less URL in its own text.
 # TYPE_CHECKING-only: `notices` imports this module's pure helpers, so a runtime import here
 # would close a cycle. The composers themselves are imported lazily inside the two builders —
-# the same idiom `paywall.py` already uses for its `quota` import, and for the same reason.
+# a deferred import inside the function body, which is how this package breaks an import cycle
+# when a `TYPE_CHECKING` guard cannot (the value is needed at runtime, not just for typing).
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .notices import MoneyNotice
 
@@ -87,7 +91,8 @@ STARTER_MONTHLY_CALLS: Final = 10_000
 # RE-EXPORTED, not defined here, and this module stays the place to import them from. They live in
 # the leaf `plan_ladder.py` for one measured reason: `messages.welcome_message` needs the six-month
 # total as a DEFAULT ARGUMENT, defaults are evaluated at `def` time, and `quota` imports `messages`
-# — so the deferred-import trick `paywall.py` uses for this same cycle cannot supply one. The only
+# — so the deferred-import trick this module uses for its own `notices` cycle cannot supply one.
+# The only
 # alternative was hand-typing 39.90 a second time in `messages.py`, which is the `_TIER_QUOTA`
 # defect this wave exists to retire. See that module's docstring for the full argument.
 #
@@ -964,7 +969,8 @@ def reset_sentence(lane: ResetLane, lang: str | None, horizon: tuple[str, int] |
     the DATE — `reset_horizon` — which is the derived quantity. (Q13, 2026-09-07.)
 
     Both fallback strings are byte-identical to what shipped before this wave: the free lane's
-    from `paywall.py`, the paid lane's from `build_plan_refusal_text`.
+    from `paywall.py` (retired by OPS-BOT-DEAD-SURFACE-SWEEP-W1; the string moved here
+    byte-identical), the paid lane's from `build_plan_refusal_text`.
     """
     code = (lang or "en").lower().replace("_", "-")
     if horizon is not None:

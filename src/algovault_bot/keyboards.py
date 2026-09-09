@@ -38,7 +38,7 @@ if TYPE_CHECKING:  # pragma: no cover — types only, never a runtime import
     # `quota` imports THIS module (for `plan_picker_kb`), so importing `Ladder` at runtime would
     # close the cycle. `from __future__ import annotations` makes every annotation a string, so
     # this form is complete: mypy sees the real type and Python never performs the import. Same
-    # reason `paywall.py` defers its own `quota` import.
+    # shape every module in this package uses when `quota` sits on the other side of the cycle.
     from .quota import Ladder
 
 # Wizard TF grid — the full ON-DEMAND set (1m–1d), ordered shortest→longest. In parity

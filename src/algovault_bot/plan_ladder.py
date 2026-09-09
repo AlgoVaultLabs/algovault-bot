@@ -5,8 +5,8 @@ WHY A SEPARATE MODULE, AND WHY IT IS NOT OVER-ENGINEERING. These constants belon
 (it re-exports every name below, so `from .quota import PRO_PRICE_USD` works and every existing
 importer is untouched). But `messages.py` also needs one of them — the six-month total, for the
 welcome copy's default argument — and `quota.py` IMPORTS `messages.py`. A default argument is
-evaluated at `def` time, so the deferred-import trick `paywall.py` uses for exactly this cycle
-cannot supply one.
+evaluated at `def` time, so a deferred import inside the function body — this package's usual
+way out of exactly this cycle — cannot supply one.
 
 The choice was therefore: hand-type `39.90` a second time in `messages.py`, or put the data in a
 module that imports nothing. Hand-typing it is the `_TIER_QUOTA` defect this wave exists to

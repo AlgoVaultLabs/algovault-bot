@@ -22,9 +22,10 @@ if TYPE_CHECKING:  # pragma: no cover — types only, never a runtime import
 from .batch import DEFAULT_TOP_N, TF_ORDER
 # `plan_ladder` is a pure-data LEAF that imports nothing from the package — see its docstring.
 # `quota` imports THIS module, so the pinned ladder cannot be read from there; a default argument
-# is evaluated at `def` time, which also rules out the deferred import `paywall.py` uses.
+# is evaluated at `def` time, which also rules out a deferred import inside the function body.
 from .plan_ladder import STARTER_PRICE_6MONTH_USD
-# `unlock` imports nothing local, so this cannot cycle — same edge `referral.py` uses.
+# `plan_ladder` imports nothing local, so this cannot cycle — same edge `referral.py` uses to
+# reach `lang`.
 
 
 #: The signup path, WITHOUT a plan. GROWTH-TG-PLAN-PICKER-W1 R3 moved `?plan=starter` out of this

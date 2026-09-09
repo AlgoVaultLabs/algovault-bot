@@ -22,7 +22,9 @@ columns are exempt by path — they are the declaration, not a reader.
 """
 from __future__ import annotations
 
+import ast
 import pathlib
+import warnings
 
 import pytest
 
@@ -52,14 +54,9 @@ DECLARATION_PATH = REPO / "src" / "algovault_bot" / "db.py"
 # the thing it excuses. CLAUDE.md: an exemption and its test are a pair — leaving either half
 # behind half-disables the guard.
 EXEMPT: dict[pathlib.Path, str] = {
-    REPO
-    / "src"
-    / "algovault_bot"
-    / "paywall.py": (
-        "tombstone docstring, naming `tg_pro_grants` and `unlock_status` as the MEASURED-FALSE "
-        "promise it recorded. CH2 may not write this file (hard firewall); CH3 deletes it and "
-        "this exemption in the same commit."
-    ),
+    # Empty since CH3 deleted `paywall.py` and this entry in the same commit, exactly as the
+    # entry's own reason required. Kept as a declared-empty dict so the next exemption has to
+    # state a reason and inherit the self-retiring assertion below.
 }
 
 
@@ -76,23 +73,73 @@ def _source_files() -> list[pathlib.Path]:
     return files
 
 
+def _code_only(path: pathlib.Path) -> str:
+    """The file's CODE, with comments and docstrings removed.
+
+    A MENTION IS NOT A REFERENCE. `scripts/check-orphan-modules.py`'s docstring names
+    `tg_pro_grants` and `unlock_status` in the paragraph stating honestly what that gate does
+    NOT cover — the most valuable lines in the file. A naive substring scan flags them and
+    demands their deletion, which is the trap `verification-gates.md` records for exactly this
+    class of guard (`check-canaries-wired.mjs` strips comments for the same reason).
+
+    `ast.unparse` drops comments for free; docstrings are cleared explicitly first. Anything
+    surviving is a real reference — a name, an attribute, or a live SQL string literal.
+    """
+    with warnings.catch_warnings():
+        # We are READING these files, not running them: another module's own SyntaxWarning
+        # (e.g. `check-quota-refusal-seam.py`'s unescaped `\s` inside a docstring) is not a
+        # finding of this test, and that file is out of this wave's scope.
+        warnings.simplefilter("ignore")
+        tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                body[0].value.value = ""
+    return ast.unparse(tree)
+
+
 @pytest.mark.parametrize("identifier", DEAD_IDENTIFIERS)
 def test_dead_identifier_has_no_reader(identifier: str) -> None:
-    """No `src/` or `scripts/` module may reference a retired identifier.
+    """No `src/` or `scripts/` module may REFERENCE a retired identifier.
 
-    `db.py` is exempt: it holds the ALTER/CREATE statements that declare them.
+    `db.py` is exempt by path: it holds the ALTER/CREATE statements that declare them.
+    Comments and docstrings are stripped first — see `_code_only`.
     """
     offenders = [
-        f"{p.relative_to(REPO)}:{n}"
+        str(p.relative_to(REPO))
         for p in _source_files()
-        if p != DECLARATION_PATH and p not in EXEMPT
-        for n, line in enumerate(p.read_text().splitlines(), 1)
-        if identifier in line
+        if p != DECLARATION_PATH and p not in EXEMPT and identifier in _code_only(p)
     ]
     assert not offenders, (
-        f"{identifier!r} was retired by OPS-BOT-DEAD-SURFACE-SWEEP-W1 but is referenced at: "
+        f"{identifier!r} was retired by OPS-BOT-DEAD-SURFACE-SWEEP-W1 but is referenced in: "
         f"{', '.join(offenders)}"
     )
+
+
+def test_prose_mention_is_not_a_reference() -> None:
+    """The comment/docstring stripper is itself proven, in BOTH directions.
+
+    Without this, the stripper could silently stop stripping (every assertion above goes
+    vacuously green) or over-strip (real references invisible). Both directions asserted.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        prose = pathlib.Path(td) / "prose.py"
+        prose.write_text('"""A docstring naming unlock_status."""\n# and a comment: tg_pro_grants\nx = 1\n')
+        assert "unlock_status" not in _code_only(prose)
+        assert "tg_pro_grants" not in _code_only(prose)
+
+        real = pathlib.Path(td) / "real.py"
+        real.write_text('row = data["unlock_status"]\nq = "SELECT * FROM tg_pro_grants"\n')
+        assert "unlock_status" in _code_only(real)
+        assert "tg_pro_grants" in _code_only(real)
 
 
 def test_declaration_file_still_declares_them() -> None:

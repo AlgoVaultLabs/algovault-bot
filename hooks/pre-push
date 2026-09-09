@@ -56,4 +56,34 @@ case "$SEAM_VERDICT" in
     echo "[pre-push] seam gate emitted no verdict (INDETERMINATE) — NOT blocking, but it verified nothing." >&2 ;;
 esac
 
+# OPS-BOT-DEAD-SURFACE-SWEEP-W1 CH3 R8 — the orphan-module gate.
+#
+# `paywall.py` was unreachable for ~80 days and nothing went red, because nothing was asking.
+# This block asks, on every push. Note `hooks/` is NOT in ops/deploy/algovault-bot.manifest by
+# design, so this is a developer-checkout gate (plus CI) and never runs on the host.
+#
+# 🛑 SAME CONTRACT AS THE SEAM GATE ABOVE, FOR THE SAME REASONS. Gates on the TOKEN, never `$?`.
+# `|| true` is LOAD-BEARING: line 14 is `set -euo pipefail`, under which a failing command
+# substitution in a plain assignment aborts the shell right here — which is measured to have made
+# the seam gate's own token-reading `case` dead code for every non-zero exit. Do not remove it.
+#
+# INDETERMINATE does not block: it means the gate could not evaluate (an unparseable file, a
+# declared entrypoint that has vanished), which is not evidence the tree is bad. It is LOUD.
+echo "[pre-push] running orphan-module gate…"
+ORPHAN_PY="${ALGOVAULT_PY:-python3}"
+[ -x "$ROOT/.venv/bin/python" ] && ORPHAN_PY="$ROOT/.venv/bin/python"
+ORPHAN_OUT="$("$ORPHAN_PY" "$ROOT/scripts/check-orphan-modules.py" 2>&1 || true)"
+ORPHAN_VERDICT="$(printf '%s\n' "$ORPHAN_OUT" | grep -oE '^ORPHAN_MODULES_VERDICT=[A-Z]+' | tail -1)"
+case "$ORPHAN_VERDICT" in
+  ORPHAN_MODULES_VERDICT=PASS)
+    echo "[pre-push] $ORPHAN_VERDICT" ;;
+  ORPHAN_MODULES_VERDICT=FAIL)
+    printf '%s\n' "$ORPHAN_OUT"
+    echo "[pre-push] $ORPHAN_VERDICT — push refused." >&2
+    exit 1 ;;
+  *)
+    printf '%s\n' "$ORPHAN_OUT" >&2
+    echo "[pre-push] orphan gate emitted no verdict (INDETERMINATE) — NOT blocking, but it verified nothing." >&2 ;;
+esac
+
 echo "✓ pre-push checks passed"
