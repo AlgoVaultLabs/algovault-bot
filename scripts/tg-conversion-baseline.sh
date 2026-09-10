@@ -230,9 +230,35 @@ echo
 #   human_classified — classification IN ('browser','unknown'), i.e. positively judged human
 #   unclassified     — classification IS NULL: PRE-CLASSIFIER rows, machine OR human, and the
 #                      18 known machine rows are in here. Not folded into either side.
-# An honest three-way split beats a confident two-way one. The unclassified column reads 0 once
-# FUNNEL-ATTRIBUTION-CLASSIFY-BACKFILL-W{NEXT} backfills `classification` from the stored
-# user_agent through the one canonical classifier — at which point no script needs an IP list.
+# An honest three-way split beats a confident two-way one.
+#
+# 🛑 THE `unclassified` COLUMN DOES NOT REACH 0, AND THIS COMMENT USED TO SAY IT WOULD.
+# Retracted 2026-09-10 by FUNNEL-ATTRIBUTION-CLASSIFY-BACKFILL-W1 — the wave this line was waiting
+# for, correcting its own claim. That backfill recovers only what a STORED user_agent can prove:
+# the canonical classifier's `is_automated` verdict, re-run on the same input through the same
+# function. The other five layers of `classifyBrowserIntent` read request headers (Sec-Purpose,
+# Sec-Fetch-Mode/Dest, Accept) that `signup_attribution` never stored, so a browser-shaped UA
+# CANNOT be resolved to `browser` or `unknown` without inventing the evidence. Those rows stay
+# NULL by construction, and so does a row with no UA at all.
+#
+# Measured on signal-1, 2026-09-10, over the 782 rows carrying NULL classification:
+#    222  recoverable as `bot` — 29.9 % of the 743 that carry a UA
+#    520  UA-bearing rows stay NULL — browser-shaped, unrecoverable by construction
+#     39  rows have no UA at all — nothing to classify
+# So `unclassified` falls by ~222 and settles near 560 for the all-time population. It reads 0
+# only for a window whose rows are ALL post-2026-09-07.
+#
+# What the backfill DOES buy this script is the thing it was written for. Measured in THIS
+# script's own window: all 18 of the NULL instrument rows carry a `curl` UA, so all 18 leave
+# `unclassified` and land in `bot`. The two ip_hashes stop inflating the middle column here, and
+# this script needs no IP list.
+#
+# That is a fact about this window, not a general one, and the difference matters to whoever
+# widens it. The same ip_hash v2:2781fba6ee47692c also has 12 rows elsewhere in the table sending
+# a Mac-Safari UA. The backfill reads the USER AGENT and nothing else — it cannot see an ip_hash,
+# and teaching it to would be exactly the IP-based inference this three-column split exists to
+# avoid. Those 12 stay `unclassified` forever. Known-machine-by-IP and provable-machine-by-UA are
+# different populations, and only the second one is recoverable.
 S02_SQL="SELECT a.utm_campaign,
                 count(*) AS raw,
                 count(*) FILTER (WHERE a.classification IN ('browser','unknown')) AS human_classified,
@@ -270,9 +296,11 @@ else
   printf '%s\n' "$s02_out" | awk -F'|' 'NF>=5{printf "  %-28s %8s %10s %14s %12s\n", $1, $2, $3, $4, $5}'
   echo "  human = classification IN ('browser','unknown'); unclassified = NULL (pre-classifier,"
   echo "  machine OR human — NOT summed into either). The classifier began populating"
-  echo "  2026-09-07T00:10Z; the known instrument ip_hashes v2:2781fba6ee47692c and"
-  echo "  v2:4f7ed55972eede90 land in the unclassified column until"
-  echo "  FUNNEL-ATTRIBUTION-CLASSIFY-BACKFILL-W{NEXT} backfills it."
+  echo "  2026-09-07T00:10Z. FUNNEL-ATTRIBUTION-CLASSIFY-BACKFILL-W1 (2026-09-10) recovered the"
+  echo "  UA-provable half of the earlier rows, which moved the known instrument ip_hashes"
+  echo "  v2:2781fba6ee47692c and v2:4f7ed55972eede90 out of unclassified and into bot."
+  echo "  unclassified does NOT reach 0: a browser-shaped UA cannot be resolved without the"
+  echo "  request headers, which were never stored, so those rows stay NULL by construction."
   if [ "$total_clicks" -eq 0 ]; then
     echo "  (zero tg_bot clicks in the window — a fact about the world, not a failed read)"
   fi
