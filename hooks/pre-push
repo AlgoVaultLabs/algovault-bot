@@ -52,7 +52,11 @@ SEAM_PY="${ALGOVAULT_PY:-python3}"
 # that can. `|| true` hands the exit code back to the `case`, which is what "gates on the TOKEN,
 # never the exit code" actually requires.
 SEAM_OUT="$("$SEAM_PY" "$ROOT/scripts/check-quota-refusal-seam.py" 2>&1 || true)"
-SEAM_VERDICT="$(printf '%s\n' "$SEAM_OUT" | grep -oE '^QUOTA_REFUSAL_SEAM_VERDICT=[A-Z]+' | tail -1)"
+# …and the VERDICT capture needs it too (OPS-BOT-PREPUSH-NOTOKEN-ORPHAN-CI-W1). A gate that prints
+# NO token — a crash, an import error, a missing python — makes `grep` exit 1, pipefail fails the
+# pipeline, and `set -e` aborts HERE: exit 1, no message, every later block skipped. R4 fixed the
+# line above and missed this one. tests/test_pre_push_hook.py drives every block with no token.
+SEAM_VERDICT="$(printf '%s\n' "$SEAM_OUT" | grep -oE '^QUOTA_REFUSAL_SEAM_VERDICT=[A-Z]+' | tail -1 || true)"
 case "$SEAM_VERDICT" in
   QUOTA_REFUSAL_SEAM_VERDICT=PASS)
     echo "[pre-push] $SEAM_VERDICT" ;;
@@ -72,9 +76,11 @@ esac
 # design, so this is a developer-checkout gate (plus CI) and never runs on the host.
 #
 # 🛑 SAME CONTRACT AS THE SEAM GATE ABOVE, FOR THE SAME REASONS. Gates on the TOKEN, never `$?`.
-# `|| true` is LOAD-BEARING: line 14 is `set -euo pipefail`, under which a failing command
-# substitution in a plain assignment aborts the shell right here — which is measured to have made
-# the seam gate's own token-reading `case` dead code for every non-zero exit. Do not remove it.
+# `|| true` is LOAD-BEARING on BOTH captures: line 14 is `set -euo pipefail`, under which a failing
+# command substitution in a plain assignment aborts the shell right here — which is measured to
+# have made the seam gate's own token-reading `case` dead code for every non-zero exit, and this
+# block's verdict capture dead code for every gate that printed no token at all (fixed by
+# OPS-BOT-PREPUSH-NOTOKEN-ORPHAN-CI-W1). Do not remove either.
 #
 # INDETERMINATE does not block: it means the gate could not evaluate (an unparseable file, a
 # declared entrypoint that has vanished), which is not evidence the tree is bad. It is LOUD.
@@ -82,7 +88,7 @@ echo "[pre-push] running orphan-module gate…"
 ORPHAN_PY="${ALGOVAULT_PY:-python3}"
 [ -x "$ROOT/.venv/bin/python" ] && ORPHAN_PY="$ROOT/.venv/bin/python"
 ORPHAN_OUT="$("$ORPHAN_PY" "$ROOT/scripts/check-orphan-modules.py" 2>&1 || true)"
-ORPHAN_VERDICT="$(printf '%s\n' "$ORPHAN_OUT" | grep -oE '^ORPHAN_MODULES_VERDICT=[A-Z]+' | tail -1)"
+ORPHAN_VERDICT="$(printf '%s\n' "$ORPHAN_OUT" | grep -oE '^ORPHAN_MODULES_VERDICT=[A-Z]+' | tail -1 || true)"
 case "$ORPHAN_VERDICT" in
   ORPHAN_MODULES_VERDICT=PASS)
     echo "[pre-push] $ORPHAN_VERDICT" ;;
