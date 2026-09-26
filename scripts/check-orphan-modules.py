@@ -87,6 +87,7 @@ DECLARED_ENTRYPOINTS: dict[str, str] = {
     ),
 }
 
+TOKEN = "ORPHAN_MODULES_VERDICT="
 VERDICT_PASS = "ORPHAN_MODULES_VERDICT=PASS"
 VERDICT_FAIL = "ORPHAN_MODULES_VERDICT=FAIL"
 VERDICT_INDETERMINATE = "ORPHAN_MODULES_VERDICT=INDETERMINATE"
@@ -229,7 +230,13 @@ def self_test() -> int:
     results: list[tuple[str, bool, str]] = []
 
     def check(label: str, got: object, want: object) -> None:
-        results.append((label, got == want, f"got {got!r}, want {want!r}"))
+        # Only the terminal line may carry the token. The (g) labels quoted it whole, and so does
+        # the got/want of any failed verdict-valued check — so a FAILING run printed
+        # `ORPHAN_MODULES_VERDICT=PASS` above its real verdict, where an unanchored reader takes it
+        # as the result. Stripped here, once, for every line (OPS-BOT-PREPUSH-NOTOKEN-ORPHAN-CI-W1);
+        # `tests/test_orphan_modules.py` counts the token in this mode.
+        why = f"got {got!r}, want {want!r}"
+        results.append((label.replace(TOKEN, ""), got == want, why.replace(TOKEN, "")))
 
     roots_src = "\n".join(
         f"import {PKG}.{r}" for r in DECLARED_ENTRYPOINTS
