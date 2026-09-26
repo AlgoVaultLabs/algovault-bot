@@ -1,7 +1,7 @@
 """OPS-BOT-LINKED-TIER-REFRESH-W1 CH3 — the link has a lifecycle.
 
 A link used to have creation and no other state: nothing ever re-asked the server, so a
-revoked key kept paid treatment forever. Chat 1793689937 has been in exactly that state
+revoked key kept paid treatment forever. Chat last4 9937 has been in exactly that state
 since 2026-05-08 — `linked_tier='starter'`, `validate-key` answering 404 — and because
 `linked_tier in PAID_TIERS` makes `consume_quota` a no-op, the bot-side 100/mo wall never
 applied to them.

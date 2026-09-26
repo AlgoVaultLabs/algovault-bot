@@ -128,7 +128,7 @@ What was actually measured (CH0/P5, read-only against production `state.db` on 2
 - **mean 4.80** alerts/day
 - **zero** free chat-days above 100
 
-The single chat that ever exceeded 100 alerts in a day (`8776880162`, peak 248) is
+The single chat that ever exceeded 100 alerts in a day (chat last4 `0162`, peak 248) is
 `linked_tier = starter` — **paid**, and therefore governed by the plan ceiling, not this meter.
 
 So the 100/UTC-day cap sits **26% above the highest daily volume any free subscriber has ever

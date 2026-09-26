@@ -252,7 +252,7 @@ def test_the_IDLE_POLL_path_writes_plan_tier(db: Database) -> None:
 
 
 def test_an_upgrade_reaches_the_label_within_one_drain_cycle(db: Database) -> None:
-    """Chat 1061466212's defect, reproduced and then closed.
+    """Chat last4 6212's defect, reproduced and then closed.
 
     Linked as `starter`; the server now says `pro`. One ordinary drain pass — no new
     schedule, no new call — and every tier-labelled surface reads Pro.

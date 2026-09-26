@@ -6,9 +6,13 @@ derivation every tier-labelled surface now projects from.
 
 The live shape these tests encode was measured on 2026-08-21:
 
-    chat 1061466212  linked_tier='starter'  plan_total=100000  server tier='pro'
-    chat 1793689937  linked_tier='starter'  plan_state_as_of=NULL (unobserved)
-    chat 8776880162  linked_tier='starter'  plan_total=10000   server tier='starter'
+    chat last4 6212  linked_tier='starter'  plan_total=100000  server tier='pro'
+    chat last4 9937  linked_tier='starter'  plan_state_as_of=NULL (unobserved)
+    chat last4 0162  linked_tier='starter'  plan_total=10000   server tier='starter'
+
+The tests below use SYNTHETIC chat ids that keep each live chat's last4 (16212, 19937,
+300162). The real ids are withheld from this public repo, and
+`scripts/check-chat-id-literals.py` refuses them.
 """
 
 from __future__ import annotations
@@ -111,10 +115,10 @@ def test_row_adapter_tolerates_a_row_predating_the_migration() -> None:
     assert effective_tier(_Bare()) == ("starter", "link")
 
 
-# ── 2f — chat 1061466212's EXACT shape renders Pro ─────────────────────────────
+# ── 2f — chat last4 6212's EXACT shape renders Pro ─────────────────────────────
 
 
-def test_the_1061466212_shape_renders_Pro_on_the_trade_call_card(
+def test_the_last4_6212_shape_renders_Pro_on_the_trade_call_card(
     tmp_db: Database,
 ) -> None:
     """The measured defect, end to end.
@@ -123,21 +127,21 @@ def test_the_1061466212_shape_renders_Pro_on_the_trade_call_card(
     allowance. Before this chapter the card read "Starter plan" while the debit
     correctly charged Pro — two copies of one fact, and the label read the stale one.
     """
-    tmp_db.upsert_subscriber(1061466212, "subject", "en")
-    tmp_db.link_subscriber(1061466212, "av_live_subject", "starter")
+    tmp_db.upsert_subscriber(16212, "subject", "en")
+    tmp_db.link_subscriber(16212, "av_live_subject", "starter")
     tmp_db.update_plan_mirror(
-        1061466212,
+        16212,
         {"tier": "pro", "used": 5294, "total": 100000, "allowed": True},
         source="debit",
     )
-    state = get_quota_state(tmp_db, 1061466212)
+    state = get_quota_state(tmp_db, 16212)
 
     assert state.linked_tier == "starter", "the stale copy is still on the row"
     assert state.plan_tier == "pro", "the mirror carries server truth"
     assert state.effective_tier == ("pro", "mirror")
 
     card = format_trade_call_alert(
-        row=WatchRow(chat_id=1061466212, coin="BTC", timeframe="1h",
+        row=WatchRow(chat_id=16212, coin="BTC", timeframe="1h",
                      exchange="hyperliquid", alert_type="call",
                      regime_last_seen=None, last_verdict=None, last_verdict_streak=0),
         call="BUY", confidence=72, price=64000.0, regime="TRENDING",
@@ -147,25 +151,25 @@ def test_the_1061466212_shape_renders_Pro_on_the_trade_call_card(
     assert "Starter" not in card
 
 
-def test_the_8776880162_shape_is_unchanged_by_this_wave(tmp_db: Database) -> None:
+def test_the_last4_0162_shape_is_unchanged_by_this_wave(tmp_db: Database) -> None:
     """The control subject: genuinely starter, mirror agrees. Must not move."""
-    tmp_db.upsert_subscriber(8776880162, "control", "en")
-    tmp_db.link_subscriber(8776880162, "av_live_control", "starter")
+    tmp_db.upsert_subscriber(300162, "control", "en")
+    tmp_db.link_subscriber(300162, "av_live_control", "starter")
     tmp_db.update_plan_mirror(
-        8776880162,
+        300162,
         {"tier": "starter", "used": 575, "total": 10000, "allowed": True},
         source="debit",
     )
-    state = get_quota_state(tmp_db, 8776880162)
+    state = get_quota_state(tmp_db, 300162)
     assert state.effective_tier == ("starter", "mirror")
 
 
-def test_the_1793689937_shape_keeps_its_last_known_tier(tmp_db: Database) -> None:
+def test_the_last4_9937_shape_keeps_its_last_known_tier(tmp_db: Database) -> None:
     """Unobserved mirror. CH2's floor is today's behaviour — the dead-key leak is
     CH3's to close, not this chapter's, and CH2 must not pretend otherwise."""
-    tmp_db.upsert_subscriber(1793689937, "dead", "en")
-    tmp_db.link_subscriber(1793689937, "av_live_dead", "starter")
-    state = get_quota_state(tmp_db, 1793689937)
+    tmp_db.upsert_subscriber(19937, "dead", "en")
+    tmp_db.link_subscriber(19937, "av_live_dead", "starter")
+    state = get_quota_state(tmp_db, 19937)
     assert state.plan_tier is None and state.plan_state_as_of is None
     assert state.effective_tier == ("starter", "link")
     assert state.is_paid is True, "CH2 changes the LABEL, never the entitlement"

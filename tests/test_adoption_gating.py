@@ -21,8 +21,8 @@ def test_adoption_broadcasts_live_default_off(monkeypatch):
 
 
 def test_operator_chat_ids_parsing(monkeypatch):
-    monkeypatch.setenv("BOT_ADMIN_CHAT_IDS", "1793689937, 42 ,bogus,")
-    assert adoption.operator_chat_ids() == [1793689937, 42]
+    monkeypatch.setenv("BOT_ADMIN_CHAT_IDS", "19937, 42 ,bogus,")
+    assert adoption.operator_chat_ids() == [19937, 42]
 
 
 def test_operator_chat_ids_empty(monkeypatch):

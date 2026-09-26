@@ -138,7 +138,7 @@ def jitter_window_for(timeframe: str, configured: int | None = None) -> int:
        scheduler fires on a 60-SECOND grid, so a due-time is always rounded UP to the next
        tick. At 15m with ``OFFSET_PCT=75`` the shift is ``675 + 60 grace + 120 jitter = 855``
        of a 900s bar — only 45s of headroom for a 60s tick, so the fire quantizes forward into
-       the NEXT bar's OPEN. Measured live 2026-08-01: chat 544140240 XAU/15m drew jitter=2 and
+       the NEXT bar's OPEN. Measured live 2026-08-01: chat last4 0240 XAU/15m drew jitter=2 and
        dispatched at offset **0s every single bar**, deterministically — the exact degenerate
        zone this whole design exists to move away from, reached by the mechanism that was
        supposed to prevent it. Bound 2 subtracts the tick, so 15m allows at most 1 minute of

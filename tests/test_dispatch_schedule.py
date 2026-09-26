@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from algovault_bot import dispatch_schedule
 from algovault_bot.db import Database
 from algovault_bot.dispatch_schedule import (
     DEFAULT_CLOSE_GRACE_MIN,
@@ -37,6 +38,12 @@ from algovault_bot.validators import TF_SECONDS
 # 2026-08-01T00:00:00Z — divisible by 1d, so every timeframe bucket starts clean here.
 BASE = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())
 
+# Chat ids in this file are SYNTHETIC stand-ins that keep the live chat's last4 (300162 for
+# last4 0162, 2670240 for last4 0240). The real ids are withheld from this public repo, and
+# `scripts/check-chat-id-literals.py` refuses them. `jitter_minutes` hashes the chat id, so each
+# stand-in was chosen to hash like its live row: the dispatch these tests pin is the dispatch
+# that row actually had, not a different row's.
+
 
 def _iso(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None).isoformat()
@@ -53,7 +60,7 @@ def test_ac1_due_times_are_bucket_constant_across_8_consecutive_bars() -> None:
     """
     tf = "1h"
     period = TF_SECONDS[tf]
-    chat_id, coin, exchange = 8776880162, "ETH", "BINANCE"
+    chat_id, coin, exchange = 300162, "ETH", "BINANCE"
 
     fires: list[int] = []
     last_fetched: int | None = None
@@ -203,12 +210,12 @@ def test_ac3_jitter_is_stable_across_two_process_starts() -> None:
     per-process, so this pins the VALUES a fresh interpreter must reproduce. They are
     hard-coded, so a switch to a seed-dependent hash breaks the test on the next run.
     """
-    args = (8776880162, "ETH", "15m", "BINANCE")
+    args = (300162, "ETH", "15m", "BINANCE")
     first = jitter_minutes(*args)
     for _ in range(5):
         assert jitter_minutes(*args) == first
     # Blake2b over the natural key is deterministic across interpreters and platforms.
-    assert jitter_minutes(8776880162, "ETH", "15m", "BINANCE", 3) in (0, 1, 2)
+    assert jitter_minutes(300162, "ETH", "15m", "BINANCE", 3) in (0, 1, 2)
     assert jitter_minutes(1, "BTC", "1h", "BINANCE", 3) in (0, 1, 2)
     # Different rows genuinely spread — otherwise the jitter relieves nothing.
     spread = {jitter_minutes(i, "BTC", "1h", "BINANCE", 3) for i in range(50)}
@@ -264,7 +271,7 @@ def test_jitter_shifts_the_fire_minute_but_not_the_cadence() -> None:
 def test_target_epoch_is_a_pure_function_of_the_instant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(ENV_OFFSET_PCT, "75")
     monkeypatch.setenv(ENV_CLOSE_GRACE_MIN, "1")
-    row = (8776880162, "ETH", "BINANCE")
+    row = (300162, "ETH", "BINANCE")
     # Same instant → same bucket, no matter how often it is asked.
     assert target_epoch("1h", BASE + 3000, *row) == target_epoch("1h", BASE + 3000, *row)
     # Instants a few seconds apart inside the same bucket agree — this is the ratchet fix.
@@ -336,14 +343,25 @@ def test_jitter_window_reserves_one_scheduler_tick(monkeypatch: pytest.MonkeyPat
 
 
 def test_the_offending_row_now_dispatches_late_bar(monkeypatch: pytest.MonkeyPatch) -> None:
-    """chat 544140240 XAU/15m — the row that fired at offset 0s every bar. Simulated over four
-    consecutive bars it must now land late, and stay bucket-constant."""
+    """chat last4 0240 XAU/15m — the row that fired at offset 0s every bar. Simulated over four
+    consecutive bars it must now land late, and stay bucket-constant.
+
+    A synthetic stand-in is only a regression test of THAT row if it reproduces the draw that
+    made the incident, so that is asserted first rather than assumed: jitter=2 under the
+    pre-fix 15m window of 3 (bound 1 alone). The window is the only thing replaced — the hash
+    and its key are `jitter_minutes`' own, so a change to either still reaches this test."""
     monkeypatch.setenv(ENV_OFFSET_PCT, "75")
     monkeypatch.setenv(ENV_CLOSE_GRACE_MIN, "1")
     monkeypatch.setenv(ENV_JITTER_WINDOW_MIN, "3")
 
-    args = (544140240, "XAU", "BINANCE")
-    assert jitter_minutes(544140240, "XAU", "15m", "BINANCE") <= 1
+    with monkeypatch.context() as pre_fix:
+        pre_fix.setattr(dispatch_schedule, "jitter_window_for", lambda tf, configured=None: 3)
+        assert jitter_minutes(2670240, "XAU", "15m", "BINANCE") == 2, (
+            "the stand-in no longer reproduces the incident's jitter=2 draw"
+        )
+
+    args = (2670240, "XAU", "BINANCE")
+    assert jitter_minutes(2670240, "XAU", "15m", "BINANCE") <= 1
 
     offsets: list[int] = []
     last: int = BASE

@@ -39,7 +39,7 @@ def test_stats_with_linked_users_renders_breakdown(tmp_db: Database) -> None:
 def test_stats_breakdown_prefers_a_FRESH_mirror_over_the_stale_link_copy(
     tmp_db: Database,
 ) -> None:
-    """The defect, at the admin surface: chat 1061466212's exact shape.
+    """The defect, at the admin surface: chat last4 6212's exact shape.
 
     `linked_tier='starter'` (written at /link, June) + a fresh mirror saying `pro`. The
     operator must be shown Pro, and must be able to see that the server said so.

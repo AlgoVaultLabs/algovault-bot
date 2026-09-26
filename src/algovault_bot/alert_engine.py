@@ -164,7 +164,7 @@ def format_trade_call_alert(
     # OPS-BOT-LINKED-TIER-REFRESH-W1 CH2: the LABEL projects from `effective_tier` — the
     # server's current tier when the mirror is fresh, last-known otherwise. `linked_tier`
     # is written once at /link and was stale for 1 of 3 linked subscribers (chat
-    # 1061466212 read "Starter" while paying for Pro, measured 2026-08-21).
+    # last4 6212 read "Starter" while paying for Pro, measured 2026-08-21).
     _tier = quota.effective_tier.tier
     if quota.is_paid and _tier:
         # CH6a: the old "via bot, uncapped" claim became FALSE the day paid deliveries began debiting the

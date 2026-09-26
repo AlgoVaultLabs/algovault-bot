@@ -1068,7 +1068,7 @@ def picker_above_tier(state: QuotaState) -> str | None:
     that property's own docstring warns about: "THIS IS FOR LABELS, NOT FOR ENTITLEMENT."
     Deciding not to sell someone Starter is an ENTITLEMENT decision wearing a label's clothes.
 
-    MEASURED COST, live on 2026-09-06: chat 1793689937 carried `linked_tier='starter'` written
+    MEASURED COST, live on 2026-09-06: chat last4 9937 carried `linked_tier='starter'` written
     once at /link on 2026-05-08 and NEVER refreshed — no plan mirror had ever been observed for
     it, and the server had answered that key INVALID 568 consecutive times since 2026-09-04. The
     picker read "starter" and offered them Pro at $49/$129 ONLY. A lapsed subscriber was refused

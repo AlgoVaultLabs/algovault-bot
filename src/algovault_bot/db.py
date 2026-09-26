@@ -289,7 +289,7 @@ ENTITLEMENT_STATE_MIRROR_MIGRATIONS = (
 #
 # `linked_tier` was written once at /link and never re-read, while the server's CURRENT tier
 # arrived in every entitlement response and was thrown away. Two copies of one fact, and the stale
-# copy was the one every label read: chat 1061466212 upgraded to `pro` on the server, kept
+# copy was the one every label read: chat last4 6212 upgraded to `pro` on the server, kept
 # `linked_tier='starter'` in the bot, and was shown "Starter plan" on every trade-call card while
 # its debits correctly charged the Pro allowance — the mirror already carried server truth for the
 # FIGURES and `linked_tier` never got the same discipline.
@@ -307,7 +307,7 @@ LINKED_TIER_MIRROR_MIGRATIONS = (
 # OPS-BOT-LINKED-TIER-REFRESH-W1 CH3 — THE LINK GETS A LIFECYCLE.
 #
 # Until now a link had creation and no other state: nothing ever re-asked the server, so a
-# revoked key kept paid treatment forever. Chat 1793689937 has been in exactly that state
+# revoked key kept paid treatment forever. Chat last4 9937 has been in exactly that state
 # since 2026-05-08 — `linked_tier='starter'`, `validate-key` answering 404 — and because
 # `linked_tier in PAID_TIERS` makes `consume_quota` a no-op, the bot-side 100/mo wall never
 # applied to them. Revenue leakage with no detector.

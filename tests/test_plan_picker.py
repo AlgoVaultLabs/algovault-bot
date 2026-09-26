@@ -542,16 +542,21 @@ def _linked(db: Database, chat_id: int, *, linked: str, mirror_tier: str | None,
                 )
 
 
+# The three live-chat regressions below use SYNTHETIC chat ids that keep each live chat's last4
+# (19937, 300162, 16212). The real ids are withheld from this public repo, and
+# `scripts/check-chat-id-literals.py` refuses them.
+
+
 def test_a_LAPSED_link_is_offered_the_FULL_ladder(db: Database) -> None:
-    """🛑 THE REGRESSION THIS EXISTS FOR. Live chat 1793689937, 2026-09-06.
+    """🛑 THE REGRESSION THIS EXISTS FOR. Live chat last4 9937, 2026-09-06.
 
     `linked_tier='starter'` written once at /link on 2026-05-08, NO plan mirror ever observed,
     and the server answering that key INVALID 568 consecutive times since 2026-09-04. R4 read
     `effective_tier.tier` (which falls back to `linked_tier`) and showed them Pro at $49/$129
     ONLY — refusing a lapsed subscriber the chance to re-buy the plan they lapsed from.
     """
-    _linked(db, 1793689937, linked="starter", mirror_tier=None)
-    state = get_quota_state(db, 1793689937)
+    _linked(db, 19937, linked="starter", mirror_tier=None)
+    state = get_quota_state(db, 19937)
     # The LABEL still reads starter, and that is correct — it is last-known, and says so.
     assert state.effective_tier.tier == "starter"
     assert state.effective_tier.source == "link"
@@ -565,9 +570,9 @@ def test_a_LAPSED_link_is_offered_the_FULL_ladder(db: Database) -> None:
 
 
 def test_a_FRESH_mirror_still_withholds_the_rung_it_names(db: Database) -> None:
-    """Live chat 8776880162: linked starter, mirror fresh and saying starter."""
-    _linked(db, 8776880162, linked="starter", mirror_tier="starter")
-    state = get_quota_state(db, 8776880162)
+    """Live chat last4 0162: linked starter, mirror fresh and saying starter."""
+    _linked(db, 300162, linked="starter", mirror_tier="starter")
+    state = get_quota_state(db, 300162)
     assert state.effective_tier.source == "mirror"
     assert picker_above_tier(state) == "starter"
     kb = keyboards.plan_picker_kb(resolve_ladder(db), "upgrade_command",
@@ -577,13 +582,13 @@ def test_a_FRESH_mirror_still_withholds_the_rung_it_names(db: Database) -> None:
 
 
 def test_the_mirror_OVERRIDES_a_stale_linked_tier(db: Database) -> None:
-    """Live chat 1061466212: linked_tier says starter, the fresh mirror says PRO.
+    """Live chat last4 6212: linked_tier says starter, the fresh mirror says PRO.
 
     The picker must follow the mirror — offering a Pro subscriber the Pro row because a
     four-month-old `/link` row still says "starter" is the same defect in the other direction.
     """
-    _linked(db, 1061466212, linked="starter", mirror_tier="pro")
-    state = get_quota_state(db, 1061466212)
+    _linked(db, 16212, linked="starter", mirror_tier="pro")
+    state = get_quota_state(db, 16212)
     assert state.effective_tier == ("pro", "mirror")
     assert picker_above_tier(state) == "pro"
     assert keyboards.plan_picker_kb(resolve_ladder(db), "upgrade_command",
