@@ -14,6 +14,15 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
+
+# OPS-BOT-CHATID-REDACT-W1 — capture git's ref lines BEFORE any block runs.
+# git writes `<local ref> <local sha> <remote ref> <remote sha>` to this hook's stdin ONCE, and
+# every block below inherits that stdin — so the first child that happens to read it would
+# silently swallow what the chat-id gate needs, and that gate would scan an EMPTY push range and
+# report PASS. Read it here, before anything else can. A TTY means a human ran this file by hand:
+# there is no push, so there are no refs (and `cat` would otherwise hang).
+if [ -t 0 ]; then PUSH_REFS=""; else PUSH_REFS="$(cat)"; fi
+
 echo "[pre-push] running lint + type checks (ruff + mypy)…"
 bash "$ROOT/scripts/lint.sh"
 
@@ -84,6 +93,36 @@ case "$ORPHAN_VERDICT" in
   *)
     printf '%s\n' "$ORPHAN_OUT" >&2
     echo "[pre-push] orphan gate emitted no verdict (INDETERMINATE) — NOT blocking, but it verified nothing." >&2 ;;
+esac
+
+# OPS-BOT-CHATID-REDACT-W1 — the chat-id literal gate, over exactly what this push PUBLISHES.
+#
+# This repo is PUBLIC, and real subscriber chat ids reached it as incident evidence: in comments,
+# test values, test names, docs and commit MESSAGES. CI's tree scan (`tests/test_chat_id_literals.py`)
+# runs only AFTER a push and never reads a message. This block hands the captured ref lines to
+# `--push-range`, which scans every commit being pushed — added lines AND messages. It is the one
+# place a leak can still be STOPPED rather than cleaned up by rewriting public history.
+#
+# 🛑 SAME CONTRACT AS THE BLOCKS ABOVE: gates on the TOKEN, never `$?`, and INDETERMINATE does not
+# block but is LOUD. `|| true` is LOAD-BEARING on BOTH captures, not just the first: under
+# `set -euo pipefail` a gate that prints NO token makes `grep` exit 1, which fails the verdict
+# pipeline and aborts the shell at that assignment — silently, exit 1, before the `case` runs.
+# Measured: `X="$(printf 'no token\n' | grep -oE '^V=[A-Z]+' | tail -1)"` exits 1 and prints nothing.
+echo "[pre-push] running chat-id literal gate…"
+IDLIT_PY="${ALGOVAULT_PY:-python3}"
+[ -x "$ROOT/.venv/bin/python" ] && IDLIT_PY="$ROOT/.venv/bin/python"
+IDLIT_OUT="$(printf '%s\n' "$PUSH_REFS" | "$IDLIT_PY" "$ROOT/scripts/check-chat-id-literals.py" --push-range 2>&1 || true)"
+IDLIT_VERDICT="$(printf '%s\n' "$IDLIT_OUT" | grep -oE '^CHAT_ID_LITERALS_VERDICT=[A-Z]+' | tail -1 || true)"
+case "$IDLIT_VERDICT" in
+  CHAT_ID_LITERALS_VERDICT=PASS)
+    echo "[pre-push] $IDLIT_VERDICT" ;;
+  CHAT_ID_LITERALS_VERDICT=FAIL)
+    printf '%s\n' "$IDLIT_OUT"
+    echo "[pre-push] $IDLIT_VERDICT — push refused." >&2
+    exit 1 ;;
+  *)
+    printf '%s\n' "$IDLIT_OUT" >&2
+    echo "[pre-push] chat-id literal gate emitted no verdict (INDETERMINATE) — NOT blocking, but it verified nothing." >&2 ;;
 esac
 
 echo "✓ pre-push checks passed"
