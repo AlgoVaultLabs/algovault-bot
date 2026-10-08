@@ -313,7 +313,21 @@ def _apply_link_observation(
     # inert, so it is logged at WARNING rather than absorbed. Retiring the ambiguity at its
     # source is OPS-VALIDATE-KEY-INDETERMINATE-W{NEXT}, after which this guard becomes
     # redundant defence rather than the only defence.
-    if not corroborated:
+    #
+    # ── REVENUE-DUNNING-BOUND-W1-V2 CH2 — ONE EXCEPTION, and why it is safe ──────────────────
+    #
+    # Since OPS-VALIDATE-KEY-INDETERMINATE-W1 a reason-bearing 404 is a DETERMINATION — an
+    # outage answers 503. What this guard still filters is a CONFIG-WIDE fault on the server
+    # (a lost price-ID env, a swapped Stripe key) that makes every key 404 at once. A reason in
+    # `SELF_CORROBORATING_REASONS` cannot come from one: the server states it only after Stripe
+    # answered for THIS subscription. So that INVALID advances its own streak with no peer.
+    #
+    # Without it, a cohort whose every member exhausted its retries — measured 2026-10-08:
+    # 3 linked chats, 0 ENTITLED, all past_due — would sit here forever, uncharged and, once
+    # the mirror is stale, uncapped. It never vouches for another chat: `corroborated` is built
+    # from `corroborates`, which excludes every INVALID. Everything below — the 72h AND
+    # MIN_INVALID_OBSERVATIONS teardown, the notice, the kill switch, the unlink — is unchanged.
+    if not corroborated and not check.self_corroborating:
         counts["uncorroborated"] += 1
         log.warning(
             '{"event": "link_invalid_uncorroborated", "chat_id": %d, "reason": "%s", '

@@ -550,3 +550,116 @@ def test_dry_run_revalidates_nothing_and_downgrades_nothing(db: Database) -> Non
         counts = entitlement_drain.drain_entitlement_debits(db.path, dry_run=True)
         v.assert_not_called()
     assert counts["revalidated"] == 0 and counts["downgraded"] == 0
+
+
+# ── REVENUE-DUNNING-BOUND-W1-V2 CH2 — the lapse can never stall for want of a corroborator ──
+#
+# MEASURED 2026-10-08 (vault `audits/REVENUE-DUNNING-BOUND-W1-step0.md`, F1): the live linked
+# cohort was 3 chats, 0 ENTITLED, all `past_due`. Once each one's retries are exhausted, every
+# key answers 404 in the same pass, the cohort guard reads that as an outage, and each chat
+# stays linked — uncharged (`key_invalid_404`) and, once its mirror is stale, uncapped —
+# forever. A `dunning_exhausted` 404 is not an outage shape: signal-MCP can emit it only after
+# Stripe answered for THAT subscription.
+
+EXHAUSTED = KeyCheck(
+    status="INVALID", tier=None, customer_id=None, reason="dunning_exhausted"
+)
+
+
+def test_an_ALL_EXHAUSTED_cohort_still_advances_every_streak(db: Database) -> None:
+    """The livelock shape: nobody left to corroborate, and the lapse proceeds anyway."""
+    counts = _drain(db, {2: EXHAUSTED, 3: EXHAUSTED, 4: EXHAUSTED})
+    assert counts["key_invalid"] == 3
+    assert counts["uncorroborated"] == 0
+    for chat_id in (2, 3, 4):
+        assert _row(db, chat_id)["link_invalid_streak"] == 1
+
+
+def test_a_self_corroborating_INVALID_never_vouches_for_OTHER_chats(db: Database) -> None:
+    counts = _drain(db, {2: INVALID, 3: EXHAUSTED, 4: INVALID})
+    assert counts["key_invalid"] == 1
+    assert counts["uncorroborated"] == 2
+    assert _row(db, 3)["link_invalid_streak"] == 1
+    assert _row(db, 2)["link_invalid_streak"] == 0, "no vouching for a corroboration-gated reason"
+    assert _row(db, 4)["link_invalid_streak"] == 0
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["unrecognised_price", "no_customer", "no_active_subscription", "subscription_ended"],
+)
+def test_every_other_reason_stays_corroboration_gated(db: Database, reason: str) -> None:
+    """The systemic guard is intact for every reason a config-wide fault can produce."""
+    other = KeyCheck(status="INVALID", tier=None, customer_id=None, reason=reason)
+    counts = _drain(db, {2: other, 3: other, 4: other})
+    assert counts["uncorroborated"] == 3
+    assert counts["key_invalid"] == 0
+    for chat_id in (2, 3, 4):
+        assert _row(db, chat_id)["link_invalid_streak"] == 0
+
+    _age_the_streak(db, 3, hours=999.0)
+    counts = _drain(db, {2: other, 3: other, 4: other})
+    assert counts["downgraded"] == 0, "and no age makes an uncorroborated one act"
+    assert _row(db, 3)["linked_api_key"] is not None
+
+
+def _sole_linked_exhausted(db: Database) -> None:
+    """Chat 3 alone in the cohort — the exact shape that used to livelock."""
+    db.unlink_subscriber(2)
+    db.unlink_subscriber(4)
+
+
+def test_a_self_corroborating_INVALID_past_the_grace_window_but_short_of_the_floor_holds(
+    db: Database,
+) -> None:
+    _sole_linked_exhausted(db)
+    _drain(db, {3: EXHAUSTED})
+    _age_the_streak(
+        db, 3, hours=LINK_INVALID_GRACE.total_seconds() / 3600.0 + 96, observations=1
+    )
+    counts = _drain(db, {3: EXHAUSTED})
+    assert counts["downgraded"] == 0, "elapsed alone is not sufficient"
+    assert _row(db, 3)["link_invalid_streak"] == 2
+
+
+def test_a_self_corroborating_INVALID_past_the_floor_but_inside_the_grace_window_holds(
+    db: Database,
+) -> None:
+    _sole_linked_exhausted(db)
+    for _ in range(MIN_INVALID_OBSERVATIONS + 1):
+        counts = _drain(db, {3: EXHAUSTED})
+        assert counts["downgraded"] == 0, "observations alone are not sufficient"
+    assert _row(db, 3)["link_invalid_streak"] == MIN_INVALID_OBSERVATIONS + 1
+    assert _row(db, 3)["linked_api_key"] is not None
+
+
+def test_a_SOLE_exhausted_subscriber_IS_notified_and_downgraded_past_BOTH_conditions(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contrast `test_a_sole_linked_subscriber_is_never_downgraded`: same shape, but the
+    reason proves the server asked Stripe, so the ratified lapse runs end to end."""
+    monkeypatch.delenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", raising=False)
+    _sole_linked_exhausted(db)
+    _drain(db, {3: EXHAUSTED})
+    _age_the_streak(db, 3, hours=LINK_INVALID_GRACE.total_seconds() / 3600.0 + 1)
+    with patch.object(entitlement_drain, "_send_downgrade_notice", return_value=True) as send:
+        counts = _drain(db, {3: EXHAUSTED})
+        assert send.call_count == 1
+    assert counts["downgraded"] == 1
+    r = _row(db, 3)
+    assert r["linked_api_key"] is None
+    assert r["link_downgrade_notice_at"] is not None
+
+
+def test_the_kill_switch_still_governs_a_self_corroborating_lapse(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALGOVAULT_LINK_DOWNGRADE_NOTICE_ENABLED", "0")
+    _sole_linked_exhausted(db)
+    _drain(db, {3: EXHAUSTED})
+    _age_the_streak(db, 3, hours=LINK_INVALID_GRACE.total_seconds() / 3600.0 + 1)
+    with patch.object(entitlement_drain, "_send_downgrade_notice", return_value=True) as send:
+        counts = _drain(db, {3: EXHAUSTED})
+        send.assert_not_called()
+    assert counts["downgraded"] == 1
+    assert _row(db, 3)["link_downgrade_notice_at"] is None

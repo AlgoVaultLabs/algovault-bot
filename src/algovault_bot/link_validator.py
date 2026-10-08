@@ -65,6 +65,25 @@ PLACEHOLDER_BYPASS_KEY: Final = "__C3_PLACEHOLDER__"
 
 KeyStatus = Literal["VALID", "DUNNING", "INVALID", "INDETERMINATE"]
 
+#: REVENUE-DUNNING-BOUND-W1-V2 CH2 — 404 reasons that carry their OWN evidence that signal-MCP
+#: answered from Stripe for THIS key, so the INVALID they name may advance its own streak with
+#: no cohort corroborator. See `KeyCheck.self_corroborating`.
+#:
+#: 🛑 THE ADMISSION BAR. A reason joins only if the server can emit it SOLELY after Stripe
+#: answered for THIS subscription — the customer, its subscription list AND its invoice list, on
+#: a recognised Price — and no config-wide fault can produce it. `dunning_exhausted` qualifies:
+#: it needs a recognised Price (a lost price-ID env yields `unrecognised_price` instead) and a
+#: complete invoice list (a failed or partial one is INDETERMINATE, a 503).
+#:
+#: Stays corroboration-gated, pinned by tests:
+#:   `unrecognised_price`      every key answers it at once when a price-ID env is lost
+#:   `no_customer`             every key answers it at once against a swapped Stripe key
+#:   `no_active_subscription`  this module's own default for a reasonless 404 — any route fault
+#: `subscription_ended`, `customer_deleted` and `no_subscription` have not been argued against
+#: the bar (OPS-BOT-UNCORROBORATED-INVALID-UNCAPPED-W{NEXT}); until one is, it stays gated.
+#: A new member is a one-line admission argued in its own wave, never a tidy-up.
+SELF_CORROBORATING_REASONS: Final = frozenset({"dunning_exhausted"})
+
 
 @dataclass(frozen=True)
 class KeyCheck:
@@ -111,6 +130,17 @@ class KeyCheck:
         safe to deploy in any order.
         """
         return self.status in ("VALID", "DUNNING")
+
+    @property
+    def self_corroborating(self) -> bool:
+        """May this INVALID advance its OWN streak with no cohort corroborator?
+
+        REVENUE-DUNNING-BOUND-W1-V2 CH2. Only a DETERMINED negative whose reason is in
+        `SELF_CORROBORATING_REASONS` — a reason the server states only after Stripe answered for
+        this subscription. Deliberately separate from `corroborates`: it lets ONE chat's lapse
+        proceed without a peer, and it never vouches for any other chat's INVALID.
+        """
+        return self.status == "INVALID" and self.reason in SELF_CORROBORATING_REASONS
 
 
 def _valid(tier: str, customer_id: str | None) -> KeyCheck:

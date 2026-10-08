@@ -351,3 +351,77 @@ def test_misconfigured_bot_yields_retry_not_invalid_key(
         "algovault_bot.messages", fromlist=["x"]
     ).link_invalid_key_message()
     assert _linked_state(tmp_db, 88) == (None, None)
+
+
+# ── REVENUE-DUNNING-BOUND-W1-V2 CH2 — a 404 whose reason carries its own evidence ──────
+#
+# signal-MCP answers `404 {"entitlement_state":"NOT_ENTITLED","reason":"dunning_exhausted"}`
+# only after Stripe answered for THAT subscription (customer, subscription list, invoice
+# list, on a recognised Price). Such an INVALID may advance its OWN streak without a
+# corroborating peer. It still never vouches for anyone else.
+
+EXHAUSTED_404 = {
+    "valid": False,
+    "entitlement_state": "NOT_ENTITLED",
+    "reason": "dunning_exhausted",
+    "subscription_status": "past_due",
+    "customer_id": "cus_exhausted",
+}
+
+
+def test_the_self_corroborating_set_is_exactly_the_one_admitted_reason() -> None:
+    """Admission is a written bar, one reason at a time — never a list that grows by habit."""
+    assert link_validator.SELF_CORROBORATING_REASONS == frozenset({"dunning_exhausted"})
+
+
+def test_row_404_dunning_exhausted_is_a_SELF_CORROBORATING_INVALID() -> None:
+    with _with_response(_Resp(404, EXHAUSTED_404)):
+        check = validate_api_key(SENTINEL_KEY)
+    assert check.status == "INVALID"
+    assert check.reason == "dunning_exhausted"
+    assert check.is_determined_invalid is True
+    assert check.self_corroborating is True
+    # 🛑 It advances its own streak; it never proves the validator is up for OTHER chats.
+    assert check.corroborates is False
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "unrecognised_price",
+        "no_customer",
+        "customer_deleted",
+        "no_subscription",
+        "subscription_ended",
+        "malformed_key",
+    ],
+)
+def test_row_404_every_other_reason_stays_corroboration_gated(reason: str) -> None:
+    """A lost price-ID env or a swapped Stripe key can make every key answer one of these at
+    once. None of them may act alone."""
+    body = {"valid": False, "entitlement_state": "NOT_ENTITLED", "reason": reason}
+    with _with_response(_Resp(404, body)):
+        check = validate_api_key(SENTINEL_KEY)
+    assert check.status == "INVALID" and check.reason == reason
+    assert check.self_corroborating is False
+
+
+def test_row_404_with_no_reason_keeps_the_default_and_is_not_self_corroborating() -> None:
+    with _with_response(_Resp(404, {"valid": False})):
+        check = validate_api_key(SENTINEL_KEY)
+    assert check.reason == "no_active_subscription"
+    assert check.self_corroborating is False
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        KeyCheck(status="VALID", tier="pro", customer_id="cus_x", reason="dunning_exhausted"),
+        KeyCheck(status="DUNNING", tier="pro", customer_id="cus_x", reason="dunning_exhausted"),
+        KeyCheck(status="INDETERMINATE", tier=None, customer_id=None, reason="dunning_exhausted"),
+    ],
+)
+def test_only_a_determined_INVALID_can_self_corroborate(check: KeyCheck) -> None:
+    """The reason text confers nothing on its own: self-corroboration is a property of a
+    DETERMINED negative, and an unknown is never one."""
+    assert check.self_corroborating is False
