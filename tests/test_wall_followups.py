@@ -45,6 +45,19 @@ def sends(monkeypatch: pytest.MonkeyPatch) -> _Sends:
     return captured
 
 
+@pytest.fixture(autouse=True)
+def _quota_clock_at_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pass runs at `NOW`, but `evaluate_delivery` decides whether the monthly window is live
+    from `quota._now()` — the REAL clock. Unpinned, every fixture window (opened a few days before
+    `NOW`) expired 30 days after `NOW`, and from 2026-10-07 these cases silently read "not walled":
+    a time bomb, not a regression. The decision's clock is pinned to the instant the pass runs at.
+    (Side-fix authorized in OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2; this file's owner is
+    GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2.)"""
+    from algovault_bot import quota
+
+    monkeypatch.setattr(quota, "_now", lambda: NOW)
+
+
 def _walled(db: Database, chat_id: int, *, days_ago: float, watches: int = 1) -> None:
     """A free chat, walled on the MONTHLY meter `days_ago` days back, inside a live window."""
     db.upsert_subscriber(chat_id, "u", "en")
