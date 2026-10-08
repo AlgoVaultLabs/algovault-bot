@@ -2,7 +2,7 @@
 
 ``list_due_watches`` used to mark a row due on RELATIVE age (``now - last_fetched_at >=
 TF_SECONDS``) and re-stamp the anchor at fetch COMPLETION, which happens seconds past the
-``OnCalendar=*:*:00`` tick. So every fire slipped later than the last one, forever. Measured
+then-``OnCalendar=*:*:00`` tick. So every fire slipped later than the last one, forever. Measured
 on the live box: ``00:44:04 -> 01:45:07 -> ... -> 13:56:03`` — exact +61min steps on a 1h row.
 
 The same repository already contained the correct primitive: ``timeframe_bucket_epoch``,
@@ -26,7 +26,7 @@ completes at :07 map to the same bucket and produce the same next due-time. No n
 and no migration — the row self-aligns on its first cycle.
 
 ── Why jitter is in WHOLE MINUTES ───────────────────────────────────────────
-The scheduler is ``OnCalendar=*:*:00``, a 60-SECOND tick, and ``FETCH_BUDGET_PER_MIN`` is a
+The scheduler is ``OnCalendar=*:*:10``, a 60-SECOND tick, and ``FETCH_BUDGET_PER_MIN`` is a
 PER-MINUTE budget. Sub-minute jitter cannot move a row into a different tick and would
 therefore relieve nothing. It is also a stable HASH, never ``random()``: a restart must not
 re-roll a row into a different minute, or the ratchet returns by another name.
@@ -51,9 +51,9 @@ DEFAULT_DISPATCH_OFFSET_PCT: Final[int] = 75
 # minute-resolution equivalent of Freqtrade opening trades "a few seconds after candle open".)
 DEFAULT_CLOSE_GRACE_MIN: Final[int] = 1
 DEFAULT_JITTER_WINDOW_MIN: Final[int] = 3
-# The scheduler grid: `algovault-bot-cron.timer` is OnCalendar=*:*:00, so every due-time is
-# rounded UP to the next whole minute. Any shift budget must reserve one of these or the fire
-# lands in the following bar.
+# The scheduler grid: `algovault-bot-cron.timer` is OnCalendar=*:*:10 (a 60 s period, phased 10 s
+# past each minute), so every due-time is rounded UP to the next tick. Any shift budget must
+# reserve one of these or the fire lands in the following bar.
 TICK_SECONDS: Final[int] = 60
 
 ENV_OFFSET_PCT: Final[str] = "ALGOVAULT_BOT_DISPATCH_OFFSET_PCT"
@@ -201,6 +201,36 @@ def target_epoch(
     jitter = jitter_minutes(chat_id, coin, timeframe, exchange, jitter_window) * 60
     shifted = t_sec - offset_seconds(timeframe, pct) - grace - jitter
     return timeframe_bucket_epoch(timeframe, shifted)
+
+
+def due_instant(
+    timeframe: str,
+    t_sec: int,
+    chat_id: int,
+    coin: str,
+    exchange: str,
+    *,
+    pct: int | None = None,
+    grace_min: int | None = None,
+    jitter_window: int | None = None,
+) -> int:
+    """The first instant at which the bucket containing ``t_sec`` is due for THIS row.
+
+    OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2. The dispatcher records this beside every
+    disposition it writes (``dispatch_ledger.due_epoch``), so a guard judging dispatch timing
+    reads the producer's OWN due-time and holds no copy of this schedule. A bash re-derivation
+    of it was the liveness probe's model, and it paged designed recovery as a fault every time
+    the producer gained a behaviour the copy did not have.
+
+    ``target_epoch`` plus the same shift it subtracts. The two are pinned together by a property
+    test over every timeframe and three config shapes: with the last stamp anywhere in the
+    previous bucket, ``is_due(tf, d, last)`` is True and ``is_due(tf, d - 1, last)`` is False.
+    """
+    kw = {"pct": pct, "grace_min": grace_min, "jitter_window": jitter_window}
+    grace = (close_grace_min() if grace_min is None else grace_min) * 60
+    jitter = jitter_minutes(chat_id, coin, timeframe, exchange, jitter_window) * 60
+    bucket = target_epoch(timeframe, t_sec, chat_id, coin, exchange, **kw)
+    return bucket + offset_seconds(timeframe, pct) + grace + jitter
 
 
 def is_due(

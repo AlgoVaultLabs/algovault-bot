@@ -23,7 +23,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from telegram import Bot, InlineKeyboardMarkup
@@ -40,7 +40,15 @@ from .cta import (
     referral_nudge_text,
     trade_call_cta_text,
 )
-from .db import Database, DEFAULT_DB_PATH, MAX_FETCH_ATTEMPTS_PER_BUCKET
+from .db import (
+    DEFAULT_DB_PATH,
+    DISPATCH_LEDGER_RETENTION_SECONDS,
+    MAX_FETCH_ATTEMPTS_PER_BUCKET,
+    Database,
+    Disposition,
+    _iso_to_epoch,
+)
+from .dispatch_schedule import due_instant, target_epoch
 from .log_setup import log_alert_event
 from .mcp_client import McpClient, McpError
 from .notices import compose_caption_cta
@@ -87,6 +95,10 @@ class WatchRow:
     # know: `last_verdict_streak` counts consecutive BARS, and a retry is the same bar.
     # Defaulted so the ~9 test doubles and every other constructor stay valid.
     fetch_fail_streak: int = 0
+    # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 — the anchor as it stood when the tick listed the
+    # row. None (never fetched, or unparseable: `is_due`'s own reading) makes a service
+    # `serviced_first`, which the dispatch-timing guard counts and never judges.
+    last_fetched_epoch: int | None = None
 
 
 def _row_get(r: Any, key: str) -> Any:
@@ -110,6 +122,7 @@ def _row_from_sqlite(r: Any) -> WatchRow:
         last_verdict=r["last_verdict"],
         last_verdict_streak=int(r["last_verdict_streak"] or 0),
         fetch_fail_streak=int(_row_get(r, "fetch_fail_streak") or 0),
+        last_fetched_epoch=_iso_to_epoch(_row_get(r, "last_fetched_at")),
     )
 
 
@@ -454,7 +467,7 @@ async def process_one_row(
     bot: Bot, mcp: McpClient, db: Database, row: WatchRow
 ) -> dict[str, Any]:
     """Process a single watchlist row. Returns a structured-log dict for journal."""
-    fetched: dict[str, str] = {"regime": "skip", "trade_call": "skip"}
+    fetched: dict[str, Any] = {"regime": "skip", "trade_call": "skip"}
     # Set by either lane's `except McpError`. Decides whether this tick SERVICED the bucket.
     mcp_failed = False
     new_verdict = row.last_verdict or ""
@@ -709,11 +722,15 @@ async def process_one_row(
     # flap-suppression state, and the regime lane already establishes (in its quota-refusal
     # branch) that this state must survive a non-delivery.
     if mcp_failed:
-        attempts, bucket_advanced = db.record_fetch_failure(
+        attempts, bucket_advanced, stamped = db.record_fetch_failure(
             row.chat_id, row.coin, row.timeframe, row.exchange,
             new_verdict, new_streak, regime_seen,
         )
         fetched["fetch"] = "gave_up" if bucket_advanced else f"retry_{attempts}"
+        # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 — this tick's disposition for the dispatch
+        # ledger, and the stamp the give-up tick actually wrote (None while the bucket is open).
+        fetched["disposition"] = "gave_up" if bucket_advanced else "fetch_failed"
+        fetched["fired_epoch"] = stamped
         log_alert_event(
             "watch_fetch_failed",
             chat_id=row.chat_id,
@@ -727,9 +744,12 @@ async def process_one_row(
             bar_abandoned=bucket_advanced,
         )
     else:
-        db.update_watch_after_fetch(
+        fetched["fired_epoch"] = db.update_watch_after_fetch(
             row.chat_id, row.coin, row.timeframe, row.exchange,
             new_verdict, new_streak, regime_seen,
+        )
+        fetched["disposition"] = (
+            "serviced_first" if row.last_fetched_epoch is None else "serviced"
         )
     return fetched
 
@@ -810,6 +830,82 @@ def _record_saturation(deferred: int) -> None:
         log.warning("saturation bookkeeping failed: %s", e)
 
 
+@dataclass
+class DispatchTick:
+    """OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 R2.3 — the tick's own account, written ONCE.
+
+    Exactly one disposition per due row. Every path out of `run_cycle` that leaves a due row
+    unstamped is a disposition here: budget deferral, deadline deferral, skip-exhausted, a fetch
+    failure or give-up, a row exception — and the seventh, which this wave's Plan Mode found
+    measured and recurring: the tick ITSELF dying. `McpClient`'s initialise raises a bare `httpx`
+    error while signal-MCP is being recreated, the exception escapes `run_cycle`, and every due row
+    was left unstamped with no record at all (10 such ticks in the 8 days to 2026-10-07).
+
+    Rows the tick did not account for when it ERRORED are recorded `errored`. A gap on a CLEAN tick
+    is a bookkeeping bug: it is reported (`dispatch_ledger_gap`) and NOT papered over, so the
+    auditor sees an unexplained tick — noise, never silence.
+    """
+
+    now_epoch: int
+    dispositions: dict[tuple[int, str, str, str], tuple[Disposition, int | None]] = field(
+        default_factory=dict
+    )
+    errored: bool = False
+
+    def record(
+        self, row: WatchRow, disposition: Disposition, fired_epoch: int | None = None
+    ) -> None:
+        self.dispositions[(row.chat_id, row.coin, row.timeframe, row.exchange)] = (
+            disposition,
+            fired_epoch,
+        )
+
+    def flush(self, db: Database, due_rows: list[WatchRow]) -> None:
+        """One write per tick, and it never raises (R11): a ledger failure must neither block
+        delivery nor mask the tick's own exception. It is logged, and the auditor then sees
+        missing provenance."""
+        try:
+            batch: list[tuple] = []
+            gaps = 0
+            for row in due_rows:
+                got = self.dispositions.get((row.chat_id, row.coin, row.timeframe, row.exchange))
+                if got is None and not self.errored:
+                    gaps += 1
+                    continue
+                disposition, fired = got if got is not None else ("errored", None)
+                # The bucket this tick acted on and its due-time, from the ONE derivation the
+                # tick's own `is_due` used — never a second model of the schedule.
+                bucket = target_epoch(
+                    row.timeframe, self.now_epoch, row.chat_id, row.coin, row.exchange
+                )
+                due = due_instant(
+                    row.timeframe, self.now_epoch, row.chat_id, row.coin, row.exchange
+                )
+                batch.append((
+                    row.chat_id, row.coin, row.timeframe, row.exchange, bucket, disposition,
+                    due, self.now_epoch, self.now_epoch, fired,
+                ))
+            if gaps:
+                log_alert_event("dispatch_ledger_gap", rows=gaps, tick=self.now_epoch)
+            db.record_dispatch_dispositions(batch)
+        except Exception as e:  # noqa: BLE001 — the ledger must never break the cycle
+            log_alert_event(
+                "dispatch_ledger_write_failed", phase="write", err=str(e)[:200],
+                tick=self.now_epoch,
+            )
+            log.warning("dispatch ledger write failed: %s", e)
+            return
+        if self.now_epoch % 3600 < 60:   # once per hour, inside the tick (R11)
+            try:
+                db.prune_dispatch_ledger(self.now_epoch - DISPATCH_LEDGER_RETENTION_SECONDS)
+            except Exception as e:  # noqa: BLE001
+                log_alert_event(
+                    "dispatch_ledger_write_failed", phase="prune", err=str(e)[:200],
+                    tick=self.now_epoch,
+                )
+                log.warning("dispatch ledger prune failed: %s", e)
+
+
 async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: str) -> dict[str, int]:
     """One cron-fire cycle. Routes due rows through the C2 fetch budget
     (skip-exhausted → fair-share round-robin → TF-priority → deadline guard) so
@@ -822,146 +918,166 @@ async def run_cycle(token: str, db_path: str, mcp_url: str | None, bypass_key: s
     due_rows_raw = db.list_due_watches(now_epoch, TF_SECONDS)
     due_rows = [_row_from_sqlite(r) for r in due_rows_raw]
 
-    counts: dict[str, int] = {
-        "due": len(due_rows),
-        "regime_fired": 0,
-        "calls_fired": 0,
-        "errors": 0,
-        "processed": 0,
-        "deferred": 0,
-        "skipped_exhausted": 0,
-        "active_users": 0,
-        "budget": fetch_budget.fetch_budget_per_min(),
-        "fetch_p50_ms": 0,
-        "fetch_p95_ms": 0,
-    }
-    if not due_rows:
-        _record_saturation(0)  # clean tick resets the sustained-deferred counter
-        return counts
-
-    # C2: skip-exhausted (compute once per distinct `calls` owner) + budget +
-    # fair-share + TF-priority. Deferred rows are simply not marked fetched →
-    # they stay due and are picked up next tick.
-    budget = counts["budget"]
-    calls_owners = {r.chat_id for r in due_rows if r.alert_type == "calls"}
-    # BOT-QUOTA-REFUSAL-SEAM-W1: evaluate ONCE per distinct owner and project from
-    # that decision — both the scheduler's skip set and the notice below read the
-    # same snapshot rather than deriving it twice.
-    # The NOTIFY set is every due owner; the SKIP set stays `calls`-only. Those are
-    # two different questions and conflating them is how this wave shipped a hole in
-    # its own fix: `alert_type == "calls"` is a fetch-BUDGET criterion (which rows are
-    # worth an MCP call), and reusing it for the announcement left `both`-type and
-    # regime-only owners unreachable. Measured 26 minutes after the first deploy —
-    # two `calls`-type walled users notified within 63s, while a third (`both`, fetched
-    # every 5 min) had ZERO refusal telemetry, because its in-row refusal only fires on
-    # an actionable BUY/SELL and its verdicts were all HOLD. A walled user must not
-    # wait for a signal they are barred from receiving in order to learn they are barred.
-    notify_owners = {r.chat_id for r in due_rows}
-    decisions = {cid: evaluate_delivery(db, cid) for cid in notify_owners}
-    exhausted = {cid for cid in calls_owners if not decisions[cid].allowed}
-    # This pre-skip is a FETCH-BUDGET optimisation, and it must never again be the
-    # thing that decides a user hears nothing. It drops the row before
-    # `process_one_row` runs, which is exactly why that function's refusal branch was
-    # unreachable for an already-walled user and why two subscribers were refused
-    # ~10,000 times in silence. Announce the episode HERE, before dropping the rows.
-    # `refuse_and_notify` no-ops once the episode is announced, so the cost is one
-    # message per user per 30-day window — not one per cycle.
-    for cid in sorted(cid for cid, d in decisions.items() if not d.allowed):
-        await refuse_and_notify(
-            db,
-            cid,
-            "watch",
-            send=_sender(bot, cid, db),
-            decision=decisions[cid],
-        )
-    sched = fetch_budget.schedule(
-        due_rows, budget=budget, is_exhausted=lambda cid: cid in exhausted
-    )
-    counts["skipped_exhausted"] = sched.stats["skipped_exhausted"]
-    counts["active_users"] = sched.stats["active_users"]
-
-    from .mcp_client import McpClient, McpClientConfig
-
-    cfg = McpClientConfig(
-        url=mcp_url or "http://127.0.0.1:3000/mcp",
-        internal_bypass_key=bypass_key,
-    )
-    deadline = fetch_budget.tick_deadline_sec()
-    concurrency = fetch_budget.fetch_concurrency()
-    tick_start = time.monotonic()
-    latencies: list[float] = []
-    deadline_deferred = 0
-
-    # OPS-BOT-DISPATCH-LATENCY-W1 CH3 — CONCURRENT, SHARDED BY chat_id.
-    #
-    # The tick was a plain `for` with one `await` per row, so its wall time was the SUM of the
-    # row times. Journal arithmetic confirmed it: elapsed / (rows x per-row p50) sat at 1.34,
-    # a sequential sum, while elapsed / p95 sat at 4.5. That ceiling is the whole reason
-    # `FETCH_BUDGET_PER_MIN` exists at 30, and the reason the jitter window exists to spread
-    # rows across ticks in the first place.
-    #
-    # Rows are grouped by chat_id and the GROUPS run concurrently while each group stays
-    # SEQUENTIAL internally. That is deliberate and it is the cheap half of CH2's guarantee:
-    # two rows for the same subscriber can never be in flight together, so the quota
-    # gate -> send -> consume span is never raced against itself no matter what `concurrency`
-    # is set to. With 105 rows across 65 chat_ids most groups are size 1, so the shard costs
-    # almost nothing in parallelism and buys the invariant outright.
-    async def _run_chat_group(rows: list[WatchRow]) -> None:
-        for row in rows:
-            # The wall-clock guard stays BETWEEN rows, where it has always been — it defers
-            # what has not started rather than cancelling work in flight. Cancelling mid-row
-            # is the dangerous shape: `process_one_row` can be between a delivered Telegram
-            # message and its `record_call_delivered`, and killing it there would hand out a
-            # free alert or lose a bar. A group that is already past the deadline simply stops.
-            if time.monotonic() - tick_start > deadline:
-                nonlocal deadline_deferred
-                deadline_deferred += 1
-                continue
-            row_start = time.monotonic()
-            try:
-                async with sem:
-                    fetched = await process_one_row(bot, mcp, db, row)
-                counts["processed"] += 1
-                if fetched.get("regime") == "fired":
-                    counts["regime_fired"] += 1
-                if fetched.get("trade_call") == "fired":
-                    counts["calls_fired"] += 1
-            except Exception as e:  # noqa: BLE001
-                counts["errors"] += 1
-                log.exception(
-                    "row processing failed: %s/%s/%s — %s",
-                    row.coin, row.timeframe, row.exchange, e,
-                )
-            finally:
-                latencies.append(time.monotonic() - row_start)
-
-    by_chat: dict[int, list[WatchRow]] = {}
-    for row in sched.scheduled:
-        by_chat.setdefault(row.chat_id, []).append(row)
-
-    sem = asyncio.Semaphore(concurrency)
+    # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 — every due row gets exactly one disposition
+    # and the tick's account is written once, in `finally`, whatever happens below. The body
+    # stays HERE (not in a helper): `quota.REFUSAL_LANES` names `run_cycle` as a push lane.
+    tick = DispatchTick(now_epoch)
     try:
-        with McpClient(cfg) as mcp:
-            await asyncio.gather(*(_run_chat_group(g) for g in by_chat.values()))
-    except McpError as e:
-        log.error("mcp client init failed: %s", e)
-        counts["errors"] += 1
+        counts: dict[str, int] = {
+            "due": len(due_rows),
+            "regime_fired": 0,
+            "calls_fired": 0,
+            "errors": 0,
+            "processed": 0,
+            "deferred": 0,
+            "skipped_exhausted": 0,
+            "active_users": 0,
+            "budget": fetch_budget.fetch_budget_per_min(),
+            "fetch_p50_ms": 0,
+            "fetch_p95_ms": 0,
+        }
+        if not due_rows:
+            _record_saturation(0)  # clean tick resets the sustained-deferred counter
+            return counts
 
-    if deadline_deferred:
-        log.warning(
-            json.dumps({
-                "event": "fetch_tick_deadline_hit",
-                "deadline_s": deadline,
-                "deadline_deferred": deadline_deferred,
-            })
+        # C2: skip-exhausted (compute once per distinct `calls` owner) + budget +
+        # fair-share + TF-priority. Deferred rows are simply not marked fetched →
+        # they stay due and are picked up next tick.
+        budget = counts["budget"]
+        calls_owners = {r.chat_id for r in due_rows if r.alert_type == "calls"}
+        # BOT-QUOTA-REFUSAL-SEAM-W1: evaluate ONCE per distinct owner and project from
+        # that decision — both the scheduler's skip set and the notice below read the
+        # same snapshot rather than deriving it twice.
+        # The NOTIFY set is every due owner; the SKIP set stays `calls`-only. Those are
+        # two different questions and conflating them is how this wave shipped a hole in
+        # its own fix: `alert_type == "calls"` is a fetch-BUDGET criterion (which rows are
+        # worth an MCP call), and reusing it for the announcement left `both`-type and
+        # regime-only owners unreachable. Measured 26 minutes after the first deploy —
+        # two `calls`-type walled users notified within 63s, while a third (`both`, fetched
+        # every 5 min) had ZERO refusal telemetry, because its in-row refusal only fires on
+        # an actionable BUY/SELL and its verdicts were all HOLD. A walled user must not
+        # wait for a signal they are barred from receiving in order to learn they are barred.
+        notify_owners = {r.chat_id for r in due_rows}
+        decisions = {cid: evaluate_delivery(db, cid) for cid in notify_owners}
+        exhausted = {cid for cid in calls_owners if not decisions[cid].allowed}
+        # This pre-skip is a FETCH-BUDGET optimisation, and it must never again be the
+        # thing that decides a user hears nothing. It drops the row before
+        # `process_one_row` runs, which is exactly why that function's refusal branch was
+        # unreachable for an already-walled user and why two subscribers were refused
+        # ~10,000 times in silence. Announce the episode HERE, before dropping the rows.
+        # `refuse_and_notify` no-ops once the episode is announced, so the cost is one
+        # message per user per 30-day window — not one per cycle.
+        for cid in sorted(cid for cid, d in decisions.items() if not d.allowed):
+            await refuse_and_notify(
+                db,
+                cid,
+                "watch",
+                send=_sender(bot, cid, db),
+                decision=decisions[cid],
+            )
+        sched = fetch_budget.schedule(
+            due_rows, budget=budget, is_exhausted=lambda cid: cid in exhausted
         )
-    counts["concurrency"] = concurrency
+        counts["skipped_exhausted"] = sched.stats["skipped_exhausted"]
+        counts["active_users"] = sched.stats["active_users"]
+        for row in sched.skipped:
+            tick.record(row, "skipped_exhausted")
+        for row in sched.deferred:
+            tick.record(row, "deferred_budget")
 
-    total_deferred = sched.stats["deferred"] + deadline_deferred
-    counts["deferred"] = total_deferred
-    counts["fetch_p50_ms"], counts["fetch_p95_ms"] = _percentiles_ms(latencies)
-    _record_saturation(total_deferred)
-    return counts
+        from .mcp_client import McpClient, McpClientConfig
+
+        cfg = McpClientConfig(
+            url=mcp_url or "http://127.0.0.1:3000/mcp",
+            internal_bypass_key=bypass_key,
+        )
+        deadline = fetch_budget.tick_deadline_sec()
+        concurrency = fetch_budget.fetch_concurrency()
+        tick_start = time.monotonic()
+        latencies: list[float] = []
+        deadline_deferred = 0
+
+        # OPS-BOT-DISPATCH-LATENCY-W1 CH3 — CONCURRENT, SHARDED BY chat_id.
+        #
+        # The tick was a plain `for` with one `await` per row, so its wall time was the SUM of the
+        # row times. Journal arithmetic confirmed it: elapsed / (rows x per-row p50) sat at 1.34,
+        # a sequential sum, while elapsed / p95 sat at 4.5. That ceiling is the whole reason
+        # `FETCH_BUDGET_PER_MIN` exists at 30, and the reason the jitter window exists to spread
+        # rows across ticks in the first place.
+        #
+        # Rows are grouped by chat_id and the GROUPS run concurrently while each group stays
+        # SEQUENTIAL internally. That is deliberate and it is the cheap half of CH2's guarantee:
+        # two rows for the same subscriber can never be in flight together, so the quota
+        # gate -> send -> consume span is never raced against itself no matter what `concurrency`
+        # is set to. With 105 rows across 65 chat_ids most groups are size 1, so the shard costs
+        # almost nothing in parallelism and buys the invariant outright.
+        async def _run_chat_group(rows: list[WatchRow]) -> None:
+            for row in rows:
+                # The wall-clock guard stays BETWEEN rows, where it has always been — it defers
+                # what has not started rather than cancelling work in flight. Cancelling mid-row
+                # is the dangerous shape: `process_one_row` can be between a delivered Telegram
+                # message and its `record_call_delivered`, and killing it there would hand out a
+                # free alert or lose a bar. A group that is already past the deadline simply stops.
+                if time.monotonic() - tick_start > deadline:
+                    nonlocal deadline_deferred
+                    deadline_deferred += 1
+                    tick.record(row, "deferred_deadline")
+                    continue
+                row_start = time.monotonic()
+                try:
+                    async with sem:
+                        fetched = await process_one_row(bot, mcp, db, row)
+                    tick.record(row, fetched["disposition"], fetched.get("fired_epoch"))
+                    counts["processed"] += 1
+                    if fetched.get("regime") == "fired":
+                        counts["regime_fired"] += 1
+                    if fetched.get("trade_call") == "fired":
+                        counts["calls_fired"] += 1
+                except Exception as e:  # noqa: BLE001
+                    counts["errors"] += 1
+                    tick.record(row, "errored")
+                    log.exception(
+                        "row processing failed: %s/%s/%s — %s",
+                        row.coin, row.timeframe, row.exchange, e,
+                    )
+                finally:
+                    latencies.append(time.monotonic() - row_start)
+
+        by_chat: dict[int, list[WatchRow]] = {}
+        for row in sched.scheduled:
+            by_chat.setdefault(row.chat_id, []).append(row)
+
+        sem = asyncio.Semaphore(concurrency)
+        try:
+            with McpClient(cfg) as mcp:
+                await asyncio.gather(*(_run_chat_group(g) for g in by_chat.values()))
+        except McpError as e:
+            log.error("mcp client init failed: %s", e)
+            counts["errors"] += 1
+            # No scheduled row was processed: `flush` records each unaccounted one `errored`.
+            tick.errored = True
+
+        if deadline_deferred:
+            log.warning(
+                json.dumps({
+                    "event": "fetch_tick_deadline_hit",
+                    "deadline_s": deadline,
+                    "deadline_deferred": deadline_deferred,
+                })
+            )
+        counts["concurrency"] = concurrency
+
+        total_deferred = sched.stats["deferred"] + deadline_deferred
+        counts["deferred"] = total_deferred
+        counts["fetch_p50_ms"], counts["fetch_p95_ms"] = _percentiles_ms(latencies)
+        _record_saturation(total_deferred)
+        return counts
+    except BaseException:
+        # Record only: the crash behaviour (exit 1, retried next tick) is unchanged.
+        tick.errored = True
+        raise
+    finally:
+        tick.flush(db, due_rows)
 
 
 # ── scan-digest verdict rendering ─────────────────────────────────────────────

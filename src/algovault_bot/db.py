@@ -17,7 +17,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final, Iterator
+from typing import Final, Iterator, Literal, Sequence, get_args
 
 from .dispatch_schedule import is_due
 
@@ -406,6 +406,71 @@ FETCH_RETRY_MIGRATIONS = (
 # shortest schedulable timeframe (3m; 1m is excluded from PUSH_TIMEFRAMES) so a retry can never
 # leak into the following bar even at the fastest cadence.
 MAX_FETCH_ATTEMPTS_PER_BUCKET: Final = 3
+
+# OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 R1 — THE DISPATCHER'S OWN ACCOUNT OF EACH TICK.
+#
+# Only the producer knows why a due row was serviced on the tick it was, or not at all: a budget
+# or deadline deferral, a bounded fetch retry, an exception, an exhausted owner, a first fetch.
+# Until this table every one of those left at most a count, so the liveness guard had to
+# re-derive the schedule in bash and guess — and it paged designed recovery as a fault every time
+# the producer gained a behaviour the copy did not have (six fix commits to that copy, then the
+# 2026-10-07 page: a 4h-boundary budget deferral read as "the offset value is wrong").
+#
+# ONE row per (row, bucket, disposition); `n` counts the ticks that disposition held. The
+# disposition set is CLOSED and enforced twice from ONE list: the `Disposition` Literal below
+# and the SQL CHECK generated from it. ⚠ SQLite cannot ALTER a CHECK: a new member needs a
+# table-rebuild migration, or every write of it fails the CHECK on an EXISTING database and the
+# tick logs `dispatch_ledger_write_failed` (noise, never silence — R11).
+Disposition = Literal[
+    "serviced",
+    "serviced_first",
+    "fetch_failed",
+    "gave_up",
+    "errored",
+    "deferred_budget",
+    "deferred_deadline",
+    "skipped_exhausted",
+]
+DISPOSITIONS: Final[tuple[str, ...]] = get_args(Disposition)
+# The three that write `watchlists.last_fetched_at`; `fired_epoch` is that stamp.
+STAMPING_DISPOSITIONS: Final[frozenset[str]] = frozenset(
+    {"serviced", "serviced_first", "gave_up"}
+)
+# Eight days: the auditor's longest lookback is three serviced 1d buckets plus realignment.
+DISPATCH_LEDGER_RETENTION_SECONDS: Final = 8 * 86_400
+
+DISPATCH_LEDGER_MIGRATIONS = (
+    "CREATE TABLE IF NOT EXISTS dispatch_ledger ("
+    "  chat_id      INTEGER NOT NULL,"
+    "  coin         TEXT    NOT NULL,"
+    "  timeframe    TEXT    NOT NULL,"
+    "  exchange     TEXT    NOT NULL,"
+    "  bucket_epoch INTEGER NOT NULL,"
+    "  disposition  TEXT    NOT NULL CHECK (disposition IN ("
+    + ",".join(f"'{d}'" for d in DISPOSITIONS)
+    + ")),"
+    "  due_epoch    INTEGER NOT NULL,"
+    "  first_tick   INTEGER NOT NULL,"
+    "  last_tick    INTEGER NOT NULL,"
+    "  n            INTEGER NOT NULL DEFAULT 1,"
+    "  fired_epoch  INTEGER,"
+    "  PRIMARY KEY (chat_id, coin, timeframe, exchange, bucket_epoch, disposition)"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_dispatch_ledger_tf_bucket"
+    " ON dispatch_ledger(timeframe, bucket_epoch)",
+    "CREATE INDEX IF NOT EXISTS idx_dispatch_ledger_bucket ON dispatch_ledger(bucket_epoch)",
+)
+
+# A repeat of the same disposition in the same bucket is a further TICK of it, never a second
+# row: `n` advances, `last_tick` moves, `fired_epoch` keeps the first stamp it was given.
+_DISPATCH_LEDGER_UPSERT = (
+    "INSERT INTO dispatch_ledger (chat_id, coin, timeframe, exchange, bucket_epoch, disposition,"
+    " due_epoch, first_tick, last_tick, n, fired_epoch)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"
+    " ON CONFLICT(chat_id, coin, timeframe, exchange, bucket_epoch, disposition) DO UPDATE SET"
+    " n = n + 1, last_tick = excluded.last_tick,"
+    " fired_epoch = COALESCE(excluded.fired_epoch, fired_epoch)"
+)
 
 QUOTA_PARITY_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN alerts_day_count INTEGER NOT NULL DEFAULT 0",
@@ -828,6 +893,9 @@ class Database:
                 # GROWTH-TG-NOTICE-COMPOSER-AND-WALL-CADENCE-W1-V2 (2026-09-08): the OUTBOUND
                 # notice ledger — what we have already told this chat, this episode.
                 *NOTICE_LEDGER_MIGRATIONS,
+                # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 (2026-10-08): one disposition per due
+                # row per tick — the record the dispatch-timing guard judges. Additive, LAST.
+                *DISPATCH_LEDGER_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -2060,9 +2128,12 @@ class Database:
         last_verdict: str,
         last_verdict_streak: int,
         regime_last_seen: str | None,
-    ) -> None:
+    ) -> int | None:
+        """Stamp the bucket as SERVICED. Returns the epoch actually written to
+        `last_fetched_at` (RETURNING — the dispatch ledger records this exact value as
+        `fired_epoch`, never a second clock read), or None when the row is gone."""
         with self._cursor() as cur:
-            cur.execute(
+            row = cur.execute(
                 """
                 UPDATE watchlists
                 SET last_fetched_at = datetime('now'),
@@ -2071,9 +2142,38 @@ class Database:
                     regime_last_seen = COALESCE(?, regime_last_seen),
                     fetch_fail_streak = 0
                 WHERE chat_id = ? AND coin = ? AND timeframe = ? AND exchange = ?
+                RETURNING last_fetched_at
                 """,
                 (last_verdict, last_verdict_streak, regime_last_seen, chat_id, coin, timeframe, exchange),
-            )
+            ).fetchone()
+        return None if row is None else _iso_to_epoch(row["last_fetched_at"])
+
+    def record_dispatch_dispositions(self, rows: Sequence[tuple]) -> int:
+        """OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 R1 — write one tick's dispositions.
+
+        Each tuple is `(chat_id, coin, timeframe, exchange, bucket_epoch, disposition, due_epoch,
+        tick, tick, fired_epoch)`. ONE transaction, one `executemany`, so a tick's account is
+        written whole or not at all — a half-written tick would read as rows the dispatcher never
+        acted on. Returns the number of rows written.
+        """
+        if not rows:
+            return 0
+        with self._cursor() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                cur.executemany(_DISPATCH_LEDGER_UPSERT, rows)
+            except BaseException:
+                cur.execute("ROLLBACK")
+                raise
+            cur.execute("COMMIT")
+        return len(rows)
+
+    def prune_dispatch_ledger(self, before_epoch: int) -> int:
+        """Drop ledger rows whose bucket opened before `before_epoch` (retention, R11). Keyed on
+        `bucket_epoch` so the delete walks `idx_dispatch_ledger_bucket`."""
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM dispatch_ledger WHERE bucket_epoch < ?", (int(before_epoch),))
+            return int(cur.rowcount)
 
     def consume_quota_atomic(
         self,
@@ -2167,14 +2267,16 @@ class Database:
         last_verdict_streak: int,
         regime_last_seen: str | None,
         max_attempts: int = MAX_FETCH_ATTEMPTS_PER_BUCKET,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int, bool, int | None]:
         """The failure counterpart of :meth:`update_watch_after_fetch`.
 
         Persists what the tick LEARNED (verdict / streak / regime_last_seen — flap-suppression
         state, which must survive a non-delivery exactly as it survives a quota refusal) while
         holding the dispatch bucket OPEN so the row is retried on the next tick.
 
-        Returns ``(attempts_used, bucket_advanced)``.
+        Returns ``(attempts_used, bucket_advanced, stamped_epoch)``. ``stamped_epoch`` is the
+        `last_fetched_at` the give-up tick wrote (RETURNING), and None whenever the bucket was
+        held open — the dispatch ledger records it as that tick's `fired_epoch`.
 
         ONE STATEMENT, deliberately. Read-then-write here would be a lost-update race against
         the interactive `algovault-bot.service`, which shares this database file — the same
@@ -2210,8 +2312,9 @@ class Database:
         if row is None:
             # Row deleted mid-tick (an /unwatch between dispatch and failure). Nothing to
             # retry and nothing to hold open.
-            return (0, True)
+            return (0, True, None)
         # fetch_fail_streak reads 0 on the give-up tick, so derive `advanced` from the counter
         # rather than re-reading the clock: 0 after a failure means the CASE took the cap arm.
         advanced = row["fetch_fail_streak"] == 0
-        return (max_attempts if advanced else row["fetch_fail_streak"], advanced)
+        stamped = _iso_to_epoch(row["last_fetched_at"]) if advanced else None
+        return (max_attempts if advanced else row["fetch_fail_streak"], advanced, stamped)

@@ -85,6 +85,12 @@ DECLARED_ENTRYPOINTS: dict[str, str] = {
         "schema owner. Its migrations run at startup and its CRUD is reached through the "
         "`Database` object rather than by importing the module by name from every lane"
     ),
+    "dispatch_audit": (
+        "`closedbar-w1-liveness.sh` (signal-MCP repo, signal-1 root cron `11 * * * *`) runs "
+        "`python -B -m algovault_bot.dispatch_audit` — the read-only reader of the dispatch "
+        "ledger the cron engine writes; writer and reader ship in the same commit "
+        "(OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2)"
+    ),
 }
 
 TOKEN = "ORPHAN_MODULES_VERDICT="

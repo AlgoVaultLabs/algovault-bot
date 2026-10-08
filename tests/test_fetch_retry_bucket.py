@@ -279,8 +279,12 @@ def test_record_fetch_failure_tolerates_a_row_deleted_mid_tick(tmp_db: Database)
     """An /unwatch between dispatch and failure leaves nothing to update. The UPDATE matches
     zero rows and RETURNING yields None — that must not raise inside the alert path."""
     tmp_db.upsert_subscriber(3, "u", "en")
-    attempts, advanced = tmp_db.record_fetch_failure(3, "GONE", "1h", "BINANCE", "", 0, None)
-    assert (attempts, advanced) == (0, True)
+    # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2: the return gained the stamp the give-up tick
+    # wrote; a deleted row stamped nothing, so it is None.
+    attempts, advanced, stamped = tmp_db.record_fetch_failure(
+        3, "GONE", "1h", "BINANCE", "", 0, None
+    )
+    assert (attempts, advanced, stamped) == (0, True, None)
 
 
 # ── RED-verify: prove the guarantee can fail ───────────────────────────────

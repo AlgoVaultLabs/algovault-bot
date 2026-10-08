@@ -110,6 +110,10 @@ def test_skip_exhausted_drops_calls_keeps_regime() -> None:
     assert (1, "regime") in kinds     # kept (free)
     assert (2, "calls") in kinds      # other user unaffected
     assert res.stats["skipped_exhausted"] == 1
+    # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2: the skipped rows themselves, so the dispatch
+    # ledger can record each one — the count must equal the list it is now derived from.
+    assert [(r.chat_id, r.timeframe, r.alert_type) for r in res.skipped] == [(1, "1m", "calls")]
+    assert res.stats["skipped_exhausted"] == len(res.skipped)
 
 
 def test_skip_exhausted_keeps_both_rows() -> None:

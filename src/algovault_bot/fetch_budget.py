@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence
 
 from .validators import TF_SECONDS
@@ -133,6 +133,10 @@ class ScheduleResult:
     scheduled: list  # rows to process this tick (len ≤ budget)
     deferred: list   # eligible rows NOT processed (remain due next tick)
     stats: dict
+    # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 — the skip-exhausted rows THEMSELVES, not only
+    # their count: the dispatch ledger records each one, so a frozen anchor is explained rather
+    # than judged. Defaulted and LAST so every existing constructor stays valid.
+    skipped: list = field(default_factory=list)
 
 
 def _tf_priority(row: SchedulableRow) -> int:
@@ -154,10 +158,10 @@ def schedule(
     """
     # 1. Skip-exhausted: drop pure `calls` rows for exhausted owners.
     eligible: list[SchedulableRow] = []
-    skipped_exhausted = 0
+    skipped: list[SchedulableRow] = []
     for row in due_rows:
         if row.alert_type == "calls" and is_exhausted(row.chat_id):
-            skipped_exhausted += 1
+            skipped.append(row)
             continue
         eligible.append(row)
 
@@ -186,14 +190,14 @@ def schedule(
     deferred = [r for cid in order for r in buckets[cid]]
     stats = {
         "due": len(due_rows),
-        "skipped_exhausted": skipped_exhausted,
+        "skipped_exhausted": len(skipped),
         "eligible": len(eligible),
         "processed": len(scheduled),
         "deferred": len(deferred),
         "active_users": len(buckets),
         "budget": budget,
     }
-    return ScheduleResult(scheduled=scheduled, deferred=deferred, stats=stats)
+    return ScheduleResult(scheduled=scheduled, deferred=deferred, stats=stats, skipped=skipped)
 
 
 def update_saturation_state(
