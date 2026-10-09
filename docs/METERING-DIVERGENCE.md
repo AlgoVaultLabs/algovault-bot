@@ -144,3 +144,50 @@ starts at each subscriber's own first alert, so its reset date is a property of 
 to arrive — it cannot be stated in advance. `00:00 UTC` can. The daily-wall copy names that clock,
 which is the same defect `PRICING-FOLLOWUPS-GENERATOR-W1` CH1 fixed on the API side when production
 told a caller walled for two hours to come back in 30 days.
+
+---
+
+## Amendment — 2026-10-09 (`GROWTH-TG-FREE-ALLOWANCE-W1`)
+
+**Architect ruling (Mr.1, 2026-10-08):** *"Lower the Telegram free limit from 200 to 100."* Telegram
+only: the API / MCP free tier stays 200 calls a month and 100 per UTC day.
+
+### What changed
+
+| | before | after |
+|---|---|---|
+| free monthly (bot) | 200, read from the API's `free.monthly_calls` | **100 alerts**, the bot's own `free.telegram.monthly_alerts` |
+| free daily (bot) | 100 per UTC day | **100 per UTC day**, unchanged — `free.telegram.daily_alerts`, derived from the API's cap |
+| free monthly (API) | 200 calls | 200 calls, unchanged |
+| a 30-day window open at a change | moved with the mirror | keeps the allowance it opened with (`subscribers.alerts_window_cap`) |
+
+### The ALLOWANCE is per-surface; the SoT is still one
+
+The 2026-08-27 amendment unified the allowance by pointing the bot at the API's figure, which coupled
+the two surfaces: moving either moved both. `src/lib/plans.ts` (crypto-quant-signal-mcp) now
+publishes each surface's own figure, and `GET /api/plans/public` carries the bot's as
+`free.telegram`, beside the API pair. The bot still DERIVES its allowance from that one SoT
+(`ladder_client.parse_ladder` → the entitlement drain's mirror). It reads the API pair only from a
+server that predates `free.telegram`, which keeps the two repos' deploy order free. **Rule 2's
+retirement stands:** a ladder change still propagates — it now names the surface it changes.
+
+### A window keeps the allowance it opened with
+
+The charge that opens a 30-day free window stamps it with the live allowance; the roll clears the
+stamp. While the window is open the chat is served max(stamp, live) — `quota.effective_free_total`,
+the one derivation the wall, the 75 % / 90 % thresholds and every "used all N" notice project from.
+A cut never claws back an open window, and a raise applies at once. The mirror's only writer
+(`db.upsert_free_tier_ladder`) stamps every open, unstamped window with the mirror's CURRENT value
+before it replaces the row, in one transaction — so the cut this amendment records walled nobody
+mid-window: every window open at the deploy was stamped at 200 by the first drain after it.
+
+### What SURVIVES
+
+- **The UNIT rule — Rules 1 and 3 — is untouched.** The bot meters a delivered alert (a silent HOLD is
+  free); the API meters a returned verdict. Bot copy says `alerts`, API copy says `calls`.
+- **The two ladders are now different NUMBERS as well as different UNITS.** Quoting one surface's
+  figure on the other's surface is a factual error again, not only a voice error.
+- **The daily cap still exists and is still enforced.** Against a 100-alert month it can bind only for
+  a chat whose monthly allowance is above 100 (a referral bonus, or a window opened before the cut),
+  so bot copy states it only where it is material (`messages.daily_cap_is_material`). The daily-wall
+  notice is unchanged and tells that chat when it fires.
