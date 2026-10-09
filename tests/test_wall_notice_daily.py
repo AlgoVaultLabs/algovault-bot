@@ -118,6 +118,13 @@ def test_daily_wall_is_reached_from_the_single_derivation(tmp_path) -> None:
     stopped them resets at midnight.
     """
     db = Database(str(tmp_path / "t.db"))
+    # GROWTH-TG-FREE-ALLOWANCE-W1: at the pinned ladder the monthly wall wins every tie with the
+    # daily one (both are 100). The daily wall binds for a chat whose monthly allowance is above
+    # the daily cap, so this runs against a mirror that publishes such a ladder.
+    db.upsert_free_tier_ladder(
+        2 * FREE_TIER_DAILY_QUOTA, FREE_TIER_DAILY_QUOTA, None, None,
+        datetime.now(timezone.utc).isoformat(),
+    )
     db.upsert_subscriber(1, "u", "en")
     consume_quota(db, 1, FREE_TIER_DAILY_QUOTA)
     state = get_quota_state(db, 1)

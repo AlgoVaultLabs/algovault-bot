@@ -59,6 +59,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "src" / "algovault_bot"
+#: GROWTH-TG-FREE-ALLOWANCE-W1 — L5's SECOND corpus. `scripts/` is deployed whole (the bot's
+#: deploy manifest lists `scripts`), and its `*.py` send copy to subscribers too: the daily
+#: digest broadcast carried a hand-typed allowance for its whole life because L5 only ever read
+#: `src/algovault_bot`. Only L5 reads this corpus; the lane legs (L1/L2) are package-only.
+SCRIPTS = REPO / "scripts"
 
 # GROWTH-TG-QUOTA-PARITY-W1 CH3c — L5's banned magnitudes are IMPORTED, never typed.
 # A gate that hand-types the number it guards is the exact bug L5 exists to retire; it must not
@@ -357,16 +362,54 @@ def scan_copy(pkg_dir: Path) -> list[str]:
                     f"unit ('calls') — METERING-DIVERGENCE Rule 1: "
                     f"{n.value.strip()[:70]}"
                 )
-            for m in ALLOWANCE_LITERAL.finditer(n.value):
-                lo = max(0, m.start() - ALLOWANCE_WINDOW)
-                if ALLOWANCE_CONTEXT.search(n.value[lo : m.end() + ALLOWANCE_WINDOW]):
-                    out.append(
-                        f"L5 {name}:{n.lineno} hand-types the free allowance "
-                        f"({m.group(0)}) — it comes from QuotaState, never a literal: "
-                        f"{n.value.strip()[:70]}"
-                    )
-                    break
+            hit = _allowance_literal(n.value)
+            if hit is not None:
+                out.append(
+                    f"L5 {name}:{n.lineno} hand-types the free allowance "
+                    f"({hit}) — it comes from QuotaState, never a literal: "
+                    f"{n.value.strip()[:70]}"
+                )
     return out
+
+
+def _allowance_literal(text: str) -> str | None:
+    """L5's one predicate: the first allowance magnitude in `text` that sits near a unit word.
+
+    ONE copy of the rule, shared by both corpora (`scan_copy` over the package and
+    `scan_script_allowance` over `scripts/`), so the two can never judge the same string
+    differently.
+    """
+    for m in ALLOWANCE_LITERAL.finditer(text):
+        lo = max(0, m.start() - ALLOWANCE_WINDOW)
+        if ALLOWANCE_CONTEXT.search(text[lo : m.end() + ALLOWANCE_WINDOW]):
+            return m.group(0)
+    return None
+
+
+def scan_script_allowance(scripts_dir: Path) -> tuple[list[str], int]:
+    """L5 over `scripts/*.py` — non-docstring string constants only, exactly as in the package.
+
+    Returns `(findings, files_scanned)`. The count is returned rather than inferred because
+    the caller must be able to tell "scanned nine files, found nothing" from "scanned nothing".
+    Every hit is REPORTED; there is no allowlist (GROWTH-TG-FREE-ALLOWANCE-W1 ruling: "never
+    suppress one").
+    """
+    out: list[str] = []
+    files = sorted(scripts_dir.glob("*.py"))
+    for path in files:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        skip = _docstring_nodes(tree)
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Constant) or not isinstance(n.value, str) or id(n) in skip:
+                continue
+            hit = _allowance_literal(n.value)
+            if hit is not None:
+                out.append(
+                    f"L5 scripts/{path.name}:{n.lineno} hand-types the free allowance "
+                    f"({hit}) — read it from the ladder (`resolve_ladder`), never a literal: "
+                    f"{n.value.strip()[:70]}"
+                )
+    return out, len(files)
 
 
 def _url_is_schemed(text: str, start: int) -> bool:
@@ -677,6 +720,42 @@ def self_test(tmp: Path) -> bool:
             failed += 1
             print(f"  \u2717 {label}: expected {expected}, got {got}")
 
+    # L5 over scripts/ (GROWTH-TG-FREE-ALLOWANCE-W1). The fixtures are built from the IMPORTED
+    # magnitude, so they keep exercising the live rule when the allowance moves.
+    mag = str(FREE_TIER_MONTHLY_QUOTA)
+    script_cases = [
+        ("L5s a hand-typed allowance in a script", f'X = "One tap · {mag} free alerts/month."\n', 1),
+        ("L5s the same figure in a DOCSTRING is fine", f'"""Sends {mag} free alerts/month."""\nX = 1\n', 0),
+        ("L5s a figure read from the ladder is fine", 'X = f"One tap · {n} free alerts/month."\n', 0),
+    ]
+    for label, body, expected in script_cases:
+        sd = tmp / ("scripts_" + str(abs(hash(label))))
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "digest.py").write_text(body)
+        try:
+            hits, nfiles = scan_script_allowance(sd)
+            got: int | str = len(hits) if nfiles == 1 else f"CORPUS({nfiles})"
+        except Exception as e:  # an assertion that RAISES is not an assertion
+            got = f"CRASH({e})"
+        if got == expected:
+            passed += 1
+            print(f"  ✓ {label}: {got} finding(s)")
+        else:
+            failed += 1
+            print(f"  ✗ {label}: expected {expected}, got {got}")
+    # …and the bypassed artifact: the REAL scripts/ corpus is non-empty and parses.
+    try:
+        _, real_scripts = scan_script_allowance(SCRIPTS)
+        if real_scripts >= 1:
+            passed += 1
+            print(f"  ✓ bypassed artifact: real scripts/ parses ({real_scripts} files)")
+        else:
+            failed += 1
+            print("  ✗ bypassed artifact: real scripts/ corpus is empty")
+    except Exception as e:
+        failed += 1
+        print(f"  ✗ bypassed artifact: scripts/ scan raised {e}")
+
     # Vacuity guard, at the CONSTRUCTION site: in --self-test WE build the corpus,
     # so an empty scan means the test built nothing — a defect in the test itself.
     empty = tmp / "empty"
@@ -727,7 +806,8 @@ def main() -> int:
     try:
         lanes = load_lanes()
         f = scan(PKG, lanes)
-        f.copy_violations = scan_copy(PKG)
+        script_hits, script_files = scan_script_allowance(SCRIPTS)
+        f.copy_violations = scan_copy(PKG) + script_hits
         f.ladder_violations = scan_ladder(PKG)
         f.url_violations = scan_urls(PKG)
     except Exception as e:
@@ -746,7 +826,14 @@ def main() -> int:
         )
         print("QUOTA_REFUSAL_SEAM_VERDICT=INDETERMINATE")
         return 3
+    # Same rule for L5's second corpus: `scripts/` is deployed and known to hold the digest and
+    # drain entrypoints, so finding no `.py` there means the path broke, not that it is clean.
+    if script_files == 0:
+        print(f"L5 scanned 0 files under {SCRIPTS} — the corpus path is broken, not the repo")
+        print("QUOTA_REFUSAL_SEAM_VERDICT=INDETERMINATE")
+        return 3
 
+    print(f"L5 also scanned scripts/: {script_files} files")
     verdict = report(f, corpus_label="scanned src/algovault_bot")
     print(f"QUOTA_REFUSAL_SEAM_VERDICT={verdict}")
     return 0 if verdict == "PASS" else 1

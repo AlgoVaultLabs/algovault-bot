@@ -434,10 +434,13 @@ def test_the_notice_carries_the_RATIFIED_english_string_verbatim() -> None:
     """
     from algovault_bot.notices import compose_downgrade
 
+    # GROWTH-TG-FREE-ALLOWANCE-W1: at the pinned ladder the daily cap is NOT material (it equals
+    # the monthly allowance), so the live notice is the §Copy C form — the ratified string with
+    # only the daily clause removed. Both branches, all three languages: see the pins below.
     notice = compose_downgrade(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA, "en")
     assert notice.text == (
         "Your AlgoVault subscription no longer appears active, so this chat has moved back "
-        f"to the free tier ({FREE_TIER_MONTHLY_QUOTA} alerts/month, {FREE_TIER_DAILY_QUOTA}/day). "
+        f"to the free tier ({FREE_TIER_MONTHLY_QUOTA} alerts/month). "
         "Your watchlist is unchanged. Reactivate any time — tap a plan below."
     )
     assert "algovault.com" not in notice.text, "the CTA is a button; the body carries no URL"
@@ -447,6 +450,47 @@ def test_the_notice_carries_the_RATIFIED_english_string_verbatim() -> None:
     assert all(u.startswith("https://") for u in urls), (
         "a scheme-less domain is what Telegram auto-linked as http:// and failed to open"
     )
+
+
+# GROWTH-TG-FREE-ALLOWANCE-W1 R2.6 — the downgrade notice, VERBATIM, both branches × three languages.
+# Spelled out in full with no builder call, for the reason the EN pin above gives. The material
+# branch (a ladder whose daily cap is below its monthly allowance) must stay byte-identical to the
+# 2026-09-08 ratification; the non-material branch is §Copy C, ratified at this wave's dispatch.
+_DOWNGRADE_PINS = [
+    (200, 100, "en",
+     "Your AlgoVault subscription no longer appears active, so this chat has moved back "
+     "to the free tier (200 alerts/month, 100/day). "
+     "Your watchlist is unchanged. Reactivate any time — tap a plan below."),
+    (200, 100, "id",
+     "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
+     "tier gratis (200 alert/bulan, 100/hari). "
+     "Watchlist Anda tidak berubah. Aktifkan kembali kapan saja — ketuk paket di bawah."),
+    (200, 100, "zh",
+     "你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 200 条提醒，"
+     "每日 100 条）。你的自选列表未受影响。随时可重新订阅——点击下方套餐。"),
+    (100, 100, "en",
+     "Your AlgoVault subscription no longer appears active, so this chat has moved back "
+     "to the free tier (100 alerts/month). "
+     "Your watchlist is unchanged. Reactivate any time — tap a plan below."),
+    (100, 100, "id",
+     "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
+     "tier gratis (100 alert/bulan). "
+     "Watchlist Anda tidak berubah. Aktifkan kembali kapan saja — ketuk paket di bawah."),
+    (100, 100, "zh",
+     "你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 100 条提醒）。"
+     "你的自选列表未受影响。随时可重新订阅——点击下方套餐。"),
+]
+
+
+@pytest.mark.parametrize(
+    "monthly,daily,lang,expected", _DOWNGRADE_PINS, ids=[f"{m}-{d}-{lang}" for m, d, lang, _ in _DOWNGRADE_PINS]
+)
+def test_the_downgrade_notice_is_pinned_verbatim_in_both_branches(
+    monthly: int, daily: int, lang: str, expected: str
+) -> None:
+    from algovault_bot.notices import compose_downgrade
+
+    assert compose_downgrade(monthly, daily, lang).text == expected
 
 
 @pytest.mark.parametrize("flag", ["", "1", "true", "yes", "TRUE", " ", "anything"])

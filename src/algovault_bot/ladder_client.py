@@ -19,8 +19,15 @@ fallbacks. A ladder we could not read is not a reason to refuse a user — the s
 `PlanState.INDETERMINATE` on the paid lane, and the same as `capabilities.fetch_capabilities`'s
 3-tier degradation one module over.
 
-🛑 TOLERANT PARSE, BY CONTRACT. `parse_ladder` reads `free.monthly_calls`, `free.daily_calls` and
-the starter rung, and IGNORES every other key — `_algovault` included (CH1 §2, ratified Q3=b).
+PER-SURFACE ALLOWANCE (GROWTH-TG-FREE-ALLOWANCE-W1). The bot's free allowance is its OWN figure,
+`free.telegram.{monthly_alerts, daily_alerts}`, published by the same SoT beside the API's
+`free.monthly_calls` / `daily_calls`. Reading the API pair is what coupled the two surfaces in
+GROWTH-TG-QUOTA-PARITY-W1; it survives only as the fallback for a server that predates the
+`telegram` block, which is what keeps the deploy ORDER of the two repos free.
+
+🛑 TOLERANT PARSE, BY CONTRACT. `parse_ladder` reads `free.telegram`, `free.monthly_calls`,
+`free.daily_calls` and the starter/pro rungs, and IGNORES every other key — `_algovault` included
+(CH1 §2, ratified Q3=b).
 A strict parser here would turn any future ADDITIVE change to a public endpoint into a bot
 outage: signal-MCP ships a new field, the bot rejects the whole response, and every free
 subscriber silently drops to the fallback ladder. Unknown keys are pinned as ACCEPTABLE by a
@@ -88,12 +95,36 @@ def _rung(payload: dict[str, Any], tier_id: str) -> Rung:
     return _ABSENT_RUNG
 
 
+def _positive_count(value: Any) -> bool:
+    """A usable allowance figure. `bool` is an int subclass, so `True` must never read as 1."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _free_allowance(free: dict[str, Any]) -> tuple[Any, Any]:
+    """The bot's (monthly, daily) free allowance from the `free` block — ONE derivation.
+
+    `free.telegram` wins when it carries BOTH figures, usable. Otherwise the API pair is read: a
+    server that predates the per-surface block (GROWTH-TG-FREE-ALLOWANCE-W1 CH1) still publishes
+    a ladder the meter can serve. Taken as a PAIR, never mixed per field — half of one surface's
+    allowance beside half of the other's is a ladder nobody published.
+    """
+    tg = free.get("telegram")
+    if isinstance(tg, dict):
+        monthly, daily = tg.get("monthly_alerts"), tg.get("daily_alerts")
+        if _positive_count(monthly) and _positive_count(daily):
+            return monthly, daily
+    return free.get("monthly_calls"), free.get("daily_calls")
+
+
 def parse_ladder(payload: Any) -> dict[str, Any] | None:
     """Project the mirrored fields out of a `/api/plans/public` body.
 
     Returns None when the FREE rung — the only part the meter cannot serve without — is missing or
     non-positive. The starter rung is optional: it feeds copy, not enforcement, so its absence
     degrades a price string to its pinned fallback rather than dropping the whole ladder.
+
+    `free_monthly` / `free_daily` are the bot's OWN allowance: `free.telegram` when the server
+    publishes it, the API pair otherwise (see `_free_allowance`).
 
     Unknown top-level and per-tier keys are ignored by construction (see the module docstring).
     """
@@ -102,8 +133,7 @@ def parse_ladder(payload: Any) -> dict[str, Any] | None:
     free = payload.get("free")
     if not isinstance(free, dict):
         return None
-    monthly = free.get("monthly_calls")
-    daily = free.get("daily_calls")
+    monthly, daily = _free_allowance(free)
     # bool is a subclass of int in Python; `True` must never be read as a quota of 1.
     if not isinstance(monthly, int) or isinstance(monthly, bool) or monthly <= 0:
         return None

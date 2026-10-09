@@ -207,6 +207,23 @@ def _usd(amount: float) -> str:
     return f"${amount:.2f}" if amount % 1 else f"${int(amount)}"
 
 
+def daily_cap_is_material(monthly_total: int, daily_total: int) -> bool:
+    """Whether the free tier's per-day clause belongs in the copy — ONE predicate for every site.
+
+    GROWTH-TG-FREE-ALLOWANCE-W1, ruling R-2. A daily cap at or above the monthly allowance can
+    never be the wall that stops anyone on that ladder, so "100 a month, up to 100 a day" reads as
+    a second limit that does not exist. When it is material the clause renders exactly as before;
+    when it is not, it is dropped — omitted, never denied (`brand-facts.md`: per-day phrasing is
+    REQUIRED only where the cap is material).
+
+    Ladder-level by ruling: a referral bonus or a window opened under a higher allowance can still
+    make the daily cap bind for ONE chat, and the unchanged daily-wall notice is what tells that
+    chat. Every `{daily_total}` copy site — `welcome_message`, `help_message`,
+    `notices.compose_downgrade` — projects from this one call.
+    """
+    return daily_total < monthly_total
+
+
 def welcome_message(
     monthly_total: int,
     daily_total: int,
@@ -225,13 +242,28 @@ def welcome_message(
     because `/api/plans/public` carried no prepay field. It is DEFAULTED so every pre-existing
     caller and fixture emits a BYTE-IDENTICAL string with no edit — the default is the very
     constant `quota` would have served on the fallback path.
+
+    GROWTH-TG-FREE-ALLOWANCE-W1: the two allowance sentences state the daily cap only where
+    `daily_cap_is_material`; otherwise they render the ratified §Copy A form. The material form
+    is byte-identical to before.
     """
+    material = daily_cap_is_material(monthly_total, daily_total)
+    allowance = (
+        f"You get {monthly_total} free alerts a month, up to {daily_total} a day. "
+        if material
+        else f"You get {monthly_total} free alerts a month. "
+    )
+    free_line = (
+        f"Free: {monthly_total} alerts/month, {daily_total}/day. "
+        if material
+        else f"Free: {monthly_total} alerts/month. "
+    )
     return (
     "👋 Welcome to AlgoVault, the brain layer for AI trading agents.\n"
     "\n"
     "I watch the markets for you and message you the moment something changes.\n"
     "\n"
-    f"You get {monthly_total} free alerts a month, up to {daily_total} a day. "
+    f"{allowance}"
     "Each alert I send uses one. Silent HOLDs are always free.\n"
     "\n"
     "Two kinds of alerts:\n"
@@ -255,7 +287,7 @@ def welcome_message(
     # x402, so it was an API noun on a consumer surface. The rail itself is untouched and is
     # still named where it IS actionable — `alert_image.py`'s "X402 Plan" card label and
     # `quota.PAID_TIERS`. (V2 CH1 R3 / architect ruling Q14(i).)
-    f"Free: {monthly_total} alerts/month, {daily_total}/day. Want more? Starter is "
+    f"{free_line}Want more? Starter is "
     f"{_usd(starter_price_usd)}/mo or {_usd(starter_price_usd_6month)}/6mo for "
     f"{starter_monthly_calls:,} API calls/mo."
     )
@@ -266,7 +298,13 @@ def welcome_message(
 # via signup_url('help_message'). 12 venues listed.
 def help_message(monthly_total: int, daily_total: int) -> str:
     """GROWTH-TG-QUOTA-PARITY-W1 CH3a — see `welcome_message` for why this stopped being a
-    constant."""
+    constant. GROWTH-TG-FREE-ALLOWANCE-W1: the free-tier sentence states the daily cap only where
+    `daily_cap_is_material` (§Copy B otherwise; the material form is byte-identical)."""
+    free_tier = (
+        f"Free tier: {monthly_total} alerts a month, up to {daily_total} a day. "
+        if daily_cap_is_material(monthly_total, daily_total)
+        else f"Free tier: {monthly_total} alerts a month. "
+    )
     return (
     "📖 AlgoVault — full command guide\n"
     "\n"
@@ -322,7 +360,7 @@ def help_message(monthly_total: int, daily_total: int) -> str:
     "   /watch BTC,ETH,SOL 15m    three coins at once\n"
     "   /unwatch BTC all          remove every BTC watch\n"
     "\n"
-    f"Free tier: {monthly_total} alerts a month, up to {daily_total} a day. "
+    f"{free_tier}"
     "Regime and BUY/SELL alerts each use one. Silent HOLDs are free.\n"
     "Informational analytics, not financial advice.\n"
     # TG-SCANWATCH-TF-CADENCE-W1 (B): CTA lead-in → the inline Upgrade button renders below

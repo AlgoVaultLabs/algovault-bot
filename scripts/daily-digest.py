@@ -42,7 +42,9 @@ if _PKG_PARENT.is_dir() and str(_PKG_PARENT) not in sys.path:
 
 from algovault_bot import adoption  # noqa: E402
 from algovault_bot.broadcast import sendBroadcast, sendDM  # noqa: E402
+from algovault_bot.db import Database  # noqa: E402
 from algovault_bot.mcp_client import McpClient, McpClientConfig, McpError  # noqa: E402
+from algovault_bot.quota import resolve_ladder  # noqa: E402
 
 
 log = logging.getLogger("daily-digest")
@@ -103,15 +105,24 @@ def _rank_top_3(setups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 DIGEST_WATCH_TF = "1h"
 
 
-def render_digest_body(top3: list[dict[str, Any]], date_str: str) -> str:
+def render_digest_body(
+    top3: list[dict[str, Any]], date_str: str, *, free_monthly: int | None
+) -> str:
     """T1-voice body. Outcome-framed; ≤2 sentences per line.
 
     TG-WATCH-ADOPTION-BROADCAST-W1 (R2): each top-3 setup ends with a one-tap
     ``/watch {COIN} {TF}`` CTA (the inline button carries the same action with
     source attribution — see ``adoption.digest_keyboard``). Empty top3 is
-    handled by the caller (A3 suppress-on-empty), not rendered here."""
+    handled by the caller (A3 suppress-on-empty), not rendered here.
+
+    GROWTH-TG-FREE-ALLOWANCE-W1: ``free_monthly`` is the bot's free allowance, read by the
+    caller from the mirrored ladder (``resolve_ladder``). The closing CTA used to hand-type it,
+    and that literal outlived the allowance it named. Keyword-only and with no default, so a
+    caller cannot silently fall back to a number."""
     if not top3:
         return render_empty_state(date_str)
+    if free_monthly is None:
+        raise ValueError("a rendered digest states the free allowance — pass free_monthly")
 
     lines: list[str] = [f"{DIGEST_BODY_PREFIX} — {date_str}", "", "Top 3 cross-venue setups:"]
     for i, s in enumerate(top3, start=1):
@@ -128,7 +139,7 @@ def render_digest_body(top3: list[dict[str, Any]], date_str: str) -> str:
         # R2 per-setup CTA (approved copy). The button below does the same tap.
         lines.append(f"   → never miss the next flip: /watch {coin} {tf}")
     lines.append("")
-    lines.append("👇 One tap to start watching · 200 free alerts/month.")
+    lines.append(f"👇 One tap to start watching · {free_monthly} free alerts/month.")
     body = "\n".join(lines)
     # Hard cap; truncate body lines (not closing CTA) if absurdly long.
     if len(body) <= MAX_DIGEST_CHARS:
@@ -220,7 +231,12 @@ def main(argv: list[str] | None = None) -> int:
     top3 = _rank_top_3(filtered)
     # TG-WATCH-ADOPTION-BROADCAST-W1 (R2): one-tap watch button per setup.
     keyboard = adoption.digest_keyboard(top3) if top3 else None
-    body = render_digest_body(top3, date_str)
+    # GROWTH-TG-FREE-ALLOWANCE-W1 — the allowance is read ONLY when a body will carry it. This
+    # script runs from root's crontab, and opening state.db as root on a suppressed day (every
+    # retained run so far) risks creating root-owned WAL siblings that lock the bot out. The
+    # send path below opens the same file anyway, through sendBroadcast.
+    free_monthly = resolve_ladder(Database(DEFAULT_DB_PATH)).free_monthly if top3 else None
+    body = render_digest_body(top3, date_str, free_monthly=free_monthly)
     log.info("digest_body_chars=%d top3_count=%d raw_count=%d", len(body), len(top3), len(raw))
 
     broadcast_type = f"daily_digest_{date_str}"

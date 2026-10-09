@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Final, Literal
 from telegram import InlineKeyboardMarkup
 
 from .keyboards import plan_picker_kb
+from .messages import daily_cap_is_material
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .quota import Ladder, QuotaState
@@ -373,7 +374,7 @@ def compose_downgrade(
     🛑 RATIFIED PUBLIC COPY, twice. The 2026-08-21 ratification approved everything up to the
     final clause; this wave's dispatch re-ratifies the whole string with that clause replaced.
     Editing it is a public-copy change needing fresh sign-off, not a wording tidy-up.
-    `tests/test_link_lifecycle.py` pins it verbatim, in all three languages.
+    `tests/test_link_lifecycle.py` pins it verbatim, in all three languages and both branches.
 
     The shape is unchanged and every part of it is load-bearing: state the fact, assign no
     blame, give ONE action, and say explicitly what did NOT change — a subscriber whose
@@ -382,20 +383,37 @@ def compose_downgrade(
     It takes the ladder figures rather than a `Ladder`, because its caller (the entitlement
     drain) already resolved them for the downgrade it is applying, and re-resolving would be a
     second read of the same mirror inside one operation.
+
+    GROWTH-TG-FREE-ALLOWANCE-W1 (§Copy C, ratified at dispatch): the daily clause renders only
+    where `messages.daily_cap_is_material`. The material branch is byte-identical to the
+    2026-09-08 string; the other drops ONLY that clause, in every language.
     """
     from .quota import _fallback_ladder
 
-    text = _lang_pick(
-        lang,
-        "Your AlgoVault subscription no longer appears active, so this chat has moved back "
-        f"to the free tier ({monthly_total} alerts/month, {daily_total}/day). "
-        "Your watchlist is unchanged. Reactivate any time — tap a plan below.",
-        "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
-        f"tier gratis ({monthly_total} alert/bulan, {daily_total}/hari). "
-        "Watchlist Anda tidak berubah. Aktifkan kembali kapan saja — ketuk paket di bawah.",
-        f"你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 {monthly_total} 条提醒，"
-        f"每日 {daily_total} 条）。你的自选列表未受影响。随时可重新订阅——点击下方套餐。",
-    )
+    if daily_cap_is_material(monthly_total, daily_total):
+        text = _lang_pick(
+            lang,
+            "Your AlgoVault subscription no longer appears active, so this chat has moved back "
+            f"to the free tier ({monthly_total} alerts/month, {daily_total}/day). "
+            "Your watchlist is unchanged. Reactivate any time — tap a plan below.",
+            "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
+            f"tier gratis ({monthly_total} alert/bulan, {daily_total}/hari). "
+            "Watchlist Anda tidak berubah. Aktifkan kembali kapan saja — ketuk paket di bawah.",
+            f"你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 {monthly_total} 条提醒，"
+            f"每日 {daily_total} 条）。你的自选列表未受影响。随时可重新订阅——点击下方套餐。",
+        )
+    else:
+        text = _lang_pick(
+            lang,
+            "Your AlgoVault subscription no longer appears active, so this chat has moved back "
+            f"to the free tier ({monthly_total} alerts/month). "
+            "Your watchlist is unchanged. Reactivate any time — tap a plan below.",
+            "Langganan AlgoVault Anda tampaknya sudah tidak aktif, jadi chat ini kembali ke "
+            f"tier gratis ({monthly_total} alert/bulan). "
+            "Watchlist Anda tidak berubah. Aktifkan kembali kapan saja — ketuk paket di bawah.",
+            f"你的 AlgoVault 订阅似乎已不再有效，此对话已回到免费套餐（每月 {monthly_total} 条提醒）。"
+            "你的自选列表未受影响。随时可重新订阅——点击下方套餐。",
+        )
     return MoneyNotice(
         text=text,
         markup=plan_picker_kb(_fallback_ladder(), "link_downgraded", None),

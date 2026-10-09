@@ -27,11 +27,15 @@ HELP_MESSAGE = help_message(FREE_TIER_MONTHLY_QUOTA, FREE_TIER_DAILY_QUOTA)
 
 def test_welcome_plain_language_intro() -> None:
     assert "👋 Welcome to AlgoVault, the brain layer for AI trading agents." in WELCOME_MESSAGE
+    # GROWTH-TG-FREE-ALLOWANCE-W1 (§Copy A): at the pinned ladder the daily cap equals the monthly
+    # allowance, so it cannot bind and the welcome states the month only. The material branch is
+    # pinned verbatim in tests/test_allowance_copy_materiality.py.
     assert (
-        f"You get {FREE_TIER_MONTHLY_QUOTA} free alerts a month, up to {FREE_TIER_DAILY_QUOTA} a day. "
+        f"You get {FREE_TIER_MONTHLY_QUOTA} free alerts a month. "
         "Each alert I send uses one. Silent HOLDs are always free."
         in WELCOME_MESSAGE
     )
+    assert "a day" not in WELCOME_MESSAGE and "/day" not in WELCOME_MESSAGE
     assert "📊 Regime: the market's mood flips" in WELCOME_MESSAGE
     assert "📈 Trade call: a clear BUY or SELL" in WELCOME_MESSAGE
     # coverage line: 900+ markets across 12 exchanges
@@ -56,6 +60,6 @@ def test_welcome_is_plain_text_no_html_no_inline_upgrade_link() -> None:
     # allowance is stated in ALERTS, which is what it actually meters.
     assert "Starter is $9.99/mo or $39.90/6mo for 10,000 API " in WELCOME_MESSAGE
     assert (
-        f"Free: {FREE_TIER_MONTHLY_QUOTA} alerts/month, {FREE_TIER_DAILY_QUOTA}/day."
+        f"Free: {FREE_TIER_MONTHLY_QUOTA} alerts/month. Want more?"
     ) in WELCOME_MESSAGE
     assert "3,000 calls" not in WELCOME_MESSAGE

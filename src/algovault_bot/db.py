@@ -11,13 +11,14 @@ internal-bypass key against signal-MCP and tracks user quota in its own
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final, Iterator, Literal, Sequence, get_args
+from typing import Final, Iterator, Literal, NamedTuple, Sequence, get_args
 
 from .dispatch_schedule import is_due
 
@@ -472,6 +473,31 @@ _DISPATCH_LEDGER_UPSERT = (
     " fired_epoch = COALESCE(excluded.fired_epoch, fired_epoch)"
 )
 
+# GROWTH-TG-FREE-ALLOWANCE-W1 (2026-10-09) — the free allowance a 30-day window OPENED with.
+#
+# NULLABLE on purpose: NULL means "no stamp" and the reader serves the live ladder, so a row the
+# old code wrote is never misread as a zero cap. Written in three places, all in this module or
+# its one reader: stamped by `consume_quota_atomic` in the same statement that opens the window,
+# cleared by the roll in `quota.get_quota_state`, and back-filled for every open, unstamped window
+# by `upsert_free_tier_ladder` in the same transaction that moves the mirror. The reader serves
+# max(stamp, live) while the window is open (`quota.effective_free_total`).
+FREE_ALLOWANCE_WINDOW_MIGRATIONS = (
+    "ALTER TABLE subscribers ADD COLUMN alerts_window_cap INTEGER",
+)
+
+class LadderWindowStamp(NamedTuple):
+    """What `upsert_free_tier_ladder` stamped before it moved the mirror (GROWTH-TG-FREE-ALLOWANCE-W1).
+
+    `cap` is the allowance the open windows were stamped with — the mirror's value BEFORE the
+    write — or None when there was no mirror row to stamp from. `expected` counts the open,
+    unstamped windows and `stamped` the rows the UPDATE changed, both inside one transaction.
+    """
+
+    cap: int | None
+    expected: int
+    stamped: int
+
+
 QUOTA_PARITY_MIGRATIONS = (
     "ALTER TABLE subscribers ADD COLUMN alerts_day_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subscribers ADD COLUMN alerts_day TEXT",
@@ -894,8 +920,11 @@ class Database:
                 # notice ledger — what we have already told this chat, this episode.
                 *NOTICE_LEDGER_MIGRATIONS,
                 # OPS-CLOSEDBAR-DISPATCH-OFFSET-INCIDENT-W2 (2026-10-08): one disposition per due
-                # row per tick — the record the dispatch-timing guard judges. Additive, LAST.
+                # row per tick — the record the dispatch-timing guard judges.
                 *DISPATCH_LEDGER_MIGRATIONS,
+                # GROWTH-TG-FREE-ALLOWANCE-W1 (2026-10-09): the allowance each 30-day free
+                # window opened with. Additive, LAST.
+                *FREE_ALLOWANCE_WINDOW_MIGRATIONS,
             ):
                 try:
                     cur.execute(stmt)
@@ -1905,47 +1934,114 @@ class Database:
         pro_monthly_calls: int | None = None,
         pro_daily_calls: int | None = None,
         pro_price_usd_6month: float | None = None,
-    ) -> None:
+    ) -> LadderWindowStamp:
         """Replace the single mirror row. `id = 1` is pinned by the table's own CHECK.
 
         GROWTH-TG-PLAN-PICKER-W1 R2 added the six keyword-only rungs. They default to None so
         every pre-existing caller and fixture emits an IDENTICAL row — absence writes NULL, and
         `quota.resolve_ladder` reads NULL as "serve the pinned constant". Keyword-only because a
         ten-argument positional call is where a price and a call count get swapped.
+
+        GROWTH-TG-FREE-ALLOWANCE-W1 (ruling Q1 = A) — THE MIRROR NEVER MOVES UNDER AN UNSTAMPED
+        OPEN WINDOW. In ONE `BEGIN IMMEDIATE` transaction, before the row is replaced, every free
+        window that is open (`quota`'s "not > WINDOW") and carries no `alerts_window_cap` is
+        stamped with the allowance the mirror holds NOW — the one that window opened under. Only
+        then does the new figure land. This is the cutover backfill, run by the only writer at
+        the only moment it can matter, so it holds in any deploy order and on every future change
+        in either direction. At steady state it stamps nothing: `consume_quota_atomic` stamps
+        each window at its first charge. NULL-only, so it is idempotent. No mirror row yet means
+        nothing to stamp from: the stamp is skipped and that is logged.
         """
+        from .quota import WINDOW_DAYS  # deferred: quota imports this module at load
+
         with self._cursor() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                stamp = self._stamp_open_windows(cur, fetched_at, WINDOW_DAYS)
+                self._write_free_tier_ladder(
+                    cur,
+                    (
+                        free_monthly,
+                        free_daily,
+                        starter_price_usd,
+                        starter_monthly_calls,
+                        starter_daily_calls,
+                        starter_price_usd_6month,
+                        pro_price_usd,
+                        pro_monthly_calls,
+                        pro_daily_calls,
+                        pro_price_usd_6month,
+                        fetched_at,
+                    ),
+                )
+                cur.execute("COMMIT")
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
+        if stamp.cap is None:
+            log.warning(json.dumps({
+                "event": "ladder_window_caps_skipped", "reason": "no_mirror_row",
+                "open_unstamped": stamp.expected,
+            }))
+        elif stamp.expected or stamp.stamped:
+            log.warning(json.dumps({
+                "event": "ladder_window_caps_stamped", "cap": stamp.cap,
+                "expected": stamp.expected, "stamped": stamp.stamped,
+            }))
+        return stamp
+
+    @staticmethod
+    def _stamp_open_windows(
+        cur: sqlite3.Cursor, now_iso: str, window_days: int
+    ) -> LadderWindowStamp:
+        """Inside the caller's transaction: stamp open, unstamped windows with the CURRENT mirror.
+
+        `expected` is counted in the same transaction as the UPDATE, so `stamped` can differ from
+        it only by a bug, never by a race. The open-window predicate is `quota`'s roll inverted:
+        a window rolls when `now - start > WINDOW`, so it is open while `now - start <= WINDOW`.
+        """
+        row = cur.execute("SELECT free_monthly FROM free_tier_ladder WHERE id = 1").fetchone()
+        prev = row["free_monthly"] if row is not None else None
+        open_unstamped = (
+            "alerts_window_cap IS NULL AND alerts_window_start IS NOT NULL "
+            "AND julianday(?) - julianday(alerts_window_start) <= ?"
+        )
+        expected = int(
             cur.execute(
-                "INSERT INTO free_tier_ladder "
-                "(id, free_monthly, free_daily, starter_price_usd, starter_monthly_calls, "
-                " starter_daily_calls, starter_price_usd_6month, pro_price_usd, "
-                " pro_monthly_calls, pro_daily_calls, pro_price_usd_6month, fetched_at) "
-                "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET "
-                "  free_monthly = excluded.free_monthly,"
-                "  free_daily = excluded.free_daily,"
-                "  starter_price_usd = excluded.starter_price_usd,"
-                "  starter_monthly_calls = excluded.starter_monthly_calls,"
-                "  starter_daily_calls = excluded.starter_daily_calls,"
-                "  starter_price_usd_6month = excluded.starter_price_usd_6month,"
-                "  pro_price_usd = excluded.pro_price_usd,"
-                "  pro_monthly_calls = excluded.pro_monthly_calls,"
-                "  pro_daily_calls = excluded.pro_daily_calls,"
-                "  pro_price_usd_6month = excluded.pro_price_usd_6month,"
-                "  fetched_at = excluded.fetched_at",
-                (
-                    free_monthly,
-                    free_daily,
-                    starter_price_usd,
-                    starter_monthly_calls,
-                    starter_daily_calls,
-                    starter_price_usd_6month,
-                    pro_price_usd,
-                    pro_monthly_calls,
-                    pro_daily_calls,
-                    pro_price_usd_6month,
-                    fetched_at,
-                ),
-            )
+                f"SELECT COUNT(*) FROM subscribers WHERE {open_unstamped}", (now_iso, window_days)
+            ).fetchone()[0]
+        )
+        if not isinstance(prev, int) or isinstance(prev, bool) or prev <= 0:
+            return LadderWindowStamp(cap=None, expected=expected, stamped=0)
+        cur.execute(
+            f"UPDATE subscribers SET alerts_window_cap = ? WHERE {open_unstamped}",
+            (prev, now_iso, window_days),
+        )
+        return LadderWindowStamp(cap=prev, expected=expected, stamped=int(cur.rowcount))
+
+    @staticmethod
+    def _write_free_tier_ladder(cur: sqlite3.Cursor, values: tuple[object, ...]) -> None:
+        """The mirror row's one write statement — unchanged by GROWTH-TG-FREE-ALLOWANCE-W1."""
+        cur.execute(
+            "INSERT INTO free_tier_ladder "
+            "(id, free_monthly, free_daily, starter_price_usd, starter_monthly_calls, "
+            " starter_daily_calls, starter_price_usd_6month, pro_price_usd, "
+            " pro_monthly_calls, pro_daily_calls, pro_price_usd_6month, fetched_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  free_monthly = excluded.free_monthly,"
+            "  free_daily = excluded.free_daily,"
+            "  starter_price_usd = excluded.starter_price_usd,"
+            "  starter_monthly_calls = excluded.starter_monthly_calls,"
+            "  starter_daily_calls = excluded.starter_daily_calls,"
+            "  starter_price_usd_6month = excluded.starter_price_usd_6month,"
+            "  pro_price_usd = excluded.pro_price_usd,"
+            "  pro_monthly_calls = excluded.pro_monthly_calls,"
+            "  pro_daily_calls = excluded.pro_daily_calls,"
+            "  pro_price_usd_6month = excluded.pro_price_usd_6month,"
+            "  fetched_at = excluded.fetched_at",
+            values,
+        )
 
     # ── GROWTH-TG-STARS-DEMAND-PROBE-W1: the demand ledger ───────────
 
@@ -2182,8 +2278,16 @@ class Database:
         monthly_total: int,
         day_key: str,
         now_iso: str,
+        *,
+        window_cap: int,
     ) -> tuple[int, int, int, str | None] | None:
         """OPS-BOT-DISPATCH-LATENCY-W1 CH2 — the free meter's charge, as ONE statement.
+
+        GROWTH-TG-FREE-ALLOWANCE-W1: `window_cap` is the LIVE free allowance (the ladder, never
+        the effective total). It is stamped with the same COALESCE that stamps
+        `alerts_window_start`, so the charge that opens a window records the allowance that window
+        opened with, and no later charge in that window can overwrite it. Keyword-only and
+        required: a caller cannot forget it and silently open an unstamped window.
 
         `consume_quota` was a read-modify-write: `get_quota_state` read `alert_count`, Python
         computed `used + units`, and an UPDATE wrote the ABSOLUTE result. Two charges
@@ -2236,7 +2340,10 @@ class Database:
                 alerts_day = ?,
                 -- Replaces the `if state.window_start is None` branch. COALESCE is the same
                 -- decision expressed atomically, so two first-charges cannot each start a window.
-                alerts_window_start = COALESCE(alerts_window_start, ?)
+                alerts_window_start = COALESCE(alerts_window_start, ?),
+                -- …and the allowance that window opened with, by the same idiom in the same
+                -- statement (GROWTH-TG-FREE-ALLOWANCE-W1).
+                alerts_window_cap = COALESCE(alerts_window_cap, ?)
             WHERE chat_id = ?
             RETURNING alert_count, referral_bonus_remaining, alerts_day_count, alerts_window_start
         """
@@ -2244,7 +2351,7 @@ class Database:
             units, monthly_total, units,               # monthly arm
             units, units, monthly_total, units,        # bonus arm (units, then the same CASE)
             day_key, units, day_key,                   # daily meter
-            now_iso, chat_id,
+            now_iso, window_cap, chat_id,
         )
         with self._cursor() as cur:
             row = cur.execute(sql, params).fetchone()

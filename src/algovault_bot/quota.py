@@ -75,11 +75,18 @@ log = logging.getLogger(__name__)
 # exactly that against the endpoint's real response. A fallback that has drifted from the thing it
 # stands in for is the same defect as a hand-typed constant, wearing a different coat.
 #
-# The architect's 2026-08-27 ruling unified the ALLOWANCE across the API and the bot: same NUMBER,
-# different UNIT. The API meters a returned verdict (a HOLD is a call); the bot meters a DELIVERED
-# ALERT (a silent HOLD costs nothing). That distinction is Rule 1 + Rule 3 of
-# `docs/METERING-DIVERGENCE.md` and it SURVIVES this wave untouched.
-FREE_TIER_MONTHLY_QUOTA: Final = 200
+# PER-SURFACE since GROWTH-TG-FREE-ALLOWANCE-W1 (Mr.1, 2026-10-08: "Lower the Telegram free limit
+# from 200 to 100"). The 2026-08-27 ruling had unified the allowance by pointing the bot at the
+# API's figure, which coupled the two surfaces: moving either moved both. The bot now mirrors its
+# OWN figure, `free.telegram.monthly_alerts` / `daily_alerts`, and these pinned values must equal
+# THAT live — not the API's `free.monthly_calls`, which stays where it is. The daily cap is the
+# API's, derived and unchanged. The UNIT rule survives untouched: the API meters a returned verdict
+# (a HOLD is a call); the bot meters a DELIVERED ALERT (a silent HOLD costs nothing) — Rules 1 + 3
+# of `docs/METERING-DIVERGENCE.md`.
+#
+# A chat's window keeps the allowance it OPENED with (`subscribers.alerts_window_cap`), so moving
+# this constant — or the mirror — never walls anyone mid-window. See `effective_free_total`.
+FREE_TIER_MONTHLY_QUOTA: Final = 100
 FREE_TIER_DAILY_QUOTA: Final = 100
 #: Starter rung, mirrored for COPY only — it gates nothing. CH3 renders the upgrade line from it.
 STARTER_PRICE_USD: Final = 9.99
@@ -238,6 +245,12 @@ class QuotaState:
     # 🛑 It keeps a default for the same reason they do: the suite constructs QuotaState
     # POSITIONALLY, so a non-defaulted field breaks every such test at CONSTRUCTION.
     starter_price_usd_6month: float = STARTER_PRICE_6MONTH_USD
+    # GROWTH-TG-FREE-ALLOWANCE-W1 — `total` is the EFFECTIVE allowance (`effective_free_total`).
+    # These carry its two inputs: the LIVE ladder value, which is what a charge that opens a window
+    # must stamp (never `total`), and the window's own stamp, for observability. Defaulted for the
+    # positional-construction reason above.
+    free_monthly_live: int = FREE_TIER_MONTHLY_QUOTA
+    window_cap: int | None = None
 
     @property
     def plan_state(self) -> PlanState:
@@ -547,6 +560,25 @@ def resolve_ladder(db: Database, now: datetime | None = None) -> Ladder:
     )
 
 
+def effective_free_total(live: int, window_cap: Any, window_open: bool) -> int:
+    """THE one derivation of a chat's free monthly allowance (GROWTH-TG-FREE-ALLOWANCE-W1 R2.3).
+
+    While its 30-day window is open, a chat is served max(the allowance that window opened with,
+    the live ladder): a cut never claws back an open window, and a raise applies at once. A closed
+    window — or one with no usable stamp — is served the live ladder. `QuotaState.total` is this
+    value, and the wall, the 75 % / 90 % thresholds, every "used all N" notice and the charge's
+    `monthly_total` all project from it, never from the ladder directly.
+    """
+    if (
+        window_open
+        and isinstance(window_cap, int)
+        and not isinstance(window_cap, bool)
+        and window_cap > 0
+    ):
+        return max(live, window_cap)
+    return live
+
+
 def get_quota_state(
     db: Database, chat_id: int, *, persist_roll: bool = True
 ) -> QuotaState:
@@ -578,6 +610,7 @@ def get_quota_state(
             starter_price_usd=ladder.starter_price_usd,
             starter_monthly_calls=ladder.starter_monthly_calls,
             starter_price_usd_6month=ladder.starter_price_usd_6month,
+            free_monthly_live=ladder.free_monthly,
         )
 
     used = int(row["alert_count"] or 0)
@@ -591,17 +624,22 @@ def get_quota_state(
     k = row.keys()
     def _m(col: str):  # mirror column, tolerant of a DB that predates the migration
         return row[col] if col in k else None
+    window_cap = _m("alerts_window_cap")
 
     # Window expired → reset counter (still applies to free-tier users; paid
     # users don't tick the counter at all per ``consume_quota`` below).
+    # GROWTH-TG-FREE-ALLOWANCE-W1: the roll clears the window's allowance stamp with it, so the
+    # next window is stamped afresh — at the allowance live when IT opens.
     if window_start is not None and (_now() - window_start) > WINDOW:
         used = 0
         window_start = None
+        window_cap = None
         if persist_roll:
             with db._cursor() as cur:
                 cur.execute(
-                    "UPDATE subscribers SET alert_count = 0, alerts_window_start = NULL "
-                    "WHERE chat_id = ?",
+                    "UPDATE subscribers SET alert_count = 0, alerts_window_start = NULL"
+                    + (", alerts_window_cap = NULL" if "alerts_window_cap" in k else "")
+                    + " WHERE chat_id = ?",
                     (chat_id,),
                 )
 
@@ -612,12 +650,15 @@ def get_quota_state(
     stored_day = _m("alerts_day")
     day_used = int(_m("alerts_day_count") or 0) if stored_day == day_key else 0
 
-    pct = (used / ladder.free_monthly) if ladder.free_monthly else 0.0
+    total = effective_free_total(ladder.free_monthly, window_cap, window_start is not None)
+    pct = (used / total) if total else 0.0
     return QuotaState(
         used,
-        ladder.free_monthly,
+        total,
         window_start,
         pct,
+        free_monthly_live=ladder.free_monthly,
+        window_cap=window_cap if isinstance(window_cap, int) else None,
         linked_tier=linked_tier,
         day_used=day_used,
         day_total=ladder.free_daily,
@@ -687,8 +728,13 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
     # carries granted user value, and fixing only `alert_count` would close the lost-update
     # class on the counter nobody was losing while leaving it open on the one that costs a
     # user something.
+    #
+    # GROWTH-TG-FREE-ALLOWANCE-W1: the headroom arm reads the EFFECTIVE total (`state.total`); the
+    # window stamp is the LIVE ladder value, because a charge that opens a window records the
+    # allowance that window opens under — and COALESCE keeps any stamp already there.
     charged = db.consume_quota_atomic(
-        chat_id, units, state.total, _utc_day_key(), _now().isoformat()
+        chat_id, units, state.total, _utc_day_key(), _now().isoformat(),
+        window_cap=state.free_monthly_live,
     )
     if charged is None:
         # Subscriber deleted between the read and the charge. Nothing to meter.
@@ -701,6 +747,8 @@ def consume_quota(db: Database, chat_id: int, units: int = 1) -> QuotaState:
         state.total,
         window_start,
         (new_used / state.total) if state.total else 0.0,
+        free_monthly_live=state.free_monthly_live,
+        window_cap=state.window_cap if state.window_cap is not None else state.free_monthly_live,
         referral_bonus_remaining=new_bonus,
         day_used=new_day_used,
         day_total=state.day_total,

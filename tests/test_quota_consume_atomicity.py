@@ -186,7 +186,9 @@ def test_paid_tier_is_still_a_no_op(tmp_db: Database) -> None:
 def test_a_deleted_subscriber_does_not_raise(tmp_db: Database) -> None:
     """The row can vanish between the state read and the charge (a /stop mid-tick). The
     statement matches nothing, RETURNING yields None, and the alert path must not explode."""
-    assert tmp_db.consume_quota_atomic(999_999, 1, 200, "2026-09-04", "2026-09-04T00:00:00") is None
+    assert tmp_db.consume_quota_atomic(
+        999_999, 1, 200, "2026-09-04", "2026-09-04T00:00:00", window_cap=200
+    ) is None
 
 
 # ── RED-verify: prove the suite discriminates ──────────────────────────────

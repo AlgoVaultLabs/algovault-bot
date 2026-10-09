@@ -32,10 +32,32 @@ _CTA = {
     "docs": "https://algovault.com/docs.html",
 }
 
-#: The live response, captured verbatim 2026-09-06 from the real registrar after
-#: GROWTH-TG-PLAN-PICKER-W1 R1 added `price_usd_6month`.
-#: Contract: audits/api-plans-public-shape-snapshot-2026-09-06.json (signal-MCP).
+#: The live response, captured verbatim 2026-10-09T07:53:31Z (cache-busted) from production after
+#: GROWTH-TG-FREE-ALLOWANCE-W1 CH1 (signal `0b1ea5d0`) added `free.telegram` — the bot's OWN
+#: allowance, beside the API pair it used to read.
+#: Contract: audits/api-plans-public-shape-snapshot-2026-10-09.json (signal-MCP).
 LIVE_BODY = {
+    "free": {"monthly_calls": 200, "daily_calls": 100,
+             "telegram": {"monthly_alerts": 100, "daily_alerts": 100}},
+    "tiers": [
+        {"id": "starter", "label": "Starter", "monthly_calls": 10000,
+         "daily_calls": 1000, "price_usd": 9.99, "price_usd_6month": 39.9},
+        {"id": "pro", "label": "Pro", "monthly_calls": 100000,
+         "daily_calls": 10000, "price_usd": 49, "price_usd_6month": 129},
+        {"id": "enterprise", "label": "Enterprise", "monthly_calls": None,
+         "daily_calls": None, "price_usd": None, "price_usd_6month": None},
+    ],
+    "generated_at": "2026-10-09T07:53:31.158Z",
+    "_algovault": _CTA,
+}
+
+#: The response as it was BEFORE GROWTH-TG-FREE-ALLOWANCE-W1 CH1 — captured verbatim 2026-09-06
+#: (then the live body; Contract: audits/api-plans-public-shape-snapshot-2026-09-06.json).
+#:
+#: 🛑 The DEPLOY-ORDER fixture for the per-surface allowance: it carries no `free.telegram`, which
+#: is what an older (or rolled-back) server publishes. The parser must then read the API pair, so
+#: the meter keeps serving the ladder that server actually enforces.
+PRE_TELEGRAM_BODY = {
     "free": {"monthly_calls": 200, "daily_calls": 100},
     "tiers": [
         {"id": "starter", "label": "Starter", "monthly_calls": 10000,
@@ -74,7 +96,7 @@ PRE_PREPAY_BODY = {
 def test_parses_the_live_response() -> None:
     out = parse_ladder(LIVE_BODY)
     assert out == {
-        "free_monthly": 200,
+        "free_monthly": 100,
         "free_daily": 100,
         "starter_price_usd": 9.99,
         "starter_monthly_calls": 10000,
@@ -85,6 +107,48 @@ def test_parses_the_live_response() -> None:
         "pro_daily_calls": 10000,
         "pro_price_usd_6month": 129.0,
     }
+
+
+# ── GROWTH-TG-FREE-ALLOWANCE-W1 R2.1 — the bot reads its OWN allowance ──────────────────────────
+
+
+def test_the_free_allowance_comes_from_free_telegram_not_the_api_pair() -> None:
+    """New body: `free.telegram` is the bot's allowance. The API pair beside it (200) is a
+    different surface's figure and must not leak into the meter."""
+    out = parse_ladder(LIVE_BODY)
+    assert out is not None
+    assert (out["free_monthly"], out["free_daily"]) == (100, 100)
+    assert out["free_monthly"] != LIVE_BODY["free"]["monthly_calls"]
+
+
+def test_an_older_server_falls_back_to_the_api_pair() -> None:
+    """Old body: no `free.telegram` → the API pair, i.e. the ladder that server enforces. This is
+    what makes the two repos' deploy order free."""
+    out = parse_ladder(PRE_TELEGRAM_BODY)
+    assert out is not None
+    assert (out["free_monthly"], out["free_daily"]) == (200, 100)
+
+
+@pytest.mark.parametrize(
+    "telegram",
+    [
+        "not-an-object",
+        {},
+        {"monthly_alerts": 100},                                  # no daily
+        {"monthly_alerts": 0, "daily_alerts": 100},               # zero is not an allowance
+        {"monthly_alerts": -5, "daily_alerts": 100},
+        {"monthly_alerts": "100", "daily_alerts": 100},           # a string is not an int
+        {"monthly_alerts": True, "daily_alerts": 100},            # bool is an int subclass
+        {"monthly_alerts": 100, "daily_alerts": None},
+    ],
+)
+def test_a_garbage_telegram_block_falls_back_to_the_api_pair_as_a_PAIR(telegram) -> None:
+    """Garbage: an unusable block is ignored WHOLE. Taking a usable monthly from it beside the
+    API's daily would serve a ladder nobody published."""
+    body = {**LIVE_BODY, "free": {"monthly_calls": 200, "daily_calls": 100, "telegram": telegram}}
+    out = parse_ladder(body)
+    assert out is not None
+    assert (out["free_monthly"], out["free_daily"]) == (200, 100)
 
 
 def test_a_body_without_the_prepay_field_reads_ABSENT_never_synthetic() -> None:
@@ -151,7 +215,8 @@ def test_a_missing_starter_rung_degrades_only_the_price() -> None:
     body = {**LIVE_BODY, "tiers": [t for t in LIVE_BODY["tiers"] if t["id"] != "starter"]}
     out = parse_ladder(body)
     assert out is not None
-    assert out["free_monthly"] == 200 and out["free_daily"] == 100
+    tg = LIVE_BODY["free"]["telegram"]
+    assert (out["free_monthly"], out["free_daily"]) == (tg["monthly_alerts"], tg["daily_alerts"])
     assert out["starter_price_usd"] is None and out["starter_monthly_calls"] is None
 
 

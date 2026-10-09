@@ -1,0 +1,57 @@
+📖 AlgoVault — full command guide
+
+I send you alerts when the market changes. You pick the coins, timeframes, and alert type.
+New here? Every command works on its own — just type /watch, /scan, or /call and I'll use a smart default.
+
+Every command uses three simple parts:
+• Coin — BTC, ETH, SOL … or a stock like XAU, TSLA, QQQ
+• Timeframe — 1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d
+• Exchange — optional, default Binance
+   HL · Binance · Bybit · OKX · Bitget · Aster · BingX · Gate · HTX · KuCoin · MEXC · Phemex
+
+━━ Get alerts ━━
+🔔 /watch <coin> <timeframe> [exchange] [regime|calls|both]
+Recurring alerts for a coin. Default alert type: calls.
+   /watch                      → BTC 1h on Binance (calls)
+   /watch BTC 4h               → BUY/SELL alerts, BTC 4h
+   /watch ETH 15m Bybit regime → mood-change alerts, ETH 15m on Bybit
+
+🔍 /scan [lens] [how many] [timeframe] [exchange]
+One-time ranking of the top coins with a live BUY/SELL.
+   /scan                       → top 20 by open interest, Binance, 15m
+
+🔁 /scanwatch [lens] [how many] [timeframe] [exchange]
+The scan on repeat — I re-check on your chosen timeframe and message only new BUY/SELL calls.
+   /scanwatch                  → top 20 by open interest, Binance, 15m (re-checked every 15m)
+
+Scan lenses (how to rank the top coins):
+   oi: most open interest (default)
+   volume: most traded (vol)
+   gainers: biggest 24h winners (gain)
+   losers: biggest 24h losers (lose)
+   movers: biggest moves either way (move)
+   funding_positive: crowded longs (pfr)
+   funding_negative: crowded shorts (nfr)
+   volatility: most volatile (atr)
+   oi_change: fastest-rising open interest (oid)
+
+━━ Check right now ━━
+📈 /call <coin> <timeframe> [exchange]     one BUY/SELL/HOLD call (default BTC 1h Binance)
+📊 /regime <coin> <timeframe> [exchange]   the market's mood, 1h/4h/1d (default BTC 1h Binance)
+💰 /funding [how many]                     biggest funding gaps across exchanges (default top 5)
+
+━━ Manage ━━
+📋 /list                          your watchlist
+✂️ /unwatch <coin> <timeframe>    remove one ("all" works for either)
+🧹 /unwatchall                    clear everything
+🔕 /unscanwatch [how many] [timeframe] [exchange]   stop a scan digest
+🎁 /referral                      invite friends, earn rewards
+
+Power moves:
+   /watch BTC all            every timeframe for BTC
+   /watch BTC,ETH,SOL 15m    three coins at once
+   /unwatch BTC all          remove every BTC watch
+
+Free tier: 200 alerts a month, up to 100 a day. Regime and BUY/SELL alerts each use one. Silent HOLDs are free.
+Informational analytics, not financial advice.
+Need more than 200 alerts a month?

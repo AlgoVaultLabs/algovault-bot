@@ -38,6 +38,23 @@ def db(tmp_path) -> Database:
     return Database(str(tmp_path / "t.db"))
 
 
+#: GROWTH-TG-FREE-ALLOWANCE-W1 — at the pinned ladder (M alerts a month beside a D-per-day cap,
+#: with M == D) the daily wall can never bind before the monthly one: the monthly wins every tie
+#: (ruling R-2). The daily lane is still live — it binds for a chat whose monthly allowance is
+#: ABOVE the daily cap (a window opened under the old figure, a referral bonus) — so the
+#: daily-wall tests below run against a mirror that publishes such a ladder.
+MM = 2 * D
+
+
+@pytest.fixture()
+def material_db(tmp_path) -> Database:
+    d = Database(str(tmp_path / "m.db"))
+    d.upsert_free_tier_ladder(
+        MM, D, STARTER_PRICE_USD, STARTER_MONTHLY_CALLS, datetime.now(timezone.utc).isoformat()
+    )
+    return d
+
+
 def _set_day(db: Database, chat_id: int, day: str, count: int) -> None:
     """Force a subscriber's daily meter to a given (day, count) — the roll's only input."""
     with db._cursor() as cur:
@@ -70,8 +87,9 @@ def test_monthly_wall_is_the_ladder_value(db: Database) -> None:
     assert st.limit_kind == "monthly"
 
 
-def test_daily_wall_binds_well_below_the_monthly_one(db: Database) -> None:
-    """The whole point of the second meter: D alerts in a day refuses, with M-D still unspent."""
+def test_daily_wall_binds_well_below_the_monthly_one(material_db: Database) -> None:
+    """The whole point of the second meter: D alerts in a day refuses, with MM-D still unspent."""
+    db = material_db
     db.upsert_subscriber(2, "u", "en")
     consume_quota(db, 2, D)
     st = get_quota_state(db, 2)
@@ -122,12 +140,13 @@ def test_consuming_after_a_roll_restamps_today(db: Database) -> None:
 # ── the two episode keys ─────────────────────────────────────────────────────────────────────
 
 
-def test_the_daily_notice_re_arms_next_day_while_the_monthly_one_does_not(db: Database) -> None:
+def test_the_daily_notice_re_arms_next_day_while_the_monthly_one_does_not(material_db: Database) -> None:
     """The reason `quota_day_notice_day` exists at all.
 
     Reusing `quota_100_last_fired_at` for the daily wall would announce it at most ONCE EVER: the
     monthly stamp stays >= window_start for up to 30 days, so day 2's wall would be silent.
     """
+    db = material_db
     db.upsert_subscriber(6, "u", "en")
     consume_quota(db, 6, D)
     st = get_quota_state(db, 6)
@@ -155,8 +174,9 @@ def test_the_daily_lane_does_not_touch_the_monthly_stamp(db: Database) -> None:
     assert row["quota_day_notice_day"] == _utc_day_key()
 
 
-def test_evaluate_delivery_projects_the_limit_kind(db: Database) -> None:
+def test_evaluate_delivery_projects_the_limit_kind(material_db: Database) -> None:
     """CH2d single-derivation: the decision names the wall, so copy never re-decides it."""
+    db = material_db
     db.upsert_subscriber(8, "u", "en")
     consume_quota(db, 8, D)
     dec = evaluate_delivery(db, 8)
@@ -243,7 +263,7 @@ def test_a_paid_subscriber_has_no_free_limit_kind(db: Database) -> None:
 # ── the stamping that FOLLOWS the decision (found in review, not by the tests above) ─────────
 
 
-def test_the_free_daily_wall_stamps_its_OWN_key_not_the_monthly_one(db: Database) -> None:
+def test_the_free_daily_wall_stamps_its_OWN_key_not_the_monthly_one(material_db: Database) -> None:
     """`refuse_and_notify` must stamp the episode key `_notice_due` will actually read.
 
     The three lanes wall on three clocks and therefore carry three stamps. Before this test the
@@ -251,6 +271,7 @@ def test_the_free_daily_wall_stamps_its_OWN_key_not_the_monthly_one(db: Database
     never reads — so the notice would have re-fired on every dispatch cycle for as long as the
     user stayed walled, and corrupted the monthly episode key on the way past.
     """
+    db = material_db
     import asyncio
 
     from algovault_bot.quota import refuse_and_notify
@@ -310,7 +331,7 @@ def _notices(db: Database) -> list[tuple[int, str | None]]:
         return [(r["chat_id"], r["limit_kind"]) for r in cur.fetchall()]
 
 
-def test_the_notice_ledger_records_which_wall_fired(db: Database) -> None:
+def test_the_notice_ledger_records_which_wall_fired(material_db: Database) -> None:
     """🛑 Without this, `GROWTH-TG-DAILY-CAP-IMPACT-W1` cannot answer its own question.
 
     `alerts_fired` is written ONLY on the delivered path, so once the daily cap ships it is
@@ -322,6 +343,7 @@ def test_the_notice_ledger_records_which_wall_fired(db: Database) -> None:
     per-episode record. It has to say WHICH wall, or the +30d re-measure reads the daily and
     monthly walls as one undifferentiated count.
     """
+    db = material_db
     import asyncio
 
     from algovault_bot.quota import refuse_and_notify
@@ -336,14 +358,15 @@ def test_the_notice_ledger_records_which_wall_fired(db: Database) -> None:
 
     # monthly wall
     db.upsert_subscriber(31, "u", "en")
-    consume_quota(db, 31, M)
+    consume_quota(db, 31, MM)
     asyncio.run(refuse_and_notify(db, 31, "watch", send=_send, decision=evaluate_delivery(db, 31)))
 
     assert _notices(db) == [(30, "daily"), (31, "monthly")]
 
 
-def test_the_impact_query_can_separate_the_two_walls(db: Database) -> None:
+def test_the_impact_query_can_separate_the_two_walls(material_db: Database) -> None:
     """The exact shape `GROWTH-TG-DAILY-CAP-IMPACT-W1` will run at +30 days."""
+    db = material_db
     import asyncio
 
     from algovault_bot.quota import refuse_and_notify
@@ -351,7 +374,7 @@ def test_the_impact_query_can_separate_the_two_walls(db: Database) -> None:
     async def _send(_t: str, _markup=None) -> bool:
         return True
 
-    for i, units in ((40, D), (41, D), (42, M)):
+    for i, units in ((40, D), (41, D), (42, MM)):
         db.upsert_subscriber(i, "u", "en")
         consume_quota(db, i, units)
         asyncio.run(refuse_and_notify(db, i, "watch", send=_send, decision=evaluate_delivery(db, i)))
@@ -381,12 +404,13 @@ def test_a_pre_migration_row_reads_NULL_not_a_backfilled_guess(db: Database) -> 
 # ── the digest surfaces WHICH wall, so the answer arrives daily instead of once ──────────────
 
 
-def test_the_digest_breaks_notices_out_by_wall(db: Database) -> None:
+def test_the_digest_breaks_notices_out_by_wall(material_db: Database) -> None:
     """GROWTH-TG-QUOTA-PARITY-W1 follow-up: replaces a calendar reminder with a daily signal.
 
     "Re-measure in ~30 days" is prose addressed to whoever happens to read it — the control this
     wave spent three chapters retiring. A daily wall firing is now visible on the day it fires.
     """
+    db = material_db
     import asyncio
 
     from algovault_bot.digest import compute_digest_metrics
@@ -395,7 +419,7 @@ def test_the_digest_breaks_notices_out_by_wall(db: Database) -> None:
     async def _send(_t: str, _markup=None) -> bool:
         return True
 
-    for cid, units in ((60, D), (61, D), (62, M)):
+    for cid, units in ((60, D), (61, D), (62, MM)):
         db.upsert_subscriber(cid, "u", "en")
         consume_quota(db, cid, units)
         asyncio.run(
@@ -409,7 +433,8 @@ def test_the_digest_breaks_notices_out_by_wall(db: Database) -> None:
     assert m.quota_notices_24h == 3
 
 
-def test_the_split_renders_on_the_digest_line(db: Database) -> None:
+def test_the_split_renders_on_the_digest_line(material_db: Database) -> None:
+    db = material_db
     import asyncio
 
     from algovault_bot.digest import render_digest
